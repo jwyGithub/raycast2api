@@ -9,4 +9,5 @@ charles
 protocol_doc
 config.json
 account.json
+accounts.db
 .claude

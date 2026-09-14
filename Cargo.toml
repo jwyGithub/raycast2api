@@ -10,7 +10,7 @@ hmac = "0.13.0"
 sha2 = "0.11.0"
 
 # Async HTTP gateway stack.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 # Async client to the Raycast backend. rustls avoids a system OpenSSL dependency;

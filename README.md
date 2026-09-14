@@ -12,6 +12,7 @@
 - **模型直通**：`GET /v1/models` 透出账号可用模型，可选择是否包含高级 / 已弃用模型。
 - **请求落盘排查**：设置 `DEBUG_DUMP_DIR` 后，每个请求的入站体、上游请求体与上游 SSE 响应会存为文件，便于离线分析。
 - **可选鉴权**：设置 `api_key` 后，所有推理与只读接口都需要携带该 key。
+- **多账号管理**：SQLite 账号池，启动从 `account.json` 导入（email 去重、token 变化自动更新），请求轮询分摊额度；401 / 额度耗尽自动摘除，额度恢复自动上线；每 6 小时后台刷新额度。
 - **双栈监听**：绑定 `0.0.0.0` 时自动同时监听 IPv6 `[::]`。
 
 ## 架构
@@ -44,10 +45,19 @@
 | `GET /v1/models` | 模型列表 | — |
 | `GET /health`, `GET /ready` | 健康检查 | — |
 
+### 账号管理接口
+
+| 路径 | 说明 | 典型客户端 |
+| --- | --- | --- |
+| `GET /v1/accounts` | 账号列表（token 掩码） | — |
+| `POST /v1/accounts` | 新增/更新账号（按 email upsert） | — |
+| `POST /v1/accounts/refresh` | 手动触发额度刷新（202，后台执行） | — |
+| `DELETE /v1/accounts/{email}` | 删除账号 | — |
+
 ## 环境要求
 
 - Rust（edition 2024，建议使用最新稳定版工具链）
-- 一个有效的 Raycast 账号，用于获取 `bearer_token` 与 `device_id`
+- 一个或多个有效的 Raycast 账号，用于提供各账号的 `bearer_token` 与 `device_id`
 
 ## 构建与运行
 
@@ -76,9 +86,9 @@ cp config.example.json config.json
   "host": "0.0.0.0",
   "port": 8787,
   "api_key": "your-api-key-here",
-  "raycast_bearer_token": "your-raycast-bearer-token",
   "raycast_device_id": "your-raycast-device-id",
   "raycast_signature_secret": null,
+  "accounts_db": "accounts.db",
   "show_advanced": true,
   "include_deprecated": true
 }
@@ -88,10 +98,10 @@ cp config.example.json config.json
 
 | 配置项 | 环境变量 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
-| `raycast_bearer_token` | `RAYCAST_BEARER_TOKEN` | 是 | — | Raycast `Authorization: Bearer` 令牌 |
 | `raycast_device_id` | `RAYCAST_DEVICE_ID` | 是 | — | Raycast 设备 ID，同时参与签名计算 |
 | `raycast_signature_secret` | `RAYCAST_SIGNATURE_SECRET` | 否 | 内置默认密钥 | 签名密钥，一般无需设置 |
 | `api_key` | `API_KEY` | 否 | 无 | 网关自身的 API key；不设置则不鉴权 |
+| `accounts_db` | `ACCOUNTS_DB` | 否 | `accounts.db` | 账号池 SQLite 数据库文件路径 |
 | `host` | `HOST` | 否 | `0.0.0.0` | 监听地址（须为 IP） |
 | `port` | `PORT` | 否 | `8787` | 监听端口 |
 | `show_advanced` | `ADVANCED` | 否 | `true` | `/v1/models` 是否包含高级（premium）模型 |
@@ -158,5 +168,5 @@ tests/             契约测试与签名一致性测试
 
 ## 说明
 
-- `bearer_token`、`device_id`、`api_key` 等属于敏感信息，`config.json` 与 `.env` 已在 `.gitignore` 中忽略，请勿提交。
+- `bearer_token`、`device_id`、`api_key` 等属于敏感信息，`config.json`、`account.json` 与 `.env` 已在 `.gitignore` 中忽略，请勿提交。`account.json`（导入账号池）与 `accounts.db`（SQLite 账号库）同样包含明文凭据，切勿暴露。
 - 落盘目录（`DEBUG_DUMP_DIR`）包含完整请求与上游凭证相关数据，**切勿**将其暴露或提交到仓库。

@@ -19,7 +19,7 @@ async fn main() {
         Err(err) => {
             eprintln!("configuration error: {err}");
             eprintln!(
-                "Create a config.json file or set RAYCAST_DEVICE_ID environment variables (see .env.example)."
+                "Create a config.json file or set RAYCAST_DEVICE_ID (see config.example.json)."
             );
             std::process::exit(1);
         }
@@ -40,7 +40,19 @@ async fn main() {
     }
 
     let client = RaycastClient::new(http, settings.clone(), accounts.clone());
-    let state = Arc::new(AppState::new(settings.clone(), client.clone(), accounts));
+    let state = Arc::new(AppState::new(settings.clone(), client.clone(), accounts.clone()));
+
+    // 启动立即刷新一遍账号额度,之后每 6 小时一遍;失败只记日志。
+    {
+        let accounts = accounts;
+        let client = client;
+        tokio::spawn(async move {
+            loop {
+                raycast2api::account::refresh::refresh_all(&accounts, &client).await;
+                tokio::time::sleep(raycast2api::account::refresh::REFRESH_INTERVAL).await;
+            }
+        });
+    }
 
     let listener = match tokio::net::TcpListener::bind(settings.bind_addr).await {
         Ok(listener) => listener,
