@@ -19,7 +19,7 @@ async fn main() {
         Err(err) => {
             eprintln!("configuration error: {err}");
             eprintln!(
-                "Create a config.json file or set RAYCAST_BEARER_TOKEN and RAYCAST_DEVICE_ID environment variables (see .env.example)."
+                "Create a config.json file or set RAYCAST_DEVICE_ID environment variables (see .env.example)."
             );
             std::process::exit(1);
         }
@@ -29,7 +29,7 @@ async fn main() {
         .build()
         .expect("failed to build HTTP client");
 
-    let db = raycast2api::db::Db::open("accounts.db").unwrap_or_else(|e| {
+    let db = raycast2api::db::Db::open(&settings.accounts_db).unwrap_or_else(|e| {
         eprintln!("accounts db error: {e}");
         std::process::exit(1);
     });
