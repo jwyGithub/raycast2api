@@ -29,7 +29,17 @@ async fn main() {
         .build()
         .expect("failed to build HTTP client");
 
-    let client = RaycastClient::new(http, settings.clone());
+    let db = raycast2api::db::Db::open("accounts.db").unwrap_or_else(|e| {
+        eprintln!("accounts db error: {e}");
+        std::process::exit(1);
+    });
+    let accounts = Arc::new(raycast2api::account::store::AccountStore::new(db));
+    if let Err(err) = raycast2api::account::import::import_file(&accounts, "account.json") {
+        eprintln!("account import error: {err}");
+        std::process::exit(1);
+    }
+
+    let client = RaycastClient::new(http, settings.clone(), accounts);
     let state = Arc::new(AppState::new(settings.clone(), client));
 
     let listener = match tokio::net::TcpListener::bind(settings.bind_addr).await {

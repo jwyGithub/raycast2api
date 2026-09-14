@@ -8,6 +8,7 @@ use std::sync::Arc;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 
+use crate::account::store::AccountStore;
 use crate::config::{RAYCAST_API_URL, RAYCAST_MODELS_URL, Settings, USER_AGENT};
 use crate::debug;
 use crate::error::GatewayError;
@@ -21,18 +22,34 @@ use super::wire::{RaycastChatRequest, RaycastModelsResponse, RaycastRawModel};
 pub struct RaycastClient {
     http: Client,
     settings: Arc<Settings>,
+    /// 账号池:每次请求轮询取一个可用账号的 token。
+    accounts: Arc<AccountStore>,
 }
 
 impl RaycastClient {
-    pub fn new(http: Client, settings: Arc<Settings>) -> Self {
-        Self { http, settings }
+    pub fn new(http: Client, settings: Arc<Settings>, accounts: Arc<AccountStore>) -> Self {
+        Self {
+            http,
+            settings,
+            accounts,
+        }
+    }
+
+    /// 账号池(刷新任务与测试使用)。
+    pub fn accounts(&self) -> &Arc<AccountStore> {
+        &self.accounts
     }
 
     /// Common headers shared by every request. When `signature` is `Some`, the
     /// timestamp/signature pair (present only for signed POSTs) is included.
-    fn base_headers(&self, timestamp: Option<&str>, signature: Option<&str>) -> HeaderMap {
+    fn base_headers(
+        &self,
+        bearer: &str,
+        timestamp: Option<&str>,
+        signature: Option<&str>,
+    ) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        let bearer = format!("Bearer {}", self.settings.raycast_bearer_token);
+        let bearer = format!("Bearer {bearer}");
         // These values come from config/HMAC output and are always valid header text.
         headers.insert(
             "Authorization",
@@ -62,6 +79,7 @@ impl RaycastClient {
         &self,
         request: &RaycastChatRequest,
     ) -> Result<reqwest::Response, GatewayError> {
+        let account = self.accounts.next_available()?;
         let body = serde_json::to_string(request)?;
         let timestamp = unix_secs().to_string();
         let signature = calculate_signature_v2(
@@ -71,7 +89,8 @@ impl RaycastClient {
             self.settings.signature_secret(),
         );
 
-        let mut headers = self.base_headers(Some(&timestamp), Some(&signature));
+        let mut headers =
+            self.base_headers(&account.access_token, Some(&timestamp), Some(&signature));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         headers.insert("Accept", HeaderValue::from_static("text/event-stream"));
 
@@ -94,12 +113,22 @@ impl RaycastClient {
             .send()
             .await?;
 
-        ensure_success(response).await
+        match ensure_success(response).await {
+            Ok(response) => Ok(response),
+            // 401 = 该账号 token 失效:摘除后返回错误,下次请求自动换号。
+            Err(err @ GatewayError::Upstream { status: 401, .. }) => {
+                self.accounts
+                    .mark_unavailable(&account.email, "token 失效 (401)");
+                Err(err)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Fetch the raw list of models available to the account.
     pub async fn fetch_models(&self) -> Result<Vec<RaycastRawModel>, GatewayError> {
-        let mut headers = self.base_headers(None, None);
+        let account = self.accounts.next_available()?;
+        let mut headers = self.base_headers(&account.access_token, None, None);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
         let response = self
