@@ -21,22 +21,30 @@
 ## 模块结构(遵循现有分层)
 
 ```
-src/account/            新顶层模块:与具体 HTTP/协议层解耦的账号域
+src/db.rs               新顶层模块:共享 SQLite 基础设施,不含任何业务表知识
+                        Db = Arc<Mutex<Connection>>(bundled rusqlite)
+                        open(path)、conn() 访问器、execute_batch 辅助
+src/account/            新顶层模块:账号域,建在 Db 之上
   mod.rs      模块文档 + re-export
-  store.rs    AccountStore:SQLite 连接、建表、CRUD、轮询选号、401 摘除
+  store.rs    AccountStore:包装 Db;accounts 建表 DDL、CRUD、轮询选号、401 摘除
   import.rs   account.json 反序列化与启动导入(upsert 三态语义)
   wire.rs     对外 JSON 形状:AccountRecord(导入/POST 请求体)、
               AccountView(GET 列表响应,token 掩码)
 src/server/handlers/accounts.rs   三个路由 handler,薄壳,只做提取与渲染
 ```
 
-依赖方向:`server` → `account`;`raycast::client` 构造时注入
-`Arc<AccountStore>`(与现有 `Settings` 注入方式一致)。`account` 不依赖
-`server`/`raycast`,可独立测试。
+依赖方向:`server` → `account` → `db`;`raycast::client` 构造时注入
+`Arc<AccountStore>`(与现有 `Settings` 注入方式一致)。
+
+**扩展方式**:后续模块(用量统计、会话等)同样建在 `db` 之上 —— 各自的
+`store` 持有 `Db`、自己执行 `CREATE TABLE IF NOT EXISTS`。`db.rs` 不出现
+任何具体表;新增使用方不需要改动 `db.rs`,只在 `main` 装配时多一行。
+SQLite 路径、连接策略(bundled、WAL、busy timeout)集中在一处。
 
 技术选型:`rusqlite`(feature = "bundled"),`Arc<Mutex<Connection>>` 包
 同步连接;轮询计数器 `AtomicUsize` 存于 `AccountStore`。网关流量下锁竞争
-可忽略;换异步驱动(sqlx 等)时只动 `store.rs` 一个文件。
+可忽略;换异步驱动(sqlx 等)时只动 `db.rs` 一个文件,各业务 store 的
+函数签名从 `&Db` 出发,不受影响。
 
 ## 表结构
 
