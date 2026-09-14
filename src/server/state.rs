@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 
+use crate::account::store::AccountStore;
 use crate::config::{DEFAULT_INTERNAL_MODEL, DEFAULT_PROVIDER, Settings};
 use crate::error::GatewayError;
 use crate::raycast::client::RaycastClient;
@@ -22,6 +23,8 @@ pub struct AppState {
     pub settings: Arc<Settings>,
     pub client: RaycastClient,
     pub health: BackendHealth,
+    /// 账号池(账号 CRUD 接口与刷新触发使用)。
+    pub accounts: Arc<AccountStore>,
     models_cache: RwLock<Option<ModelsCache>>,
 }
 
@@ -31,11 +34,16 @@ struct ModelsCache {
 }
 
 impl AppState {
-    pub fn new(settings: Arc<Settings>, client: RaycastClient) -> Self {
+    pub fn new(
+        settings: Arc<Settings>,
+        client: RaycastClient,
+        accounts: Arc<AccountStore>,
+    ) -> Self {
         Self {
             settings,
             client,
             health: BackendHealth::default(),
+            accounts,
             models_cache: RwLock::new(None),
         }
     }

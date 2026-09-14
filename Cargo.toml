@@ -34,3 +34,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 [dev-dependencies]
 # Used by examples/chat_cli.rs to run the async client from a simple binary.
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Used by contract tests to drive the router in-process (`oneshot`).
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -39,8 +39,8 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let client = RaycastClient::new(http, settings.clone(), accounts);
-    let state = Arc::new(AppState::new(settings.clone(), client));
+    let client = RaycastClient::new(http, settings.clone(), accounts.clone());
+    let state = Arc::new(AppState::new(settings.clone(), client.clone(), accounts));
 
     let listener = match tokio::net::TcpListener::bind(settings.bind_addr).await {
         Ok(listener) => listener,
