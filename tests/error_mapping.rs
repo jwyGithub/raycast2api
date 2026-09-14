@@ -44,6 +44,14 @@ fn maps_variants_to_expected_status_codes() {
 }
 
 #[test]
+fn no_account_maps_to_503() {
+    assert_eq!(
+        status_of(GatewayError::NoAccount("no available account".into())),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[test]
 fn display_preserves_client_message() {
     let err = GatewayError::BadRequest("Missing or invalid 'messages' field".into());
     assert_eq!(err.to_string(), "Missing or invalid 'messages' field");
