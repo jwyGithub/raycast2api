@@ -10,7 +10,7 @@
 - **流式与非流式**：三条路径都同时支持 SSE 流式与聚合后的非流式响应。
 - **请求签名**：自动计算 Raycast 所需的 `X-Raycast-Signature-v2` 头（ROT13/ROT5 + HMAC-SHA256）。
 - **模型直通**：`GET /v1/models` 透出账号可用模型，可选择是否包含高级 / 已弃用模型。
-- **本地调试控制台**：内置 `/debug/console`，实时查看进出网关的请求（默认不鉴权，仅供本地使用）。
+- **请求落盘排查**：设置 `DEBUG_DUMP_DIR` 后，每个请求的入站体、上游请求体与上游 SSE 响应会存为文件，便于离线分析。
 - **可选鉴权**：设置 `api_key` 后，所有推理与只读接口都需要携带该 key。
 - **双栈监听**：绑定 `0.0.0.0` 时自动同时监听 IPv6 `[::]`。
 
@@ -30,7 +30,7 @@
 - `raycast` — 唯一与上游耦合的层：请求构造器、SSE 解析器、签名客户端（④⑦）
 - `signature` — `X-Raycast-Signature-v2` 计算
 - `server` — HTTP 层：状态、中间件、路由、handler
-- `debug` — 调试控制台的进程内事件总线
+- `debug` — 请求落盘（`DEBUG_DUMP_DIR`）与请求关联 id
 
 详细设计与时序图见 [`doc/architecture.md`](./doc/architecture.md)、[`doc/sequence-diagrams.md`](./doc/sequence-diagrams.md)，上游抓包协议见 [`doc/raycast-backend-protocol.md`](./doc/raycast-backend-protocol.md)。
 
@@ -43,7 +43,6 @@
 | `POST /v1/chat/completions` | OpenAI Chat Completions | 各类 OpenAI 兼容客户端 |
 | `GET /v1/models` | 模型列表 | — |
 | `GET /health`, `GET /ready` | 健康检查 | — |
-| `GET /debug/console`, `GET /debug/events` | 本地调试控制台（不鉴权） | — |
 
 ## 环境要求
 
@@ -134,8 +133,6 @@ curl http://localhost:8787/v1/messages \
 curl http://localhost:8787/v1/models
 ```
 
-调试控制台（浏览器打开）：`http://localhost:8787/debug/console`
-
 ## 测试
 
 ```bash
@@ -154,7 +151,7 @@ src/
   protocol/        chat_completions / messages / responses 三套适配器
   raycast/         上游客户端、请求构造、SSE 解析、模型解析
   server/          路由、中间件（鉴权/调试捕获）、handler、状态
-  debug.rs         调试控制台事件总线
+  debug.rs         请求落盘与关联 id
 doc/               架构、时序图、上游协议抓包说明
 tests/             契约测试与签名一致性测试
 ```
@@ -162,4 +159,4 @@ tests/             契约测试与签名一致性测试
 ## 说明
 
 - `bearer_token`、`device_id`、`api_key` 等属于敏感信息，`config.json` 与 `.env` 已在 `.gitignore` 中忽略，请勿提交。
-- `/debug/*` 有意不鉴权，**切勿**将其暴露到公网。
+- 落盘目录（`DEBUG_DUMP_DIR`）包含完整请求与上游凭证相关数据，**切勿**将其暴露或提交到仓库。

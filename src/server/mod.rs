@@ -24,7 +24,8 @@ pub fn build_router(state: SharedState) -> Router {
         .max_age(std::time::Duration::from_secs(86_400));
 
     // Inference endpoints additionally get the debug-capture layer, which
-    // records the inbound request for the dev console. It sits *inside* the
+    // records the inbound request (file dump via DEBUG_DUMP_DIR) and scopes
+    // the request id for correlating upstream dumps. It sits *inside* the
     // auth layer (added below), so unauthenticated requests are never captured.
     let inference = Router::new()
         .route(
@@ -33,10 +34,7 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/v1/messages", post(handlers::messages::messages))
         .route("/v1/responses", post(handlers::responses::responses))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            middleware::debug_capture,
-        ));
+        .layer(axum::middleware::from_fn(middleware::debug_capture));
 
     // The authenticated API surface: inference plus the read-only endpoints.
     let api = inference
@@ -48,14 +46,7 @@ pub fn build_router(state: SharedState) -> Router {
             middleware::require_api_key,
         ));
 
-    // The local dev console (live monitor + UI). Deliberately unauthenticated
-    // so it works in dev without a key — do not expose `/debug/*` publicly.
-    let debug = Router::new()
-        .route("/debug/console", get(handlers::debug::console))
-        .route("/debug/events", get(handlers::debug::events));
-
-    api.merge(debug)
-        .fallback(handlers::not_found)
+    api.fallback(handlers::not_found)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

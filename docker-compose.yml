@@ -1,0 +1,39 @@
+# docker-compose.yml — 运行 raycast2api 网关
+#
+# 快速开始：
+#   1. 在同目录建一个 .env 文件，至少填入：
+#        RAYCAST_BEARER_TOKEN=你的令牌
+#        RAYCAST_DEVICE_ID=你的设备ID
+#   2. docker compose up -d
+#
+# 说明：所有可选项留空即视为“未设置”（网关内部把空字符串当作 None）。
+
+services:
+  raycast2api:
+    # 默认拉取 CI 发布到 GHCR 的镜像；可用 RAYCAST2API_TAG 固定版本（如 0.0.1 / 0.0）。
+    image: ghcr.io/jwygithub/raycast2api:${RAYCAST2API_TAG:-latest}
+    # 想用本地源码构建时，注释掉上面的 image，改用：
+    # build: .
+    container_name: raycast2api
+    restart: unless-stopped
+    ports:
+      # 左侧是宿主机端口（可用 PORT 覆盖），右侧是容器内固定端口 8787。
+      - "${PORT:-8787}:8787"
+    environment:
+      # ---- 必填：Raycast 凭据（在 .env 中设置，未设置会直接报错退出）----
+      RAYCAST_BEARER_TOKEN: ${RAYCAST_BEARER_TOKEN:?请在 .env 中设置 RAYCAST_BEARER_TOKEN}
+      RAYCAST_DEVICE_ID: ${RAYCAST_DEVICE_ID:?请在 .env 中设置 RAYCAST_DEVICE_ID}
+      # ---- 可选（留空即为未设置）----
+      API_KEY: ${API_KEY:-}                                    # 网关自身 API key；留空 = 不鉴权
+      RAYCAST_SIGNATURE_SECRET: ${RAYCAST_SIGNATURE_SECRET:-}  # 留空 = 使用内置默认密钥
+      ADVANCED: ${ADVANCED:-true}                              # /v1/models 是否包含高级（premium）模型
+      INCLUDE_DEPRECATED: ${INCLUDE_DEPRECATED:-true}          # /v1/models 是否包含已弃用模型
+      RUST_LOG: ${RUST_LOG:-info}                              # 日志级别（tracing env-filter）
+      # HOST/PORT 沿用镜像默认 0.0.0.0:8787，通常无需覆盖。
+    # 若更倾向用 config.json 而非环境变量：删掉上面的 environment，取消下面挂载，
+    # 并把凭据写进项目根目录的 config.json（容器内工作目录为 /，故挂到 /config.json）。
+    # volumes:
+    #   - ./config.json:/config.json:ro
+    #
+    # 备注：运行镜像基于 debian-slim，未内置 curl/wget，故不设 healthcheck；
+    # 如需健康探测，可在编排层对 http://<host>:8787/health 做外部检查。

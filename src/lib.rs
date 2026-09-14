@@ -5,7 +5,7 @@
 //!
 //! * [`config`]    — static endpoints and runtime [`config::Settings`].
 //! * [`core`]      — the canonical, protocol- and provider-agnostic model.
-//! * [`debug`]     — the local dev console's in-process event bus.
+//! * [`debug`]     — request-dump support (files under `DEBUG_DUMP_DIR`).
 //! * [`error`]     — the unified [`error::GatewayError`] (OpenAI-style output).
 //! * [`signature`] — the `X-Raycast-Signature-v2` computation.
 //! * [`raycast`]   — the upstream provider (async client, wire types, SSE).

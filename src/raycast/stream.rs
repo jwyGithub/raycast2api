@@ -15,23 +15,44 @@ use async_stream::stream;
 use futures_util::{Stream, StreamExt};
 
 use crate::core::event::CanonicalEvent;
+use crate::debug;
 
 use super::parser::parse_events;
 use super::sse::SseDecoder;
 
 /// Decode a Raycast chat SSE response into a stream of [`CanonicalEvent`]s.
 pub fn canonical_events(response: reqwest::Response) -> impl Stream<Item = CanonicalEvent> {
+    // Grab the correlation id *here*: the task-local REQUEST_ID scope is only
+    // valid inside the handler, while the stream below is polled outside it.
+    // The stream! block is an async move, so both are moved into it.
+    let id = debug::current_request_id();
+    let dump = debug::dump_enabled();
+
     stream! {
+        let mut payloads: Vec<String> = Vec::new();
         let mut bytes = response.bytes_stream();
         let mut decoder = SseDecoder::new();
 
         while let Some(chunk) = bytes.next().await {
             let Ok(chunk) = chunk else { break };
             for payload in decoder.push_bytes(&chunk) {
+                if dump {
+                    payloads.push(payload.clone());
+                }
                 // ponytail: 打印原始 SSE 数据用于调试
                 tracing::debug!("upstream SSE payload: {}", payload);
 
                 for event in parse_events(&payload) {
+                    // The outbound adapters stop polling the stream at `Finish`,
+                    // so this generator's tail code never runs on the streaming
+                    // path — dump as soon as the terminating payload is seen.
+                    // Anything after it is `[DONE]` / notifications.
+                    if dump && matches!(event, CanonicalEvent::Finish { .. }) {
+                        debug::dump(
+                            &format!("{id}-upstream-response.ndjson"),
+                            &payloads.join("\n"),
+                        );
+                    }
                     // 打印解析后的规范事件
                     match &event {
                         CanonicalEvent::TextDelta(text) => {
@@ -54,6 +75,11 @@ pub fn canonical_events(response: reqwest::Response) -> impl Stream<Item = Canon
                     yield event;
                 }
             }
+        }
+
+        // One raw `data:` payload per line, exactly as the upstream sent it.
+        if dump {
+            debug::dump(&format!("{id}-upstream-response.ndjson"), &payloads.join("\n"));
         }
     }
 }

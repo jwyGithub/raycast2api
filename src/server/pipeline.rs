@@ -43,10 +43,14 @@ pub async fn run<O: OutboundAdapter>(
     let events = canonical_events(response);
 
     if request.stream {
-        Ok(O::stream(&client_model, events))
+        Ok(O::stream_with_tools(&client_model, &request.tools, events))
     } else {
         let aggregated = aggregate(events).await;
-        Ok(O::render_complete(&client_model, &aggregated))
+        Ok(O::render_complete_with_tools(
+            &client_model,
+            &request.tools,
+            &aggregated,
+        ))
     }
 }
 

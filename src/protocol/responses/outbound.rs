@@ -19,6 +19,7 @@
 //! `response.created` advertises `usage: null` and the real token counts land in
 //! the terminating `response.completed`.
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 
 use async_stream::stream;
@@ -31,6 +32,7 @@ use serde_json::{Value, json};
 use crate::core::event::CanonicalEvent;
 use crate::core::message::ToolCall;
 use crate::core::response::CanonicalResponse;
+use crate::core::tools::ToolDef;
 use crate::error::GatewayError;
 use crate::protocol::OutboundAdapter;
 use crate::util::{new_uuid, unix_secs};
@@ -47,7 +49,37 @@ impl OutboundAdapter for ResponsesOutbound {
         Json(response_object(model, response)).into_response()
     }
 
+    /// Freeform (`custom`) tool calls render as `custom_tool_call` items with
+    /// the raw text `input`, so clients like codex execute them natively.
+    fn render_complete_with_tools(
+        model: &str,
+        tools: &[ToolDef],
+        response: &CanonicalResponse,
+    ) -> Response {
+        Json(response_object_with_tools(model, &custom_names(tools), response)).into_response()
+    }
+
     fn stream<S>(model: &str, events: S) -> Response
+    where
+        S: Stream<Item = CanonicalEvent> + Send + 'static,
+    {
+        Self::stream_impl(model, HashSet::new(), events)
+    }
+
+    fn stream_with_tools<S>(model: &str, tools: &[ToolDef], events: S) -> Response
+    where
+        S: Stream<Item = CanonicalEvent> + Send + 'static,
+    {
+        Self::stream_impl(model, custom_names(tools), events)
+    }
+
+    fn render_error(error: GatewayError) -> Response {
+        super::error::render(error)
+    }
+}
+
+impl ResponsesOutbound {
+    fn stream_impl<S>(model: &str, custom: HashSet<String>, events: S) -> Response
     where
         S: Stream<Item = CanonicalEvent> + Send + 'static,
     {
@@ -57,6 +89,7 @@ impl OutboundAdapter for ResponsesOutbound {
 
         let sse = stream! {
             let mut encoder = StreamEncoder::new(id, model, created_at);
+            encoder.set_custom(custom);
             yield to_event(&encoder.created());
 
             let mut events = Box::pin(events);
@@ -77,14 +110,20 @@ impl OutboundAdapter for ResponsesOutbound {
 
         Sse::new(sse).into_response()
     }
-
-    fn render_error(error: GatewayError) -> Response {
-        super::error::render(error)
-    }
 }
 
 /// Fold a fully-aggregated canonical response into a Responses `response` object.
 pub fn response_object(model: &str, response: &CanonicalResponse) -> ResponseObject {
+    response_object_with_tools(model, &HashSet::new(), response)
+}
+
+/// [`response_object`] knowing which tools are freeform (`custom`): their
+/// calls render as `custom_tool_call` items with the raw text `input`.
+pub fn response_object_with_tools(
+    model: &str,
+    custom: &HashSet<String>,
+    response: &CanonicalResponse,
+) -> ResponseObject {
     let mut output = Vec::new();
 
     if !response.reasoning.is_empty() {
@@ -99,13 +138,23 @@ pub fn response_object(model: &str, response: &CanonicalResponse) -> ResponseObj
         output.push(message_item(response.text.clone()));
     }
     for call in &response.tool_calls {
-        output.push(OutputItem::FunctionCall {
-            id: format!("fc_{}", new_uuid()),
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            arguments: call.arguments.clone(),
-            status: "completed",
-        });
+        if custom.contains(&call.name) {
+            output.push(OutputItem::CustomToolCall {
+                id: format!("ctc_{}", new_uuid()),
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                input: custom_input(&call.arguments),
+                status: "completed",
+            });
+        } else {
+            output.push(OutputItem::FunctionCall {
+                id: format!("fc_{}", new_uuid()),
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                status: "completed",
+            });
+        }
     }
     // A completed response always carries at least one output item.
     if output.is_empty() {
@@ -194,6 +243,9 @@ pub struct StreamEncoder {
     items: Vec<Value>,
     usage: ResponseUsage,
     finalized: bool,
+    /// Names of freeform (`custom`) tools: their calls emit
+    /// `custom_tool_call` items with the raw text `input`.
+    custom: HashSet<String>,
 }
 
 impl StreamEncoder {
@@ -208,7 +260,13 @@ impl StreamEncoder {
             items: Vec::new(),
             usage: ResponseUsage::default(),
             finalized: false,
+            custom: HashSet::new(),
         }
+    }
+
+    /// Record the freeform tool names (from the request's tool definitions).
+    pub fn set_custom(&mut self, custom: HashSet<String>) {
+        self.custom = custom;
     }
 
     /// The opening `response.created` frame (empty output; usage filled at the end).
@@ -268,7 +326,11 @@ impl StreamEncoder {
             }
             CanonicalEvent::ToolCall(call) => {
                 let mut frames = self.close_current();
-                frames.extend(self.emit_function_call(call));
+                if self.custom.contains(&call.name) {
+                    frames.extend(self.emit_custom_call(call));
+                } else {
+                    frames.extend(self.emit_function_call(call));
+                }
                 frames
             }
             CanonicalEvent::Finish { usage, .. } => {
@@ -521,6 +583,70 @@ impl StreamEncoder {
         frames
     }
 
+    /// Emit a whole `custom_tool_call` item (added → input delta → input done
+    /// → item done) in one step, recording it for the response. The raw text
+    /// is unwrapped from the bridged `{"input": ...}` arguments.
+    fn emit_custom_call(&mut self, call: ToolCall) -> Vec<SseFrame> {
+        let index = self.next_index;
+        self.next_index += 1;
+        let id = format!("ctc_{}", new_uuid());
+        let input = custom_input(&call.arguments);
+
+        let mut frames = Vec::new();
+        frames.push(self.frame(
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "output_index": index,
+                "item": {
+                    "id": id,
+                    "type": "custom_tool_call",
+                    "status": "in_progress",
+                    "call_id": call.id,
+                    "name": call.name,
+                    "input": "",
+                },
+            }),
+        ));
+        frames.push(self.frame(
+            "response.custom_tool_call_input.delta",
+            json!({
+                "type": "response.custom_tool_call_input.delta",
+                "item_id": id,
+                "output_index": index,
+                "delta": input,
+            }),
+        ));
+        frames.push(self.frame(
+            "response.custom_tool_call_input.done",
+            json!({
+                "type": "response.custom_tool_call_input.done",
+                "item_id": id,
+                "output_index": index,
+                "input": input,
+            }),
+        ));
+
+        let final_item = json!({
+            "id": id,
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": call.id,
+            "name": call.name,
+            "input": input,
+        });
+        self.items.push(final_item.clone());
+        frames.push(self.frame(
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": index,
+                "item": final_item,
+            }),
+        ));
+        frames
+    }
+
     /// A snapshot `response` object for `response.created` / `response.completed`,
     /// carrying the items assembled so far.
     fn response_snapshot(&self, status: &'static str, usage: Value) -> Value {
@@ -544,6 +670,26 @@ impl StreamEncoder {
         }
         SseFrame { event, data }
     }
+}
+
+/// The names of the freeform (`custom`) tools among a request's definitions.
+fn custom_names(tools: &[ToolDef]) -> HashSet<String> {
+    tools
+        .iter()
+        .filter_map(|tool| match tool {
+            ToolDef::Custom { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Unwrap a freeform tool's raw text from the bridged single-`input` JSON
+/// arguments; anything that isn't `{"input": "..."}` passes through as-is.
+fn custom_input(arguments: &str) -> String {
+    serde_json::from_str::<Value>(arguments)
+        .ok()
+        .and_then(|v| v.get("input").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| arguments.to_string())
 }
 
 /// Serialize a frame into a named SSE event.

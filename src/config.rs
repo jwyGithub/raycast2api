@@ -5,6 +5,7 @@
 //! or environment variables as fallback.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
 /// Endpoint that streams AI chat completions as Server-Sent Events.
@@ -36,6 +37,10 @@ pub struct ConfigFile {
     pub raycast_signature_secret: Option<String>,
     pub show_advanced: Option<bool>,
     pub include_deprecated: Option<bool>,
+    /// Client-facing model id → gateway model id (e.g. `"gpt-6-astra"` →
+    /// `"openai-gpt-6-astra"`), applied before the upstream model lookup.
+    #[serde(default, alias = "modelOverrides")]
+    pub model_overrides: Option<HashMap<String, String>>,
 }
 
 /// Runtime configuration, loaded once at startup via [`Settings::from_config`].
@@ -57,6 +62,9 @@ pub struct Settings {
     pub show_advanced: bool,
     /// Include deprecated models in `/v1/models`. Default `true`.
     pub include_deprecated: bool,
+    /// Client-facing model id → gateway model id, applied before the upstream
+    /// model lookup. Requests naming an aliased id are sent as the mapped id.
+    pub model_overrides: HashMap<String, String>,
 }
 
 impl Settings {
@@ -133,6 +141,7 @@ impl Settings {
                 "INCLUDE_DEPRECATED",
                 config.include_deprecated.unwrap_or(true),
             ),
+            model_overrides: config.model_overrides.unwrap_or_default(),
         })
     }
 
@@ -178,6 +187,8 @@ impl Settings {
             bind_addr_dual,
             show_advanced: env_flag("ADVANCED", true),
             include_deprecated: env_flag("INCLUDE_DEPRECATED", true),
+            // No env-var form for a map; aliases are config-file only.
+            model_overrides: HashMap::new(),
         })
     }
 

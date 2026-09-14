@@ -73,9 +73,17 @@ pub struct InputItem {
     /// For `function_call`: the raw arguments JSON string.
     #[serde(default)]
     pub arguments: Option<String>,
+    /// For `custom_tool_call`: the raw text input (e.g. JavaScript source).
+    #[serde(default)]
+    pub input: Option<String>,
     /// For `function_call_output`: the tool result (string or typed parts).
     #[serde(default)]
     pub output: Option<ItemContent>,
+    /// For an `additional_tools` item: codex (in its multi-agent mode) ships
+    /// the tool set as a namespaced input item instead of the top-level
+    /// `tools` array.
+    #[serde(default)]
+    pub tools: Vec<InboundTool>,
 }
 
 /// A message's `content` (or a function-call `output`): a plain string or an
@@ -112,7 +120,10 @@ pub struct ContentPartIn {
 
 /// A Responses tool definition. Function tools are flat (`type: "function"`
 /// with `name` / `description` / `parameters` at the top level); built-in tools
-/// (e.g. `{ "type": "web_search_preview" }`) carry only a type.
+/// (e.g. `{ "type": "web_search_preview" }`) carry only a type. Custom tools
+/// (`type: "custom"`) carry a free-text input grammar in `format` instead of a
+/// JSON Schema, and namespace groups (codex `additional_tools`) nest their
+/// members in `tools`.
 #[derive(Debug, Deserialize)]
 pub struct InboundTool {
     #[serde(default, rename = "type")]
@@ -123,6 +134,10 @@ pub struct InboundTool {
     pub description: Option<String>,
     #[serde(default)]
     pub parameters: Value,
+    #[serde(default)]
+    pub format: Option<Value>,
+    #[serde(default)]
+    pub tools: Vec<InboundTool>,
 }
 
 /// Responses `tool_choice`: a mode string (`"auto"` / `"none"` / `"required"`)
@@ -179,6 +194,15 @@ pub enum OutputItem {
         call_id: String,
         name: String,
         arguments: String,
+        status: &'static str,
+    },
+    /// A freeform tool invocation: `input` is the raw text the tool executes
+    /// (codex's `exec` expects JavaScript source here, not JSON).
+    CustomToolCall {
+        id: String,
+        call_id: String,
+        name: String,
+        input: String,
         status: &'static str,
     },
 }

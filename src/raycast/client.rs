@@ -9,7 +9,7 @@ use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 
 use crate::config::{RAYCAST_API_URL, RAYCAST_MODELS_URL, Settings, USER_AGENT};
-use crate::debug::{self, DebugBus, DebugEvent};
+use crate::debug;
 use crate::error::GatewayError;
 use crate::signature::calculate_signature_v2;
 use crate::util::unix_secs;
@@ -21,25 +21,11 @@ use super::wire::{RaycastChatRequest, RaycastModelsResponse, RaycastRawModel};
 pub struct RaycastClient {
     http: Client,
     settings: Arc<Settings>,
-    /// Optional dev-console event bus. When set, [`send_chat`](Self::send_chat)
-    /// publishes the outgoing upstream request for the monitor.
-    debug: Option<DebugBus>,
 }
 
 impl RaycastClient {
     pub fn new(http: Client, settings: Arc<Settings>) -> Self {
-        Self {
-            http,
-            settings,
-            debug: None,
-        }
-    }
-
-    /// Attach a dev-console [`DebugBus`] so upstream requests are published to
-    /// the live monitor. Off by default; wired up in `main` for local dev.
-    pub fn with_debug(mut self, bus: DebugBus) -> Self {
-        self.debug = Some(bus);
-        self
+        Self { http, settings }
     }
 
     /// Common headers shared by every request. When `signature` is `Some`, the
@@ -89,26 +75,15 @@ impl RaycastClient {
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         headers.insert("Accept", HeaderValue::from_static("text/event-stream"));
 
-        // Mirror the fully-signed request to the dev console, correlated to the
-        // inbound request via the task-local id set by `debug_capture`.
-        if let Some(bus) = &self.debug {
-            let header_pairs = headers
-                .iter()
-                .map(|(name, value)| {
-                    [
-                        name.as_str().to_string(),
-                        value.to_str().unwrap_or("<non-utf8>").to_string(),
-                    ]
-                })
-                .collect::<Vec<_>>();
-            bus.publish(DebugEvent::Upstream {
-                id: debug::current_request_id(),
-                ts_ms: debug::now_ms(),
-                method: "POST".to_string(),
-                url: RAYCAST_API_URL.to_string(),
-                headers: header_pairs,
-                body: debug::body_to_value(body.as_bytes()),
-            });
+        // Dump the outgoing upstream body for offline analysis, enabled by
+        // DEBUG_DUMP_DIR and correlated to the inbound request via the
+        // task-local id set by `debug_capture`.
+        let body_value = debug::body_to_value(body.as_bytes());
+        if let Ok(text) = serde_json::to_string_pretty(&body_value) {
+            debug::dump(
+                &format!("{}-upstream.json", debug::current_request_id()),
+                &text,
+            );
         }
 
         let response = self

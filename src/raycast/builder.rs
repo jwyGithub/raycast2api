@@ -177,12 +177,40 @@ fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
                     "parameters": parameters,
                 }
             }),
+            // A freeform tool has no JSON Schema; bridge it as a single
+            // `input` string parameter with the grammar in the description.
+            ToolDef::Custom {
+                name,
+                description,
+                grammar,
+            } => json!({
+                "type": "local_tool",
+                "function": {
+                    "name": name,
+                    "description": custom_description(description, grammar),
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "input": { "type": "string" } },
+                        "required": ["input"],
+                        "additionalProperties": false,
+                    },
+                }
+            }),
             ToolDef::Remote { name } => json!({
                 "type": "remote_tool",
                 "name": name,
             }),
         })
         .collect()
+}
+
+/// A freeform tool's description with its input grammar appended, so the
+/// model sees how to format the `input` string.
+fn custom_description(description: &Option<String>, grammar: &str) -> String {
+    match description {
+        Some(d) if !d.is_empty() => format!("{d}\n\nInput grammar:\n{grammar}"),
+        _ => format!("Input grammar:\n{grammar}"),
+    }
 }
 
 /// The Raycast wire value for a role.

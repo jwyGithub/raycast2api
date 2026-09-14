@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use raycast2api::config::Settings;
-use raycast2api::debug::DebugBus;
 use raycast2api::raycast::client::RaycastClient;
 use raycast2api::server::build_router;
 use raycast2api::server::state::AppState;
@@ -30,11 +29,8 @@ async fn main() {
         .build()
         .expect("failed to build HTTP client");
 
-    // One shared event bus feeds the dev console: the client publishes upstream
-    // requests, the capture middleware (via AppState) publishes inbound ones.
-    let debug = DebugBus::new();
-    let client = RaycastClient::new(http, settings.clone()).with_debug(debug.clone());
-    let state = Arc::new(AppState::new(settings.clone(), client, debug));
+    let client = RaycastClient::new(http, settings.clone());
+    let state = Arc::new(AppState::new(settings.clone(), client));
 
     let listener = match tokio::net::TcpListener::bind(settings.bind_addr).await {
         Ok(listener) => listener,

@@ -1,5 +1,4 @@
-# Keep the build context small. Note: debug/console.html is compiled into the
-# binary via include_str!, so debug/ must NOT be excluded.
+# Keep the build context small.
 /target
 .git
 .github
