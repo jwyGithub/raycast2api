@@ -40,7 +40,7 @@ pub async fn run<O: OutboundAdapter>(
     // The client-facing model id is echoed back verbatim — never the resolved
     // upstream model.
     let client_model = request.model;
-    let events = canonical_events(response);
+    let events = canonical_events(response, state.log.clone());
 
     if request.stream {
         Ok(O::stream_with_tools(&client_model, &request.tools, events))

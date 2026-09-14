@@ -42,7 +42,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/v1/models", get(handlers::models::list_models))
         .route("/health", get(handlers::health::health))
         .route("/ready", get(handlers::health::ready))
-        .layer(axum::middleware::from_fn(middleware::debug_capture))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::debug_capture,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::require_api_key,

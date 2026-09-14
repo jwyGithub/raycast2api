@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use crate::account::store::AccountStore;
 use crate::config::{DEFAULT_INTERNAL_MODEL, DEFAULT_PROVIDER, Settings};
 use crate::error::GatewayError;
+use crate::log::store::RequestLogStore;
 use crate::raycast::client::RaycastClient;
 use crate::raycast::wire::RaycastRawModel;
 
@@ -25,6 +26,8 @@ pub struct AppState {
     pub health: BackendHealth,
     /// 账号池(账号 CRUD 接口与刷新触发使用)。
     pub accounts: Arc<AccountStore>,
+    /// 请求日志存储(推理请求三体采集写入)。
+    pub log: Arc<RequestLogStore>,
     models_cache: RwLock<Option<ModelsCache>>,
 }
 
@@ -38,12 +41,14 @@ impl AppState {
         settings: Arc<Settings>,
         client: RaycastClient,
         accounts: Arc<AccountStore>,
+        log: Arc<RequestLogStore>,
     ) -> Self {
         Self {
             settings,
             client,
             health: BackendHealth::default(),
             accounts,
+            log,
             models_cache: RwLock::new(None),
         }
     }

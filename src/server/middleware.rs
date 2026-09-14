@@ -44,15 +44,16 @@ pub async fn require_api_key(
     Ok(next.run(request).await)
 }
 
-/// Buffer the inbound request body so it can be dumped to a file under
-/// `DEBUG_DUMP_DIR` (no-op when unset), then run the rest of the stack inside
-/// a [`REQUEST_ID`] scope so upstream dumps correlate with it.
+/// Buffer the inbound request body so it can be recorded in the request-log
+/// store, then run the rest of the stack inside a [`REQUEST_ID`] scope so the
+/// upstream and response writes correlate with it.
 ///
 /// The body has to be buffered to be observed, so the request is reassembled
 /// from the captured bytes before it continues — the downstream `Json`
 /// extractor sees exactly what the client sent. Covers all authenticated
-/// routes; it's a no-op cost when dumping is disabled.
+/// routes; log writes are fire-and-forget and never fail the request.
 pub async fn debug_capture(
+    State(state): State<SharedState>,
     request: Request,
     next: Next,
 ) -> Result<Response, GatewayError> {
@@ -62,12 +63,12 @@ pub async fn debug_capture(
         .map_err(|_| GatewayError::BadRequest("request body too large or unreadable".into()))?;
 
     let id = util::new_ulid();
-
-    let body = debug::body_to_value(&bytes);
-    // File dump for offline analysis, enabled by DEBUG_DUMP_DIR.
-    if let Ok(text) = serde_json::to_string_pretty(&body) {
-        debug::dump(&format!("{id}-inbound.json"), &text);
-    }
+    state.log.insert_request(
+        &id,
+        parts.method.as_str(),
+        parts.uri.path(),
+        &debug::body_to_value(&bytes),
+    );
 
     // Rebuild the request with the buffered body and run the handler within the
     // correlation-id scope; the upstream send happens inside this await.
