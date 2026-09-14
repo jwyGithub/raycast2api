@@ -1,0 +1,11 @@
+/target
+
+# Local secrets — keep .env out of version control (.env.example is committed)
+.env
+
+# macOS finder junk
+.DS_Store
+charles
+protocol
+config.json
+.claude

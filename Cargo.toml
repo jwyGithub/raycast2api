@@ -1,0 +1,33 @@
+[package]
+name = "raycast2api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Signature computation (X-Raycast-Signature-v2).
+hex = "0.4.3"
+hmac = "0.13.0"
+sha2 = "0.11.0"
+
+# Async HTTP gateway stack.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+# Async client to the Raycast backend. rustls avoids a system OpenSSL dependency;
+# `stream` enables reading the SSE response body incrementally.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures-util = "0.3"
+# Ergonomic async generators for building the SSE translation stream.
+async-stream = "0.3"
+
+# Serialization for the OpenAI-compatible contract and Raycast wire types.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Structured logging.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Used by examples/chat_cli.rs to run the async client from a simple binary.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
