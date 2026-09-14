@@ -105,3 +105,16 @@ async fn missing_api_key_is_unauthorized() {
     let (status, _) = get(&app, "/v1/logs", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn non_inference_routes_are_not_captured() {
+    let (app, log) = app();
+    // /health is auth-exempt; a probe must not write a log row.
+    let (status, _) = get(&app, "/health", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(log.list(50, None).is_empty());
+    // An authenticated non-inference route is not captured either.
+    let (status, _) = get(&app, "/v1/logs", Some("test-key")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(log.list(50, None).is_empty());
+}

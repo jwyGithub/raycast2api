@@ -93,10 +93,10 @@ impl RequestLogStore {
         let conn = self.db.lock();
         let sql = match before_id {
             Some(_) => "SELECT id, request_id, created_at, method, path,
-                    length(inbound_json), length(upstream_json), length(response_text)
+                    octet_length(inbound_json), octet_length(upstream_json), octet_length(response_text)
                 FROM request_logs WHERE id < ?1 ORDER BY id DESC LIMIT ?2",
             None => "SELECT id, request_id, created_at, method, path,
-                    length(inbound_json), length(upstream_json), length(response_text)
+                    octet_length(inbound_json), octet_length(upstream_json), octet_length(response_text)
                 FROM request_logs ORDER BY id DESC LIMIT ?1",
         };
         let mut stmt = match conn.prepare(sql) {
@@ -253,6 +253,16 @@ mod tests {
         assert_eq!(e.inbound_bytes, Some(inbound_len));
         assert_eq!(e.response_bytes, Some(5));
         assert_eq!(e.upstream_bytes, None);
+    }
+
+    #[test]
+    fn entry_sizes_count_bytes_not_characters() {
+        let s = store();
+        s.insert_request("r1", "POST", "/a", &json!({"x": 1}));
+        // "你好" is 6 bytes in UTF-8 but only 2 characters.
+        s.update_response("r1", "你好");
+        let e = &s.list(50, None)[0];
+        assert_eq!(e.response_bytes, Some(6));
     }
 
     #[test]

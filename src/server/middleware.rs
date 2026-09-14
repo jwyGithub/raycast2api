@@ -48,21 +48,25 @@ pub async fn require_api_key(
 /// store, then run the rest of the stack inside a [`REQUEST_ID`] scope so the
 /// upstream and response writes correlate with it.
 ///
-/// The body has to be buffered to be observed, so the request is reassembled
-/// from the captured bytes before it continues — the downstream `Json`
-/// extractor sees exactly what the client sent. Covers all authenticated
-/// routes except the log-query endpoints (which must not grow the log as a
-/// side effect of being read); log writes are fire-and-forget and never fail
-/// the request.
+/// Scope is inference-only (see the request-log spec): only the three
+/// inference POST routes are captured. The body has to be buffered to be
+/// observed, so the request is reassembled from the captured bytes before it
+/// continues — the downstream `Json` extractor sees exactly what the client
+/// sent. Log writes are fire-and-forget and never fail the request.
 pub async fn debug_capture(
     State(state): State<SharedState>,
     request: Request,
     next: Next,
 ) -> Result<Response, GatewayError> {
-    // Log reads are observability traffic: capturing them would insert a row
-    // on every page fetch and shift pagination under the reader.
+    // Only inference requests are logged (see the request-log spec): probe
+    // endpoints must not write rows, and read routes (models/accounts/logs)
+    // would pollute the log and shift pagination under the reader.
     let path = request.uri().path();
-    if path == "/v1/logs" || path.starts_with("/v1/logs/") {
+    let is_inference = matches!(
+        path,
+        "/v1/chat/completions" | "/v1/messages" | "/v1/responses"
+    );
+    if !is_inference {
         return Ok(next.run(request).await);
     }
 
