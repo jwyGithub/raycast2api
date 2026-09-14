@@ -6,7 +6,8 @@
 ## 目标
 
 网关支持多个 Raycast 账号:SQLite 持久化、启动时从 `account.json` 导入、
-上游请求轮询使用、HTTP CRUD 管理、401 自动摘除。
+上游请求轮询使用、HTTP CRUD 管理、额度/订阅信息自动刷新、
+401 与额度耗尽自动摘除。
 
 ## 需求(已确认)
 
@@ -17,6 +18,9 @@
 4. 不做 token 刷新:账号 401 时标记不可用并跳过,靠重新导入 / POST 更新恢复。
 5. 推理请求只用 SQLite 账号;`config.json` 的 `raycast_bearer_token`
    不再参与推理(字段保留兼容,被忽略)。
+6. 账号额度与订阅信息(参考 `docs/superpowers/specs/_account_info.mjs`
+   逆向的两个上游接口):启动时后台刷新一遍,之后每 6 小时定时刷新;
+   额度耗尽的账号自动摘除,下期发放(`next_credits_at`)后经刷新自动恢复。
 
 ## 模块结构(遵循现有分层)
 
@@ -26,15 +30,21 @@ src/db.rs               新顶层模块:共享 SQLite 基础设施,不含任何�
                         open(path)、conn() 访问器、execute_batch 辅助
 src/account/            新顶层模块:账号域,建在 Db 之上
   mod.rs      模块文档 + re-export
-  store.rs    AccountStore:包装 Db;accounts 建表 DDL、CRUD、轮询选号、401 摘除
+  store.rs    AccountStore:包装 Db;accounts 建表 DDL、CRUD、轮询选号、
+              摘除/恢复、额度信息更新
   import.rs   account.json 反序列化与启动导入(upsert 三态语义)
+  refresh.rs  额度刷新:遍历账号调 /me + /ai/credits,结果入库;
+              401 或额度耗尽 → 摘除,有余额 → 恢复
   wire.rs     对外 JSON 形状:AccountRecord(导入/POST 请求体)、
+              AccountInfo(me/credits 响应中要存的字段的瘦模型)、
               AccountView(GET 列表响应,token 掩码)
-src/server/handlers/accounts.rs   三个路由 handler,薄壳,只做提取与渲染
+src/server/handlers/accounts.rs   路由 handler,薄壳,只做提取与渲染
 ```
 
-依赖方向:`server` → `account` → `db`;`raycast::client` 构造时注入
-`Arc<AccountStore>`(与现有 `Settings` 注入方式一致)。
+依赖方向:`server` → `account` → `db`;`account::refresh` 调用
+`raycast::client` 的查询接口(见下),`raycast::client` 构造时注入
+`Arc<AccountStore>`(与现有 `Settings` 注入方式一致,`refresh` 由
+`main` 装配,避免 `raycast` ↔ `account` 循环)。
 
 **扩展方式**:后续模块(用量统计、会话等)同样建在 `db` 之上 —— 各自的
 `store` 持有 `Db`、自己执行 `CREATE TABLE IF NOT EXISTS`。`db.rs` 不出现
@@ -59,6 +69,16 @@ CREATE TABLE IF NOT EXISTS accounts (
     user_json           TEXT,   -- user 对象原文,保留订阅状态等
     available           INTEGER NOT NULL DEFAULT 1,
     unavailable_reason  TEXT,
+    -- 额度/订阅信息(refresh 从 /me + /ai/credits 拉取)
+    tier                TEXT,
+    sub_status          TEXT,
+    trial_days_left     INTEGER,
+    current_period_end  INTEGER,
+    remaining_credits   REAL,
+    total_credits       REAL,
+    remaining_usd       REAL,
+    next_credits_at     TEXT,
+    info_fetched_at     TEXT,
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
 );
@@ -85,8 +105,31 @@ counter 返回;全不可用 → `GatewayError`(503,提示无可用账号,建议
 POST /v1/accounts 更新 token)。counter 跨账号增删保持单调,无需重置。
 
 `mark_unavailable(email, reason)` → 置 `available = 0` + reason。
-401 判定点:`send_chat` 的 `ensure_success` 返回 `Upstream { status: 401 }`
-时由 client 调用。
+摘除来源两处:
+- `send_chat` 的 `ensure_success` 返回 `Upstream { status: 401 }` 时,
+  由 client 调用(reason: "token 失效 (401)");
+- `refresh` 发现额度耗尽(reason: "额度耗尽")或查询 401。
+
+### 额度刷新(account/refresh.rs + raycast/client.rs)
+
+数据源(逆向自 `_account_info.mjs`,均只需 Bearer,无需签名):
+- `GET /api/v1/me` → subscription(tier/status/trial_days_left/
+  current_period_end)
+- `GET /api/v1/ai/credits` → remaining_balance_credits /
+  total_balance_credits / remaining_balance_usd / next_credits_at
+
+`raycast::client` 新增 `fetch_me(token)`、`fetch_credits(token)`
+(复用 `base_headers` 的无签名分支 + `ensure_success`)。
+
+`refresh_all(store, client)`:顺序遍历库中账号,每账号并发拉两个接口,
+结果经 `store.update_info(email, info)` 入库并刷新 `info_fetched_at`;
+随后按结果调整可用性 —— 401 或 `remaining_credits <= 0` → 摘除,
+有余额且原因为"额度耗尽"的 → 恢复(`available = 1`)。单个账号失败
+不影响其余(warn 日志)。
+
+调度(`main` 装配):启动导入完成后 spawn 一个循环 task —— 立即刷新
+一遍,之后每 6 小时(`const REFRESH_INTERVAL`)再刷。账号数量小,
+顺序遍历即可,不引入并发池。
 
 ### 请求侧(client.rs)
 
@@ -99,11 +142,12 @@ token。`device_id`、`signature_secret` 仍来自全局 Settings。
 
 | 路由 | 行为 |
 |---|---|
-| `GET /v1/accounts` | 列表;token 掩码为前 8 位 + `...`;含 available/原因 |
+| `GET /v1/accounts` | 列表;token 掩码为前 8 位 + `...`;含可用状态/原因与额度字段 |
 | `POST /v1/accounts` | 请求体 = account.json 单条形状;按 email upsert(与导入同一语义),返回导入结果(插入/更新/跳过) |
+| `POST /v1/accounts/refresh` | 手动触发一次全量额度刷新(后台执行,立即返回) |
 | `DELETE /v1/accounts/{email}` | 删除;不存在 → 404 |
 
-三个路由注册进现有 `api`(在 `require_api_key` 层内)。
+路由注册进现有 `api`(在 `require_api_key` 层内)。
 
 ## 配置变更(config.rs)
 
@@ -121,8 +165,10 @@ token。`device_id`、`signature_secret` 仍来自全局 Settings。
 ## 测试(内存库,不落盘)
 
 1. `store`:插入 / 更新(token 变化)/ 跳过(token 相同)三态;
-   email 唯一约束。
+   email 唯一约束;`update_info` 摘除与恢复。
 2. 轮询:顺序循环;删除中间账号后顺序仍正确;全不可用时报错;
    `mark_unavailable` 后被跳过。
 3. `import`:正常导入、email 缺失跳过、文件缺失静默。
-4. handler 契约:`GET` 掩码、`POST` upsert、`DELETE` 404。
+4. `refresh`:对 mock 的 me/credits 响应入库、401 摘除、零余额摘除、
+   有余额恢复。
+5. handler 契约:`GET` 掩码、`POST` upsert、`DELETE` 404。
