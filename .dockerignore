@@ -1,4 +1,5 @@
-# Keep the build context small — only Cargo manifests + src are needed.
+# Keep the build context small. Note: debug/console.html is compiled into the
+# binary via include_str!, so debug/ must NOT be excluded.
 /target
 .git
 .github
@@ -8,7 +9,6 @@ doc
 tests
 protocol
 charles
-debug
 config.json
 .env
 .DS_Store

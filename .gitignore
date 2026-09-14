@@ -6,6 +6,6 @@
 # macOS finder junk
 .DS_Store
 charles
-protocol
+protocol_doc
 config.json
 .claude
