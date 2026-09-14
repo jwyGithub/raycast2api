@@ -1,0 +1,15 @@
+# Keep the build context small — only Cargo manifests + src are needed.
+/target
+.git
+.github
+.claude
+.codegraph
+doc
+tests
+protocol
+charles
+debug
+config.json
+.env
+.DS_Store
+*.md
