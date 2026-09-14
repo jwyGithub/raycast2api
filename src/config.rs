@@ -42,7 +42,7 @@ pub struct ConfigFile {
     pub raycast_signature_secret: Option<String>,
     pub show_advanced: Option<bool>,
     pub include_deprecated: Option<bool>,
-    /// SQLite 账号库路径,默认 `store/accounts.db`。
+    /// SQLite 存储库路径,默认 `store/store.db`。
     pub accounts_db: Option<String>,
     /// Client-facing model id → gateway model id (e.g. `"gpt-6-astra"` →
     /// `"openai-gpt-6-astra"`), applied before the upstream model lookup.
@@ -103,7 +103,7 @@ impl Settings {
 
         let accounts_db = env_opt("ACCOUNTS_DB")
             .or(config.accounts_db)
-            .unwrap_or_else(|| "store/accounts.db".to_string());
+            .unwrap_or_else(|| "store/store.db".to_string());
 
         let host = env_opt("HOST")
             .or(config.host)
@@ -157,7 +157,7 @@ impl Settings {
     fn from_env() -> Result<Self, String> {
         let raycast_device_id = env_required("RAYCAST_DEVICE_ID")?;
 
-        let accounts_db = env_opt("ACCOUNTS_DB").unwrap_or_else(|| "store/accounts.db".to_string());
+        let accounts_db = env_opt("ACCOUNTS_DB").unwrap_or_else(|| "store/store.db".to_string());
 
         let host = env_opt("HOST").unwrap_or_else(|| "0.0.0.0".to_string());
         let port: u16 = match env_opt("PORT") {

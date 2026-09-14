@@ -5,7 +5,7 @@
 #        RAYCAST_DEVICE_ID=你的设备ID
 #   2. 准备账号数据（二选一或组合）：
 #        - ./account.json：启动时自动导入的账号令牌文件
-#        - ./store/accounts.db：持久化的账号池 SQLite 数据库
+#        - ./store/store.db：持久化的 SQLite 存储库
 #   3. docker compose up -d
 #
 # 说明：所有可选项留空即视为“未设置”（网关内部把空字符串当作 None）。
@@ -31,12 +31,12 @@ services:
       INCLUDE_DEPRECATED: ${INCLUDE_DEPRECATED:-true}          # /v1/models 是否包含已弃用模型
       RUST_LOG: ${RUST_LOG:-info}                              # 日志级别（tracing env-filter）
       # HOST/PORT 沿用镜像默认 0.0.0.0:8787，通常无需覆盖。
-    # 账号池数据：account.json 启动时导入一次；store/accounts.db 持久化账号池（含用量/配额状态）。
+    # 账号池数据：account.json 启动时导入一次；store/store.db 持久化存储库（账号池与用量/配额状态）。
     # 两者都相对网关工作目录（容器内 /app）读取，`store/` 目录不存在会自动创建。
     volumes:
       - ./account.json:/app/account.json:ro
-      - ./store/accounts.db:/app/store/accounts.db
-    # 注意：宿主机需先创建 ./store/ 目录与空的 store/accounts.db（如 `mkdir -p store && touch store/accounts.db`），否则 Docker 会挂出一个目录。
+      - ./store/store.db:/app/store/store.db
+    # 注意：宿主机需先创建 ./store/ 目录与空的 store/accounts.db（如 `mkdir -p store && touch store/store.db`），否则 Docker 会挂出一个目录。
     #
     # 备注：运行镜像基于 debian-slim，未内置 curl/wget，故不设 healthcheck；
     # 如需健康探测，可在编排层对 http://<host>:8787/health 做外部检查。
