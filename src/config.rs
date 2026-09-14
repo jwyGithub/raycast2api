@@ -14,6 +14,12 @@ pub const RAYCAST_API_URL: &str = "https://backend.raycast.com/api/v1/ai/chat_co
 /// Endpoint listing the models available to the account.
 pub const RAYCAST_MODELS_URL: &str = "https://backend.raycast.com/api/v1/ai/models";
 
+/// Endpoint returning the authenticated account's profile + subscription.
+pub const RAYCAST_ME_URL: &str = "https://backend.raycast.com/api/v1/me";
+
+/// Endpoint returning the account's AI credit balance.
+pub const RAYCAST_AI_CREDITS_URL: &str = "https://backend.raycast.com/api/v1/ai/credits";
+
 /// User-Agent string sent with every upstream request (matches the captured client).
 pub const USER_AGENT: &str = "Raycast/1.94.2 (macOS Version 15.3.2 (Build 24D81))";
 

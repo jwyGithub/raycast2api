@@ -9,13 +9,18 @@ use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 
 use crate::account::store::AccountStore;
-use crate::config::{RAYCAST_API_URL, RAYCAST_MODELS_URL, Settings, USER_AGENT};
+use crate::config::{
+    RAYCAST_AI_CREDITS_URL, RAYCAST_API_URL, RAYCAST_ME_URL, RAYCAST_MODELS_URL, Settings,
+    USER_AGENT,
+};
 use crate::debug;
 use crate::error::GatewayError;
 use crate::signature::calculate_signature_v2;
 use crate::util::unix_secs;
 
-use super::wire::{RaycastChatRequest, RaycastModelsResponse, RaycastRawModel};
+use super::wire::{
+    RaycastChatRequest, RaycastCredits, RaycastMe, RaycastModelsResponse, RaycastRawModel,
+};
 
 /// Cheap-to-clone handle to the Raycast backend (wraps a shared `reqwest::Client`).
 #[derive(Clone)]
@@ -141,6 +146,29 @@ impl RaycastClient {
         let response = ensure_success(response).await?;
         let parsed: RaycastModelsResponse = response.json().await?;
         Ok(parsed.models)
+    }
+
+    /// Fetch the account profile + subscription for an explicit token.
+    pub async fn fetch_me(&self, token: &str) -> Result<RaycastMe, GatewayError> {
+        self.get_json(RAYCAST_ME_URL, token).await
+    }
+
+    /// Fetch the AI credit balance for an explicit token.
+    pub async fn fetch_credits(&self, token: &str) -> Result<RaycastCredits, GatewayError> {
+        self.get_json(RAYCAST_AI_CREDITS_URL, token).await
+    }
+
+    /// Shared bearer-only GET returning parsed JSON.
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        token: &str,
+    ) -> Result<T, GatewayError> {
+        let mut headers = self.base_headers(token, None, None);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+        let response = self.http.get(url).headers(headers).send().await?;
+        let response = ensure_success(response).await?;
+        Ok(response.json().await?)
     }
 }
 
