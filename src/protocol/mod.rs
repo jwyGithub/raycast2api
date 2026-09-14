@@ -17,6 +17,7 @@
 use axum::response::Response;
 use futures_util::Stream;
 
+use crate::core::tools::ToolDef;
 use crate::core::{CanonicalEvent, CanonicalRequest, CanonicalResponse};
 use crate::error::GatewayError;
 
@@ -47,10 +48,33 @@ pub trait OutboundAdapter {
     /// Serialize a fully-aggregated response (the non-streaming path).
     fn render_complete(model: &str, response: &CanonicalResponse) -> Response;
 
+    /// `render_complete` with the request's tool definitions, for protocols
+    /// that render freeform (`custom`) tools differently. Defaults to
+    /// ignoring the tools.
+    fn render_complete_with_tools(
+        model: &str,
+        tools: &[ToolDef],
+        response: &CanonicalResponse,
+    ) -> Response {
+        let _ = tools;
+        Self::render_complete(model, response)
+    }
+
     /// Serialize a stream of canonical events as this protocol's SSE response.
     fn stream<S>(model: &str, events: S) -> Response
     where
         S: Stream<Item = CanonicalEvent> + Send + 'static;
+
+    /// `stream` with the request's tool definitions, for protocols that
+    /// render freeform (`custom`) tools differently. Defaults to ignoring
+    /// the tools.
+    fn stream_with_tools<S>(model: &str, tools: &[ToolDef], events: S) -> Response
+    where
+        S: Stream<Item = CanonicalEvent> + Send + 'static,
+    {
+        let _ = tools;
+        Self::stream(model, events)
+    }
 
     /// Render a gateway error in this protocol's error shape.
     fn render_error(error: GatewayError) -> Response;

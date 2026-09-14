@@ -119,6 +119,9 @@ fn function_call_and_output_map_to_tool_turns() {
     assert_eq!(tool.role, Role::Tool);
     assert_eq!(tool.text, "42");
     assert_eq!(tool.tool_call_id.as_deref(), Some("call_1"));
+    // The tool name is resolved from the matching call, so the upstream
+    // `role: "tool"` message carries it (mirroring the real Raycast client).
+    assert_eq!(tool.tool_name.as_deref(), Some("get_weather"));
 }
 
 #[test]
@@ -166,6 +169,153 @@ fn tools_tool_choice_and_reasoning_map_to_canonical() {
         canonical.reasoning_effort,
         Some(ReasoningEffort::High)
     ));
+}
+
+#[test]
+fn additional_tools_items_are_flattened() {
+    // Codex's multi-agent mode ships tools as a namespaced `additional_tools`
+    // input item instead of the top-level `tools` array; groups recurse, and
+    // a `custom` tool is bridged to a single `input` string parameter.
+    let canonical = parse(json!({
+        "model": "gpt-x",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "name": "functions",
+                        "description": "",
+                        "tools": [
+                            {
+                                "type": "custom",
+                                "name": "exec",
+                                "description": "Run JavaScript code",
+                                "format": { "definition": "start: SOURCE" }
+                            },
+                            {
+                                "type": "function",
+                                "name": "wait",
+                                "description": "Wait for output",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": { "cell_id": { "type": "string" } },
+                                    "required": ["cell_id"]
+                                },
+                                "strict": true
+                            }
+                        ]
+                    }
+                ]
+            },
+            { "role": "user", "content": "hi" }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(canonical.messages.len(), 1);
+    assert_eq!(canonical.messages[0].text, "hi");
+
+    match canonical.tools.as_slice() {
+        [
+            ToolDef::Custom {
+                name: exec_name,
+                description: exec_desc,
+                grammar,
+            },
+            ToolDef::Local {
+                name: wait_name,
+                description: wait_desc,
+                parameters: wait_params,
+            },
+        ] => {
+            assert_eq!(exec_name, "exec");
+            assert_eq!(exec_desc.as_deref(), Some("Run JavaScript code"));
+            // The grammar is carried alongside the description.
+            assert_eq!(grammar, "start: SOURCE");
+
+            assert_eq!(wait_name, "wait");
+            assert_eq!(wait_desc.as_deref(), Some("Wait for output"));
+            assert_eq!(wait_params["properties"]["cell_id"]["type"], "string");
+        }
+        other => panic!("expected exec + wait tools, got {other:?}"),
+    }
+}
+
+#[test]
+fn custom_tool_call_round_trip_maps_through_json_arguments() {
+    // A replayed `custom_tool_call` carries raw text `input`; it maps to the
+    // JSON-string arguments the upstream wire expects, and its
+    // `custom_tool_call_output` resolves the tool name like any other.
+    let canonical = parse(json!({
+        "model": "gpt-x",
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "call_id": "ctc_1",
+                "name": "exec",
+                "input": "const x = await tools.exec_command({cmd: \"pwd\"})"
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "ctc_1",
+                "output": "/tmp"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let assistant = &canonical.messages[0];
+    assert_eq!(assistant.tool_calls[0].name, "exec");
+    assert_eq!(assistant.tool_calls[0].id, "ctc_1");
+    // Raw text becomes a JSON string so the upstream `arguments` is valid JSON.
+    assert_eq!(
+        assistant.tool_calls[0].arguments,
+        serde_json::to_string("const x = await tools.exec_command({cmd: \"pwd\"})").unwrap()
+    );
+
+    let tool = &canonical.messages[1];
+    assert_eq!(tool.role, Role::Tool);
+    assert_eq!(tool.tool_call_id.as_deref(), Some("ctc_1"));
+    assert_eq!(tool.tool_name.as_deref(), Some("exec"));
+    assert_eq!(tool.text, "/tmp");
+}
+
+#[test]
+fn custom_tool_stream_unwraps_input() {
+    // With `exec` declared custom, its tool call streams as a
+    // `custom_tool_call` item whose `input` is the unwrapped raw text —
+    // the shape codex executes natively.
+    let mut encoder = StreamEncoder::new("resp_x".into(), "gpt-x".into(), 0);
+    encoder.set_custom([("exec".to_string())].into_iter().collect());
+
+    let mut frames = vec![encoder.created()];
+    frames.extend(encoder.push(CanonicalEvent::ToolCall(ToolCall {
+        id: "call_1".into(),
+        name: "exec".into(),
+        arguments: r#"{"input":"console.log(1)"}"#.into(),
+    })));
+    frames.extend(encoder.finalize());
+
+    assert_eq!(
+        events(&frames),
+        vec![
+            "response.created",
+            "response.output_item.added",
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+    );
+
+    // The added/done item carries the unwrapped raw text as `input`.
+    let added = &frames[1].data["item"];
+    assert_eq!(added["type"], "custom_tool_call");
+    assert_eq!(added["name"], "exec");
+    assert_eq!(frames[2].data["delta"], "console.log(1)");
+    assert_eq!(frames[4].data["item"]["input"], "console.log(1)");
+    assert_eq!(frames[4].data["item"]["call_id"], "call_1");
 }
 
 // --- Non-streaming: the `response` object shape --------------------------

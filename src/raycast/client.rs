@@ -8,45 +8,53 @@ use std::sync::Arc;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 
-use crate::config::{RAYCAST_API_URL, RAYCAST_MODELS_URL, Settings, USER_AGENT};
-use crate::debug::{self, DebugBus, DebugEvent};
+use crate::account::store::AccountStore;
+use crate::config::{
+    RAYCAST_AI_CREDITS_URL, RAYCAST_API_URL, RAYCAST_ME_URL, RAYCAST_MODELS_URL, Settings,
+    USER_AGENT,
+};
+use crate::debug;
 use crate::error::GatewayError;
 use crate::signature::calculate_signature_v2;
 use crate::util::unix_secs;
 
-use super::wire::{RaycastChatRequest, RaycastModelsResponse, RaycastRawModel};
+use super::wire::{
+    RaycastChatRequest, RaycastCredits, RaycastMe, RaycastModelsResponse, RaycastRawModel,
+};
 
 /// Cheap-to-clone handle to the Raycast backend (wraps a shared `reqwest::Client`).
 #[derive(Clone)]
 pub struct RaycastClient {
     http: Client,
     settings: Arc<Settings>,
-    /// Optional dev-console event bus. When set, [`send_chat`](Self::send_chat)
-    /// publishes the outgoing upstream request for the monitor.
-    debug: Option<DebugBus>,
+    /// 账号池:每次请求轮询取一个可用账号的 token。
+    accounts: Arc<AccountStore>,
 }
 
 impl RaycastClient {
-    pub fn new(http: Client, settings: Arc<Settings>) -> Self {
+    pub fn new(http: Client, settings: Arc<Settings>, accounts: Arc<AccountStore>) -> Self {
         Self {
             http,
             settings,
-            debug: None,
+            accounts,
         }
     }
 
-    /// Attach a dev-console [`DebugBus`] so upstream requests are published to
-    /// the live monitor. Off by default; wired up in `main` for local dev.
-    pub fn with_debug(mut self, bus: DebugBus) -> Self {
-        self.debug = Some(bus);
-        self
+    /// 账号池(刷新任务与测试使用)。
+    pub fn accounts(&self) -> &Arc<AccountStore> {
+        &self.accounts
     }
 
     /// Common headers shared by every request. When `signature` is `Some`, the
     /// timestamp/signature pair (present only for signed POSTs) is included.
-    fn base_headers(&self, timestamp: Option<&str>, signature: Option<&str>) -> HeaderMap {
+    fn base_headers(
+        &self,
+        bearer: &str,
+        timestamp: Option<&str>,
+        signature: Option<&str>,
+    ) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        let bearer = format!("Bearer {}", self.settings.raycast_bearer_token);
+        let bearer = format!("Bearer {bearer}");
         // These values come from config/HMAC output and are always valid header text.
         headers.insert(
             "Authorization",
@@ -76,6 +84,7 @@ impl RaycastClient {
         &self,
         request: &RaycastChatRequest,
     ) -> Result<reqwest::Response, GatewayError> {
+        let account = self.accounts.next_available()?;
         let body = serde_json::to_string(request)?;
         let timestamp = unix_secs().to_string();
         let signature = calculate_signature_v2(
@@ -85,30 +94,20 @@ impl RaycastClient {
             self.settings.signature_secret(),
         );
 
-        let mut headers = self.base_headers(Some(&timestamp), Some(&signature));
+        let mut headers =
+            self.base_headers(&account.access_token, Some(&timestamp), Some(&signature));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         headers.insert("Accept", HeaderValue::from_static("text/event-stream"));
 
-        // Mirror the fully-signed request to the dev console, correlated to the
-        // inbound request via the task-local id set by `debug_capture`.
-        if let Some(bus) = &self.debug {
-            let header_pairs = headers
-                .iter()
-                .map(|(name, value)| {
-                    [
-                        name.as_str().to_string(),
-                        value.to_str().unwrap_or("<non-utf8>").to_string(),
-                    ]
-                })
-                .collect::<Vec<_>>();
-            bus.publish(DebugEvent::Upstream {
-                id: debug::current_request_id(),
-                ts_ms: debug::now_ms(),
-                method: "POST".to_string(),
-                url: RAYCAST_API_URL.to_string(),
-                headers: header_pairs,
-                body: debug::body_to_value(body.as_bytes()),
-            });
+        // Dump the outgoing upstream body for offline analysis, enabled by
+        // DEBUG_DUMP_DIR and correlated to the inbound request via the
+        // task-local id set by `debug_capture`.
+        let body_value = debug::body_to_value(body.as_bytes());
+        if let Ok(text) = serde_json::to_string_pretty(&body_value) {
+            debug::dump(
+                &format!("{}-upstream.json", debug::current_request_id()),
+                &text,
+            );
         }
 
         let response = self
@@ -119,12 +118,22 @@ impl RaycastClient {
             .send()
             .await?;
 
-        ensure_success(response).await
+        match ensure_success(response).await {
+            Ok(response) => Ok(response),
+            // 401 = 该账号 token 失效:摘除后返回错误,下次请求自动换号。
+            Err(err @ GatewayError::Upstream { status: 401, .. }) => {
+                self.accounts
+                    .mark_unavailable(&account.email, "token 失效 (401)");
+                Err(err)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Fetch the raw list of models available to the account.
     pub async fn fetch_models(&self) -> Result<Vec<RaycastRawModel>, GatewayError> {
-        let mut headers = self.base_headers(None, None);
+        let account = self.accounts.next_available()?;
+        let mut headers = self.base_headers(&account.access_token, None, None);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
         let response = self
@@ -137,6 +146,29 @@ impl RaycastClient {
         let response = ensure_success(response).await?;
         let parsed: RaycastModelsResponse = response.json().await?;
         Ok(parsed.models)
+    }
+
+    /// Fetch the account profile + subscription for an explicit token.
+    pub async fn fetch_me(&self, token: &str) -> Result<RaycastMe, GatewayError> {
+        self.get_json(RAYCAST_ME_URL, token).await
+    }
+
+    /// Fetch the AI credit balance for an explicit token.
+    pub async fn fetch_credits(&self, token: &str) -> Result<RaycastCredits, GatewayError> {
+        self.get_json(RAYCAST_AI_CREDITS_URL, token).await
+    }
+
+    /// Shared bearer-only GET returning parsed JSON.
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        token: &str,
+    ) -> Result<T, GatewayError> {
+        let mut headers = self.base_headers(token, None, None);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+        let response = self.http.get(url).headers(headers).send().await?;
+        let response = ensure_success(response).await?;
+        Ok(response.json().await?)
     }
 }
 

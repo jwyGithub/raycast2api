@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use raycast2api::config::Settings;
-use raycast2api::debug::DebugBus;
 use raycast2api::raycast::client::RaycastClient;
 use raycast2api::server::build_router;
 use raycast2api::server::state::AppState;
@@ -20,7 +19,7 @@ async fn main() {
         Err(err) => {
             eprintln!("configuration error: {err}");
             eprintln!(
-                "Create a config.json file or set RAYCAST_BEARER_TOKEN and RAYCAST_DEVICE_ID environment variables (see .env.example)."
+                "Create a config.json file or set RAYCAST_DEVICE_ID (see config.example.json)."
             );
             std::process::exit(1);
         }
@@ -30,11 +29,30 @@ async fn main() {
         .build()
         .expect("failed to build HTTP client");
 
-    // One shared event bus feeds the dev console: the client publishes upstream
-    // requests, the capture middleware (via AppState) publishes inbound ones.
-    let debug = DebugBus::new();
-    let client = RaycastClient::new(http, settings.clone()).with_debug(debug.clone());
-    let state = Arc::new(AppState::new(settings.clone(), client, debug));
+    let db = raycast2api::db::Db::open(&settings.accounts_db).unwrap_or_else(|e| {
+        eprintln!("accounts db error: {e}");
+        std::process::exit(1);
+    });
+    let accounts = Arc::new(raycast2api::account::store::AccountStore::new(db));
+    if let Err(err) = raycast2api::account::import::import_file(&accounts, "account.json") {
+        eprintln!("account import error: {err}");
+        std::process::exit(1);
+    }
+
+    let client = RaycastClient::new(http, settings.clone(), accounts.clone());
+    let state = Arc::new(AppState::new(settings.clone(), client.clone(), accounts.clone()));
+
+    // 启动立即刷新一遍账号额度,之后每 6 小时一遍;失败只记日志。
+    {
+        let accounts = accounts;
+        let client = client;
+        tokio::spawn(async move {
+            loop {
+                raycast2api::account::refresh::refresh_all(&accounts, &client).await;
+                tokio::time::sleep(raycast2api::account::refresh::REFRESH_INTERVAL).await;
+            }
+        });
+    }
 
     let listener = match tokio::net::TcpListener::bind(settings.bind_addr).await {
         Ok(listener) => listener,

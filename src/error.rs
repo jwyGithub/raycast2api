@@ -19,6 +19,8 @@ pub enum GatewayError {
     Config(String),
     /// The upstream Raycast backend returned an error (surfaced as 502).
     Upstream { status: u16, message: String },
+    /// No usable Raycast account in the store (503).
+    NoAccount(String),
     /// Any other internal failure (500).
     Internal(String),
 }
@@ -43,6 +45,11 @@ impl GatewayError {
                 StatusCode::BAD_GATEWAY,
                 "bad_gateway",
                 format!("Raycast API error ({status}): {message}"),
+            ),
+            GatewayError::NoAccount(m) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                m.clone(),
             ),
             GatewayError::Internal(m) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "relay_error", m.clone())

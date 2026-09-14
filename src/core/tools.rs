@@ -16,6 +16,16 @@ pub enum ToolDef {
         /// JSON Schema for the tool's parameters.
         parameters: Value,
     },
+    /// A locally-executed freeform tool (codex's `exec`): the model supplies
+    /// raw text (JavaScript source) rather than JSON arguments. Bridged over
+    /// the upstream as a single `input` string parameter, and back to the
+    /// client as a `custom_tool_call` item.
+    Custom {
+        name: String,
+        description: Option<String>,
+        /// The tool's free-text input grammar, folded into the description.
+        grammar: String,
+    },
     /// A backend-provided tool referenced by name only (e.g. `web_search`).
     Remote { name: String },
 }

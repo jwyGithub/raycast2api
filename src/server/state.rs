@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 
+use crate::account::store::AccountStore;
 use crate::config::{DEFAULT_INTERNAL_MODEL, DEFAULT_PROVIDER, Settings};
-use crate::debug::DebugBus;
 use crate::error::GatewayError;
 use crate::raycast::client::RaycastClient;
 use crate::raycast::wire::RaycastRawModel;
@@ -23,9 +23,8 @@ pub struct AppState {
     pub settings: Arc<Settings>,
     pub client: RaycastClient,
     pub health: BackendHealth,
-    /// Event bus for the local dev console (`/debug`). Shares its channel with
-    /// the [`RaycastClient`] so inbound and upstream events reach the same UI.
-    pub debug: DebugBus,
+    /// 账号池(账号 CRUD 接口与刷新触发使用)。
+    pub accounts: Arc<AccountStore>,
     models_cache: RwLock<Option<ModelsCache>>,
 }
 
@@ -35,12 +34,16 @@ struct ModelsCache {
 }
 
 impl AppState {
-    pub fn new(settings: Arc<Settings>, client: RaycastClient, debug: DebugBus) -> Self {
+    pub fn new(
+        settings: Arc<Settings>,
+        client: RaycastClient,
+        accounts: Arc<AccountStore>,
+    ) -> Self {
         Self {
             settings,
             client,
             health: BackendHealth::default(),
-            debug,
+            accounts,
             models_cache: RwLock::new(None),
         }
     }
@@ -71,8 +74,15 @@ impl AppState {
     }
 
     /// Resolve an OpenAI-facing model id to `(provider, internal_model)`,
-    /// falling back to the configured defaults if it can't be found.
+    /// applying the configured `model_overrides` aliases first, then looking up
+    /// the upstream model list, falling back to the configured defaults.
     pub async fn resolve_model(&self, requested_id: &str) -> (String, String) {
+        let requested_id = self
+            .settings
+            .model_overrides
+            .get(requested_id)
+            .map(String::as_str)
+            .unwrap_or(requested_id);
         if let Ok(models) = self.models().await
             && let Some(model) = models.iter().find(|m| m.id == requested_id)
         {

@@ -10,7 +10,7 @@ hmac = "0.13.0"
 sha2 = "0.11.0"
 
 # Async HTTP gateway stack.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 # Async client to the Raycast backend. rustls avoids a system OpenSSL dependency;
@@ -28,6 +28,12 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Shared SQLite storage for the account store (and future modules).
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 [dev-dependencies]
 # Used by examples/chat_cli.rs to run the async client from a simple binary.
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Used by contract tests to drive the router in-process (`oneshot`).
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

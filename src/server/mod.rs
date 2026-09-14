@@ -9,7 +9,7 @@ pub mod state;
 
 use axum::Router;
 use axum::http::Method;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -19,43 +19,36 @@ use self::state::SharedState;
 pub fn build_router(state: SharedState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS, Method::DELETE])
         .allow_headers(Any)
         .max_age(std::time::Duration::from_secs(86_400));
 
-    // Inference endpoints additionally get the debug-capture layer, which
-    // records the inbound request for the dev console. It sits *inside* the
-    // auth layer (added below), so unauthenticated requests are never captured.
-    let inference = Router::new()
+    // The authenticated API surface: account-pool management plus inference
+    // and the read-only endpoints. The debug-capture layer sits inside (after)
+    // the auth layer, so unauthenticated requests are never captured.
+    let api = Router::new()
+        .route(
+            "/v1/accounts",
+            get(handlers::accounts::list).post(handlers::accounts::upsert),
+        )
+        .route("/v1/accounts/refresh", post(handlers::accounts::refresh))
+        .route("/v1/accounts/{email}", delete(handlers::accounts::delete))
         .route(
             "/v1/chat/completions",
             post(handlers::chat::chat_completions),
         )
         .route("/v1/messages", post(handlers::messages::messages))
         .route("/v1/responses", post(handlers::responses::responses))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            middleware::debug_capture,
-        ));
-
-    // The authenticated API surface: inference plus the read-only endpoints.
-    let api = inference
         .route("/v1/models", get(handlers::models::list_models))
         .route("/health", get(handlers::health::health))
         .route("/ready", get(handlers::health::ready))
+        .layer(axum::middleware::from_fn(middleware::debug_capture))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::require_api_key,
         ));
 
-    // The local dev console (live monitor + UI). Deliberately unauthenticated
-    // so it works in dev without a key — do not expose `/debug/*` publicly.
-    let debug = Router::new()
-        .route("/debug/console", get(handlers::debug::console))
-        .route("/debug/events", get(handlers::debug::events));
-
-    api.merge(debug)
-        .fallback(handlers::not_found)
+    api.fallback(handlers::not_found)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

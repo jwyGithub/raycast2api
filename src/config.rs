@@ -5,6 +5,7 @@
 //! or environment variables as fallback.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
 /// Endpoint that streams AI chat completions as Server-Sent Events.
@@ -12,6 +13,12 @@ pub const RAYCAST_API_URL: &str = "https://backend.raycast.com/api/v1/ai/chat_co
 
 /// Endpoint listing the models available to the account.
 pub const RAYCAST_MODELS_URL: &str = "https://backend.raycast.com/api/v1/ai/models";
+
+/// Endpoint returning the authenticated account's profile + subscription.
+pub const RAYCAST_ME_URL: &str = "https://backend.raycast.com/api/v1/me";
+
+/// Endpoint returning the account's AI credit balance.
+pub const RAYCAST_AI_CREDITS_URL: &str = "https://backend.raycast.com/api/v1/ai/credits";
 
 /// User-Agent string sent with every upstream request (matches the captured client).
 pub const USER_AGENT: &str = "Raycast/1.94.2 (macOS Version 15.3.2 (Build 24D81))";
@@ -31,18 +38,21 @@ pub struct ConfigFile {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub api_key: Option<String>,
-    pub raycast_bearer_token: Option<String>,
     pub raycast_device_id: Option<String>,
     pub raycast_signature_secret: Option<String>,
     pub show_advanced: Option<bool>,
     pub include_deprecated: Option<bool>,
+    /// SQLite 账号库路径,默认 `accounts.db`。
+    pub accounts_db: Option<String>,
+    /// Client-facing model id → gateway model id (e.g. `"gpt-6-astra"` →
+    /// `"openai-gpt-6-astra"`), applied before the upstream model lookup.
+    #[serde(default, alias = "modelOverrides")]
+    pub model_overrides: Option<HashMap<String, String>>,
 }
 
 /// Runtime configuration, loaded once at startup via [`Settings::from_config`].
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// Raycast bearer token (`Authorization: Bearer ...`).
-    pub raycast_bearer_token: String,
     /// Raycast device id (`X-Raycast-DeviceId`, also folded into the signature).
     pub raycast_device_id: String,
     /// Signing secret; `None` uses the built-in default secret.
@@ -57,6 +67,11 @@ pub struct Settings {
     pub show_advanced: bool,
     /// Include deprecated models in `/v1/models`. Default `true`.
     pub include_deprecated: bool,
+    /// Client-facing model id → gateway model id, applied before the upstream
+    /// model lookup. Requests naming an aliased id are sent as the mapped id.
+    pub model_overrides: HashMap<String, String>,
+    /// SQLite 账号库路径(账号表与后续模块共用)。
+    pub accounts_db: String,
 }
 
 impl Settings {
@@ -82,13 +97,13 @@ impl Settings {
 
     /// Create Settings from a ConfigFile, with environment variable overrides.
     fn from_config_file(config: ConfigFile) -> Result<Self, String> {
-        let raycast_bearer_token = env_opt("RAYCAST_BEARER_TOKEN")
-            .or(config.raycast_bearer_token)
-            .ok_or_else(|| "missing RAYCAST_BEARER_TOKEN".to_string())?;
-
         let raycast_device_id = env_opt("RAYCAST_DEVICE_ID")
             .or(config.raycast_device_id)
             .ok_or_else(|| "missing RAYCAST_DEVICE_ID".to_string())?;
+
+        let accounts_db = env_opt("ACCOUNTS_DB")
+            .or(config.accounts_db)
+            .unwrap_or_else(|| "accounts.db".to_string());
 
         let host = env_opt("HOST")
             .or(config.host)
@@ -121,7 +136,6 @@ impl Settings {
         };
 
         Ok(Self {
-            raycast_bearer_token,
             raycast_device_id,
             raycast_signature_secret: env_opt("RAYCAST_SIGNATURE_SECRET")
                 .or(config.raycast_signature_secret),
@@ -133,14 +147,17 @@ impl Settings {
                 "INCLUDE_DEPRECATED",
                 config.include_deprecated.unwrap_or(true),
             ),
+            model_overrides: config.model_overrides.unwrap_or_default(),
+            accounts_db,
         })
     }
 
     /// Read configuration from the environment. Returns an error naming the
     /// first missing/invalid required variable.
     fn from_env() -> Result<Self, String> {
-        let raycast_bearer_token = env_required("RAYCAST_BEARER_TOKEN")?;
         let raycast_device_id = env_required("RAYCAST_DEVICE_ID")?;
+
+        let accounts_db = env_opt("ACCOUNTS_DB").unwrap_or_else(|| "accounts.db".to_string());
 
         let host = env_opt("HOST").unwrap_or_else(|| "0.0.0.0".to_string());
         let port: u16 = match env_opt("PORT") {
@@ -170,7 +187,6 @@ impl Settings {
         };
 
         Ok(Self {
-            raycast_bearer_token,
             raycast_device_id,
             raycast_signature_secret: env_opt("RAYCAST_SIGNATURE_SECRET"),
             api_key: env_opt("API_KEY"),
@@ -178,6 +194,9 @@ impl Settings {
             bind_addr_dual,
             show_advanced: env_flag("ADVANCED", true),
             include_deprecated: env_flag("INCLUDE_DEPRECATED", true),
+            // No env-var form for a map; aliases are config-file only.
+            model_overrides: HashMap::new(),
+            accounts_db,
         })
     }
 

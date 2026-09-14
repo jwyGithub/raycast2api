@@ -221,3 +221,68 @@ pub struct RaycastRawModel {
 pub struct RaycastModelsResponse {
     pub models: Vec<RaycastRawModel>,
 }
+
+// --- 账号信息查询(/me + /ai/credits) --------------------------------
+
+/// `GET /api/v1/me` 的瘦响应:只取订阅相关字段。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaycastMe {
+    #[serde(default)]
+    pub subscription: Option<RaycastSubscription>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaycastSubscription {
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub trial_days_left: Option<i64>,
+    #[serde(default)]
+    pub current_period_end: Option<i64>,
+}
+
+/// `GET /api/v1/ai/credits` 的瘦响应。余额字段可能以数字或字符串下发。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaycastCredits {
+    #[serde(default, deserialize_with = "string_or_number_f64")]
+    pub remaining_balance_credits: Option<f64>,
+    #[serde(default, deserialize_with = "string_or_number_f64")]
+    pub total_balance_credits: Option<f64>,
+    #[serde(default, deserialize_with = "string_or_number_f64")]
+    pub remaining_balance_usd: Option<f64>,
+    #[serde(default)]
+    pub next_credits_at: Option<String>,
+}
+
+/// 接受 JSON number 或可解析的字符串,统一为 `Option<f64>`。
+fn string_or_number_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.parse().ok(),
+        _ => None,
+    }))
+}
+
+#[cfg(test)]
+mod credits_tests {
+    use super::*;
+
+    #[test]
+    fn credits_parse_number_and_string_forms() {
+        let c: RaycastCredits = serde_json::from_str(
+            r#"{ "remaining_balance_credits": "5.5", "total_balance_credits": 10,
+                "remaining_balance_usd": "0.55", "next_credits_at": "2026-10-01T00:00:00Z" }"#,
+        )
+        .unwrap();
+        assert_eq!(c.remaining_balance_credits, Some(5.5));
+        assert_eq!(c.total_balance_credits, Some(10.0));
+        assert_eq!(c.remaining_balance_usd, Some(0.55));
+        assert_eq!(c.next_credits_at.as_deref(), Some("2026-10-01T00:00:00Z"));
+    }
+}
