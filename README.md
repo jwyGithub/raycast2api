@@ -10,7 +10,7 @@
 - **流式与非流式**：三条路径都同时支持 SSE 流式与聚合后的非流式响应。
 - **请求签名**：自动计算 Raycast 所需的 `X-Raycast-Signature-v2` 头（ROT13/ROT5 + HMAC-SHA256）。
 - **模型直通**：`GET /v1/models` 透出账号可用模型，可选择是否包含高级 / 已弃用模型。
-- **请求落盘排查**：设置 `DEBUG_DUMP_DIR` 后，每个请求的入站体、上游请求体与上游 SSE 响应会存为文件，便于离线分析。
+- **请求日志**：每个推理请求的入站体、发给上游的请求体与上游 SSE 响应自动存入 SQLite（`store/store.db`），按时间保留 3 天自动清理。`GET /v1/logs` 查看列表（`limit` 默认 50、上限 200，`before_id` 翻页），`GET /v1/logs/{request_id}` 查看三体全文。
 - **可选鉴权**：设置 `api_key` 后，所有推理与只读接口都需要携带该 key。
 - **多账号管理**：SQLite 账号池，启动从 `account.json` 导入（email 去重、token 变化自动更新），请求轮询分摊额度；401 / 额度耗尽自动摘除，额度恢复自动上线；每 6 小时后台刷新额度。
 - **双栈监听**：绑定 `0.0.0.0` 时自动同时监听 IPv6 `[::]`。
@@ -31,7 +31,7 @@
 - `raycast` — 唯一与上游耦合的层：请求构造器、SSE 解析器、签名客户端（④⑦）
 - `signature` — `X-Raycast-Signature-v2` 计算
 - `server` — HTTP 层：状态、中间件、路由、handler
-- `debug` — 请求落盘（`DEBUG_DUMP_DIR`）与请求关联 id
+- `log` — 请求日志：SQLite 存储（3 天保留）与请求关联 id
 
 详细设计与时序图见 [`doc/architecture.md`](./doc/architecture.md)、[`doc/sequence-diagrams.md`](./doc/sequence-diagrams.md)，上游抓包协议见 [`doc/raycast-backend-protocol.md`](./doc/raycast-backend-protocol.md)。
 
@@ -53,6 +53,8 @@
 | `POST /v1/accounts` | 新增/更新账号（按 email upsert） | — |
 | `POST /v1/accounts/refresh` | 手动触发额度刷新（202，后台执行） | — |
 | `DELETE /v1/accounts/{email}` | 删除账号 | — |
+| `GET /v1/logs` | 请求日志列表（不含请求体） | — |
+| `GET /v1/logs/{request_id}` | 请求日志详情（入站/上游/响应全文） | — |
 
 ## 环境要求
 
@@ -160,13 +162,12 @@ src/
   core/            统一内部请求/响应/事件模型
   protocol/        chat_completions / messages / responses 三套适配器
   raycast/         上游客户端、请求构造、SSE 解析、模型解析
-  server/          路由、中间件（鉴权/调试捕获）、handler、状态
-  debug.rs         请求落盘与关联 id
+  server/          路由、中间件（鉴权/日志捕获）、handler、状态
+  log/             请求日志存储（SQLite）与请求关联 id
 doc/               架构、时序图、上游协议抓包说明
 tests/             契约测试与签名一致性测试
 ```
 
 ## 说明
 
-- `bearer_token`、`device_id`、`api_key` 等属于敏感信息，`config.json`、`account.json` 与 `.env` 已在 `.gitignore` 中忽略，请勿提交。`account.json`（导入账号池）与 `store/store.db`（SQLite 存储库）同样包含明文凭据，切勿暴露。
-- 落盘目录（`DEBUG_DUMP_DIR`）包含完整请求与上游凭证相关数据，**切勿**将其暴露或提交到仓库。
+- `bearer_token`、`device_id`、`api_key` 等属于敏感信息，`config.json`、`account.json` 与 `.env` 已在 `.gitignore` 中忽略，请勿提交。`account.json`（导入账号池）与 `store/store.db`（SQLite 存储库，含账号凭据与请求日志全文）同样包含明文凭据，切勿暴露。

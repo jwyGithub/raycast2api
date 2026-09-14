@@ -51,12 +51,21 @@ pub async fn require_api_key(
 /// The body has to be buffered to be observed, so the request is reassembled
 /// from the captured bytes before it continues — the downstream `Json`
 /// extractor sees exactly what the client sent. Covers all authenticated
-/// routes; log writes are fire-and-forget and never fail the request.
+/// routes except the log-query endpoints (which must not grow the log as a
+/// side effect of being read); log writes are fire-and-forget and never fail
+/// the request.
 pub async fn debug_capture(
     State(state): State<SharedState>,
     request: Request,
     next: Next,
 ) -> Result<Response, GatewayError> {
+    // Log reads are observability traffic: capturing them would insert a row
+    // on every page fetch and shift pagination under the reader.
+    let path = request.uri().path();
+    if path == "/v1/logs" || path.starts_with("/v1/logs/") {
+        return Ok(next.run(request).await);
+    }
+
     let (parts, body) = request.into_parts();
     let bytes = axum::body::to_bytes(body, MAX_CAPTURE_BYTES)
         .await

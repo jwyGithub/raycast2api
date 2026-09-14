@@ -33,6 +33,8 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/v1/accounts/refresh", post(handlers::accounts::refresh))
         .route("/v1/accounts/{email}", delete(handlers::accounts::delete))
+        .route("/v1/logs", get(handlers::logs::list))
+        .route("/v1/logs/{request_id}", get(handlers::logs::detail))
         .route(
             "/v1/chat/completions",
             post(handlers::chat::chat_completions),
