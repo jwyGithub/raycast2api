@@ -50,7 +50,7 @@ pub async fn require_api_key(
 ///
 /// The body has to be buffered to be observed, so the request is reassembled
 /// from the captured bytes before it continues — the downstream `Json`
-/// extractor sees exactly what the client sent. Intended only for the inference
+/// extractor sees exactly what the client sent. Covers all authenticated
 /// routes; it's a no-op cost when dumping is disabled.
 pub async fn debug_capture(
     request: Request,

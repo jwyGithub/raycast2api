@@ -24,8 +24,8 @@ pub fn build_router(state: SharedState) -> Router {
         .max_age(std::time::Duration::from_secs(86_400));
 
     // The authenticated API surface: account-pool management plus inference
-    // and the read-only endpoints. The debug-capture layer sits innermost so
-    // unauthenticated requests are never captured.
+    // and the read-only endpoints. The debug-capture layer sits inside (after)
+    // the auth layer, so unauthenticated requests are never captured.
     let api = Router::new()
         .route(
             "/v1/accounts",
@@ -42,11 +42,11 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/v1/models", get(handlers::models::list_models))
         .route("/health", get(handlers::health::health))
         .route("/ready", get(handlers::health::ready))
+        .layer(axum::middleware::from_fn(middleware::debug_capture))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::require_api_key,
-        ))
-        .layer(axum::middleware::from_fn(middleware::debug_capture));
+        ));
 
     api.fallback(handlers::not_found)
         .layer(TraceLayer::new_for_http())
