@@ -221,3 +221,37 @@ pub struct RaycastRawModel {
 pub struct RaycastModelsResponse {
     pub models: Vec<RaycastRawModel>,
 }
+
+// --- 账号信息查询(Task 7 补充字段) -------------------------------
+
+/// `GET /api/v1/me` 的瘦响应(本任务占位,Task 7 完整化)。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RaycastMe {
+    #[serde(default)]
+    pub subscription: Option<RaycastSubscription>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RaycastSubscription {
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub trial_days_left: Option<i64>,
+    #[serde(default)]
+    pub current_period_end: Option<i64>,
+}
+
+/// `GET /api/v1/ai/credits` 的瘦响应(本任务占位,Task 7 完整化)。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RaycastCredits {
+    #[serde(default)]
+    pub remaining_balance_credits: Option<f64>,
+    #[serde(default)]
+    pub total_balance_credits: Option<f64>,
+    #[serde(default)]
+    pub remaining_balance_usd: Option<f64>,
+    #[serde(default)]
+    pub next_credits_at: Option<String>,
+}

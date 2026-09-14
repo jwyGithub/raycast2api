@@ -3,6 +3,7 @@
 //!
 //! The crate is organized into layers so it stays easy to extend:
 //!
+//! * [`account`]   — the Raycast account domain (store, import, refresh).
 //! * [`config`]    — static endpoints and runtime [`config::Settings`].
 //! * [`core`]      — the canonical, protocol- and provider-agnostic model.
 //! * [`db`]        — shared SQLite infrastructure (connection management).
@@ -15,6 +16,7 @@
 //! * [`server`]    — the HTTP layer (state, middleware, handlers, router).
 //! * [`util`]      — small shared helpers.
 
+pub mod account;
 pub mod config;
 pub mod core;
 pub mod db;
