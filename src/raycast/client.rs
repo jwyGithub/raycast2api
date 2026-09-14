@@ -15,6 +15,7 @@ use crate::config::{
 };
 use crate::debug;
 use crate::error::GatewayError;
+use crate::log::store::RequestLogStore;
 use crate::signature::calculate_signature_v2;
 use crate::util::unix_secs;
 
@@ -29,14 +30,22 @@ pub struct RaycastClient {
     settings: Arc<Settings>,
     /// 账号池:每次请求轮询取一个可用账号的 token。
     accounts: Arc<AccountStore>,
+    /// 请求日志存储:补写发给上游的请求体。
+    log: Arc<RequestLogStore>,
 }
 
 impl RaycastClient {
-    pub fn new(http: Client, settings: Arc<Settings>, accounts: Arc<AccountStore>) -> Self {
+    pub fn new(
+        http: Client,
+        settings: Arc<Settings>,
+        accounts: Arc<AccountStore>,
+        log: Arc<RequestLogStore>,
+    ) -> Self {
         Self {
             http,
             settings,
             accounts,
+            log,
         }
     }
 
@@ -99,16 +108,11 @@ impl RaycastClient {
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         headers.insert("Accept", HeaderValue::from_static("text/event-stream"));
 
-        // Dump the outgoing upstream body for offline analysis, enabled by
-        // DEBUG_DUMP_DIR and correlated to the inbound request via the
-        // task-local id set by `debug_capture`.
-        let body_value = debug::body_to_value(body.as_bytes());
-        if let Ok(text) = serde_json::to_string_pretty(&body_value) {
-            debug::dump(
-                &format!("{}-upstream.json", debug::current_request_id()),
-                &text,
-            );
-        }
+        // Record the outgoing upstream body in the request-log store,
+        // correlated to the inbound request via the task-local id set by
+        // `debug_capture`. Fire-and-forget.
+        self.log
+            .update_upstream(&debug::current_request_id(), &debug::body_to_value(body.as_bytes()));
 
         let response = self
             .http

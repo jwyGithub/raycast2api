@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod chat;
 pub mod health;
+pub mod logs;
 pub mod messages;
 pub mod models;
 pub mod responses;

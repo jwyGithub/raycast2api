@@ -33,14 +33,21 @@ async fn main() {
         eprintln!("accounts db error: {e}");
         std::process::exit(1);
     });
-    let accounts = Arc::new(raycast2api::account::store::AccountStore::new(db));
+    let accounts = Arc::new(raycast2api::account::store::AccountStore::new(db.clone()));
     if let Err(err) = raycast2api::account::import::import_file(&accounts, "account.json") {
         eprintln!("account import error: {err}");
         std::process::exit(1);
     }
 
-    let client = RaycastClient::new(http, settings.clone(), accounts.clone());
-    let state = Arc::new(AppState::new(settings.clone(), client.clone(), accounts.clone()));
+    let request_log = Arc::new(raycast2api::log::store::RequestLogStore::new(db));
+
+    let client = RaycastClient::new(http, settings.clone(), accounts.clone(), request_log.clone());
+    let state = Arc::new(AppState::new(
+        settings.clone(),
+        client.clone(),
+        accounts.clone(),
+        request_log,
+    ));
 
     // 启动立即刷新一遍账号额度,之后每 6 小时一遍;失败只记日志。
     {

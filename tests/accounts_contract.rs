@@ -25,15 +25,20 @@ fn app() -> (axum::Router, Arc<AccountStore>) {
         model_overrides: Default::default(),
         accounts_db: ":memory:".into(),
     });
+    let log_store = Arc::new(raycast2api::log::store::RequestLogStore::new(
+        Db::open(":memory:").unwrap(),
+    ));
     let client = raycast2api::raycast::client::RaycastClient::new(
         reqwest::Client::new(),
         settings.clone(),
         store.clone(),
+        log_store.clone(),
     );
     let state = Arc::new(raycast2api::server::state::AppState::new(
         settings,
         client,
         store.clone(),
+        log_store,
     ));
     (build_router(state), store)
 }
