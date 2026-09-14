@@ -1,12 +1,15 @@
 # docker-compose.yml — 运行 raycast2api 网关
 #
-# 快速开始：
-#   1. 在同目录建一个 .env 文件，至少填入：
-#        RAYCAST_DEVICE_ID=你的设备ID
-#   2. 准备账号数据（二选一或组合）：
-#        - ./account.json：启动时自动导入的账号令牌文件
-#        - ./store/store.db：持久化的 SQLite 存储库
-#   3. docker compose up -d
+# 配置方式二选一：
+#   A. 挂载 config.json（推荐，与本地运行一致）：
+#        取消下方 volumes 中 config.json 一行的注释，
+#        则无需任何环境变量（device_id 等都从 config.json 读）。
+#   B. 环境变量：
+#        在同目录建 .env 文件，至少填入 RAYCAST_DEVICE_ID=你的设备ID。
+#
+# 账号数据（可选）：
+#   - ./account.json：启动时自动导入的账号令牌文件
+#   - ./store/store.db：持久化的 SQLite 存储库（账号池 + 请求日志）
 #
 # 说明：所有可选项留空即视为“未设置”（网关内部把空字符串当作 None）。
 
@@ -22,8 +25,8 @@ services:
       # 左侧是宿主机端口（可用 PORT 覆盖），右侧是容器内固定端口 8787。
       - "${PORT:-8787}:8787"
     environment:
-      # ---- 必填：Raycast 设备ID（在 .env 中设置，未设置会直接报错退出）----
-      RAYCAST_DEVICE_ID: ${RAYCAST_DEVICE_ID:?请在 .env 中设置 RAYCAST_DEVICE_ID}
+      # ---- 方式 B 必填：Raycast 设备ID（挂载 config.json 时可整段删除）----
+      RAYCAST_DEVICE_ID: ${RAYCAST_DEVICE_ID:-}
       # ---- 可选（留空即为未设置）----
       API_KEY: ${API_KEY:-}                                    # 网关自身 API key；留空 = 不鉴权
       RAYCAST_SIGNATURE_SECRET: ${RAYCAST_SIGNATURE_SECRET:-}  # 留空 = 使用内置默认密钥
@@ -31,11 +34,14 @@ services:
       INCLUDE_DEPRECATED: ${INCLUDE_DEPRECATED:-true}          # /v1/models 是否包含已弃用模型
       RUST_LOG: ${RUST_LOG:-info}                              # 日志级别（tracing env-filter）
       # HOST/PORT 沿用镜像默认 0.0.0.0:8787，通常无需覆盖。
-    # 账号池数据：account.json 启动时导入一次（只读）；store/ 目录整体挂载持久化
-    # SQLite 存储库——必须挂目录而非单文件，否则 WAL 边车（store.db-wal/-shm）
-    # 留在容器层，容器异常退出时未 checkpoint 的数据会丢失。
-    # 两者都相对网关工作目录（容器内 /app，Dockerfile 已设 WORKDIR）读取。
+    # 配置与数据：注意容器内路径都在 /app 下（Dockerfile 的 WORKDIR）——
+    # 挂到 /config.json 这类根路径网关是读不到的。
     volumes:
+      # 方式 A：挂载 config.json（取消注释后 environment 段可只留 RUST_LOG 等可选项）
+      # - ./config.json:/app/config.json:ro
+      # 账号池数据：account.json 启动时导入一次（只读）；store/ 目录整体挂载
+      # 持久化 SQLite 存储库——必须挂目录而非单文件，否则 WAL 边车
+      # （store.db-wal/-shm）留在容器层，容器异常退出时未 checkpoint 的数据会丢失。
       - ./account.json:/app/account.json:ro
       - ./store:/app/store
     # 宿主机 ./store/ 目录不存在时 Docker 会自动创建空目录，无需手工准备。
