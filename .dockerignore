@@ -9,6 +9,8 @@ tests
 protocol
 charles
 config.json
+account.json
+accounts.db*
 .env
 .DS_Store
 *.md
