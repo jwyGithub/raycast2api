@@ -10,7 +10,7 @@ protocol
 charles
 config.json
 account.json
-accounts.db*
+store/
 .env
 .DS_Store
 *.md

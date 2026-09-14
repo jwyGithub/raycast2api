@@ -88,7 +88,7 @@ cp config.example.json config.json
   "api_key": "your-api-key-here",
   "raycast_device_id": "your-raycast-device-id",
   "raycast_signature_secret": null,
-  "accounts_db": "accounts.db",
+  "accounts_db": "store/accounts.db",
   "show_advanced": true,
   "include_deprecated": true
 }
@@ -101,7 +101,7 @@ cp config.example.json config.json
 | `raycast_device_id` | `RAYCAST_DEVICE_ID` | 是 | — | Raycast 设备 ID，同时参与签名计算 |
 | `raycast_signature_secret` | `RAYCAST_SIGNATURE_SECRET` | 否 | 内置默认密钥 | 签名密钥，一般无需设置 |
 | `api_key` | `API_KEY` | 否 | 无 | 网关自身的 API key；不设置则不鉴权 |
-| `accounts_db` | `ACCOUNTS_DB` | 否 | `accounts.db` | 账号池 SQLite 数据库文件路径 |
+| `accounts_db` | `ACCOUNTS_DB` | 否 | `store/accounts.db` | 账号池 SQLite 数据库文件路径 |
 | `host` | `HOST` | 否 | `0.0.0.0` | 监听地址（须为 IP） |
 | `port` | `PORT` | 否 | `8787` | 监听端口 |
 | `show_advanced` | `ADVANCED` | 否 | `true` | `/v1/models` 是否包含高级（premium）模型 |
@@ -168,5 +168,5 @@ tests/             契约测试与签名一致性测试
 
 ## 说明
 
-- `bearer_token`、`device_id`、`api_key` 等属于敏感信息，`config.json`、`account.json` 与 `.env` 已在 `.gitignore` 中忽略，请勿提交。`account.json`（导入账号池）与 `accounts.db`（SQLite 账号库）同样包含明文凭据，切勿暴露。
+- `bearer_token`、`device_id`、`api_key` 等属于敏感信息，`config.json`、`account.json` 与 `.env` 已在 `.gitignore` 中忽略，请勿提交。`account.json`（导入账号池）与 `store/accounts.db`（SQLite 账号库）同样包含明文凭据，切勿暴露。
 - 落盘目录（`DEBUG_DUMP_DIR`）包含完整请求与上游凭证相关数据，**切勿**将其暴露或提交到仓库。

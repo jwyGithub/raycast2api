@@ -15,9 +15,15 @@ use rusqlite::Connection;
 pub struct Db(Arc<Mutex<Connection>>);
 
 impl Db {
-    /// 打开(或创建)数据库文件;`:memory:` 用于测试。
-    /// WAL 与 busy timeout 让多线程/多进程读写更稳。
+    /// 打开(或创建)数据库文件;`:memory:` 用于测试。父目录不存在时
+    /// 自动创建。WAL 与 busy timeout 让多线程/多进程读写更稳。
     pub fn open(path: &str) -> Result<Self, String> {
+        if let Some(parent) = std::path::Path::new(path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create db dir '{}': {e}", parent.display()))?;
+        }
         let conn = Connection::open(path)
             .map_err(|e| format!("failed to open sqlite db '{path}': {e}"))?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
@@ -46,7 +52,25 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_directory_is_an_error() {
-        assert!(Db::open("/nonexistent-dir/x.db").is_err());
+    fn creates_missing_parent_directories() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("r2a-db-mkdir-{}/nested/x.db", std::process::id()));
+        let db = Db::open(path.to_str().unwrap()).unwrap();
+        db.lock()
+            .execute_batch("CREATE TABLE t (x INTEGER)")
+            .unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn parent_that_is_a_file_is_an_error() {
+        // 父路径是一个普通文件时,建目录失败,报错而非 panic。
+        let mut file = std::env::temp_dir();
+        file.push(format!("r2a-db-file-{}", std::process::id()));
+        std::fs::write(&file, "x").unwrap();
+        let db_path = format!("{}/x.db", file.to_str().unwrap());
+        assert!(Db::open(&db_path).is_err());
+        let _ = std::fs::remove_file(&file);
     }
 }
