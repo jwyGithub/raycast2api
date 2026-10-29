@@ -439,7 +439,7 @@ mod credits_tests {
 
         // 限额:429 / usage_limit / rate_limit。
         assert!(mk(429, "anything").is_usage_limit());
-        assert!(mk(200, "x").is_usage_limit() == false || true); // status alone
+        assert!(!mk(200, "x").is_usage_limit());
         assert!(!mk(403, "confirm your email").is_usage_limit());
 
         // 邮箱未确认:403 + confirm your email。

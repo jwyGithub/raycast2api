@@ -269,6 +269,26 @@ fn parse_proxies(
     Ok(proxies)
 }
 
+fn env_required(key: &str) -> Result<String, String> {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() => Ok(v),
+        _ => Err(format!("missing required environment variable {key}")),
+    }
+}
+
+fn env_opt(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+/// Boolean flag from the environment. Matches the reference semantics: any value
+/// other than the literal `"false"` (case-insensitive) is treated as enabled.
+fn env_flag(key: &str, default: bool) -> bool {
+    match env_opt(key) {
+        Some(v) => !v.eq_ignore_ascii_case("false"),
+        None => default,
+    }
+}
+
 #[cfg(test)]
 mod proxy_tests {
     use super::*;
@@ -300,25 +320,5 @@ mod proxy_tests {
 
         let err = parse_proxies(Some(vec!["ftp://1.2.3.4".into()]), None).unwrap_err();
         assert!(err.contains("invalid proxy"));
-    }
-}
-
-fn env_required(key: &str) -> Result<String, String> {
-    match std::env::var(key) {
-        Ok(v) if !v.is_empty() => Ok(v),
-        _ => Err(format!("missing required environment variable {key}")),
-    }
-}
-
-fn env_opt(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|s| !s.is_empty())
-}
-
-/// Boolean flag from the environment. Matches the reference semantics: any value
-/// other than the literal `"false"` (case-insensitive) is treated as enabled.
-fn env_flag(key: &str, default: bool) -> bool {
-    match env_opt(key) {
-        Some(v) => !v.eq_ignore_ascii_case("false"),
-        None => default,
     }
 }
