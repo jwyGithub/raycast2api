@@ -1,15 +1,18 @@
-//! Stream peeking: inspects the first SSE payload of a 200 chat response so
-//! the client can detect in-stream rejections (usage limits) *before* handing
-//! the stream to the caller, rotate accounts, and re-send.
+//! Stream peeking: inspects the leading SSE lines of a 200 chat response so
+//! the client can detect in-stream rejections (usage limits, unconfirmed
+//! email) *before* handing the stream to the caller, rotate accounts, and
+//! re-send.
 //!
 //! The peek must be invisible when there is no error: whatever bytes were read
 //! are spliced back in front of the remaining stream via [`ByteStream`], and
 //! the reconstructed [`reqwest::Response`] is byte-identical to what the
 //! caller would have seen without peeking.
 //!
-//! SSE payloads end with `\n`, and the first chunk of a fresh response almost
-//! always contains the complete first payload, so only one chunk is ever read;
-//! no cross-chunk buffering/waiting.
+//! Real Raycast streams do NOT start with the error payload directly — there
+//! can be `event:`/comment keep-alive lines first. So the peek scans the
+//! leading lines of the first chunk (stopping at the first `data:` line),
+//! which is where a rejection shows up; content streams start with a `data:`
+//! text delta instead and pass through untouched.
 
 use futures_util::{Stream, StreamExt};
 
@@ -31,9 +34,11 @@ impl PeekedError {
     }
 }
 
-/// Peek the first `data:` payload of a 200 SSE stream. Returns `Some` only
-/// when that payload carries an `error` object; otherwise the response is
-/// rebuilt with every byte back in place and returned unchanged.
+/// Peek the leading SSE lines of a 200 stream for an error payload. Scans
+/// every line of the first chunk until (and including) the first `data:` line
+/// — rejections arrive before any content — and returns `Some` when that
+/// payload carries an `error` object. Without an error the response is rebuilt
+/// with every byte back in place, byte-identical to not peeking at all.
 pub async fn peek_first_payload(
     response: reqwest::Response,
 ) -> (Option<PeekedError>, reqwest::Response) {
@@ -48,27 +53,42 @@ pub async fn peek_first_payload(
         return (None, rebuild(status, bytes, Some(chunk)));
     };
 
-    // 找到首行(payload)及其后的剩余字节。
-    let Some(nl) = text.find('\n') else {
-        // 首 chunk 不足一个完整行:按无错误处理,剩余字节(含本行)原样还回。
-        return (None, rebuild(status, bytes, Some(chunk)));
-    };
-
-    let (first_line, rest) = text.split_at(nl + 1);
-    if let Some(data) = first_line.trim().strip_prefix("data:") {
-        if let Some(error) = serde_json::from_str::<RaycastSsePayload>(data.trim())
-            .ok()
-            .and_then(|payload| payload.error)
-        {
-            // 是流内错误:消费首行,剩余字节(若有)接在流前端。
-            let raw = data.trim().to_string();
-            let err = PeekedError { parsed: error, raw };
-            let chunk = (!rest.is_empty()).then(|| ByteChunk::from(rest.to_owned()));
-            return (Some(err), rebuild(status, bytes, chunk));
+    // 逐行扫描到首个 `data:` 行为止:错误 payload 前可能有 event:/注释行。
+    let mut consumed = 0usize; // 已扫描字节数(行边界)
+    let mut error: Option<RaycastSseError> = None;
+    let mut error_raw = String::new();
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some(data) = trimmed.strip_prefix("data:") {
+            // 首个 data payload:是错误就记下并消费到本行末;无论是否错误,
+            // 扫描都到此为止 —— 内容流的首个 payload 是正常 delta。
+            if let Ok(payload) = serde_json::from_str::<RaycastSsePayload>(data.trim())
+                && let Some(err) = payload.error
+            {
+                error = Some(err);
+                error_raw = data.trim().to_string();
+            }
+            consumed += line.len();
+            break;
         }
+        // event:/id:/注释/空行:跳过继续扫。
+        consumed += line.len();
     }
 
-    // 不是错误 payload:整个 chunk 原样放回。
+    if let Some(parsed) = error {
+        // 是流内错误:消费已扫描字节(错误行含前面的事件行),剩余接回流前端。
+        let rest = &text[consumed..];
+        let chunk = (!rest.is_empty()).then(|| ByteChunk::from(rest.to_owned()));
+        return (
+            Some(PeekedError {
+                parsed,
+                raw: error_raw,
+            }),
+            rebuild(status, bytes, chunk),
+        );
+    }
+
+    // 不是错误流:整个 chunk 原样放回。
     (None, rebuild(status, bytes, Some(chunk)))
 }
 
@@ -157,11 +177,7 @@ mod tests {
     /// 用给定的首 chunk 构造一个待偷看的 200 响应。
     fn response_with(body: &'static [u8]) -> reqwest::Response {
         let stream = futures_util::stream::iter([Ok::<_, reqwest::Error>(ByteChunk::from(body))]);
-        rebuild(
-            reqwest::StatusCode::OK,
-            stream,
-            None,
-        )
+        rebuild(reqwest::StatusCode::OK, stream, None)
     }
 
     /// 消费重建后的响应,拼回全部字节。
@@ -186,9 +202,28 @@ mod tests {
         assert_eq!(drained(rest).await, b"data: {\"complete\":true}\n");
     }
 
+    /// 真实流形状:错误 payload 前有 event:/注释行(生产日志实测的失灵场景)。
+    #[tokio::test]
+    async fn error_after_event_lines_is_still_peeked() {
+        let body = b": keep-alive\n\n: another comment\n\n: keep-alive\n\ndata: {\"error\":{\"message\":\"limit\",\"http_status\":429}}\ndata: {\"complete\":true}\n";
+        let (peeked, rest) = peek_first_payload(response_with(body)).await;
+        let err = peeked.expect("error peeked through event lines");
+        assert_eq!(err.parsed.http_status, 429);
+        assert_eq!(drained(rest).await, b"data: {\"complete\":true}\n");
+    }
+
     #[tokio::test]
     async fn normal_payload_is_passed_through_byte_identical() {
         let body = b"data: {\"text\":\"hi\"}\ndata: [DONE]\n";
+        let (peeked, rest) = peek_first_payload(response_with(body)).await;
+        assert!(peeked.is_none());
+        assert_eq!(drained(rest).await, body);
+    }
+
+    /// 内容流带 event: 行开头也应原样通过。
+    #[tokio::test]
+    async fn content_stream_with_event_prefix_passes_through() {
+        let body = b"event: message\ndata: {\"text\":\"hi\"}\ndata: [DONE]\n";
         let (peeked, rest) = peek_first_payload(response_with(body)).await;
         assert!(peeked.is_none());
         assert_eq!(drained(rest).await, body);

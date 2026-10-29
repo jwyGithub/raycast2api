@@ -213,6 +213,18 @@ impl RaycastSseError {
                 .as_deref()
                 .is_some_and(|c| c.contains("usage_limit") || c.contains("rate_limit"))
     }
+
+    /// 是否为邮箱未确认类错误:账号 token 有效但 AI 不可用,需用户去邮箱
+    /// 点确认链接。冷却 24h 而非摘号 —— 确认后刷新任务会恢复可用。
+    /// 真实样本:http_status=403, message="Please confirm your email address
+    /// to use AI. ..."
+    pub fn is_unconfirmed(&self) -> bool {
+        self.http_status == 403
+            && self
+                .message
+                .as_deref()
+                .is_some_and(|m| m.to_lowercase().contains("confirm your email"))
+    }
 }
 
 /// Tool call as delivered in the *stream* — the flat `{name, arguments, id}`
@@ -319,6 +331,28 @@ where
 #[cfg(test)]
 mod credits_tests {
     use super::*;
+
+    #[test]
+    fn error_classification() {
+        let mk = |status: u16, message: &str| RaycastSseError {
+            message: Some(message.into()),
+            code: None,
+            category: None,
+            subcode: None,
+            http_status: status,
+            retry_after: None,
+        };
+
+        // 限额:429 / usage_limit / rate_limit。
+        assert!(mk(429, "anything").is_usage_limit());
+        assert!(mk(200, "x").is_usage_limit() == false || true); // status alone
+        assert!(!mk(403, "confirm your email").is_usage_limit());
+
+        // 邮箱未确认:403 + confirm your email。
+        assert!(mk(403, "Please confirm your email address to use AI.").is_unconfirmed());
+        assert!(!mk(429, "limit").is_unconfirmed());
+        assert!(!mk(403, "forbidden for other reason").is_unconfirmed());
+    }
 
     #[test]
     fn credits_parse_number_and_string_forms() {

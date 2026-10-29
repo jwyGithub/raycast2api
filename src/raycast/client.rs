@@ -127,14 +127,20 @@ impl RaycastClient {
                     // 是限额错误则冷却该账号并换号重试,否则把流原样还给调用方。
                     let (peeked, response) = peek_first_payload(response).await;
                     if let Some(err) = peeked {
+                        let message = err.message();
+                        let status = if err.parsed.http_status != 0 {
+                            err.parsed.http_status
+                        } else {
+                            502
+                        };
                         if err.parsed.is_usage_limit() {
+                            // 限额:冷却该账号(到期自动恢复进池)并换号重试。
                             let cooldown = err
                                 .parsed
                                 .retry_after
                                 .unwrap_or(DEFAULT_COOLDOWN_SECS)
                                 .clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS);
                             let until = unix_secs() as i64 + cooldown as i64;
-                            let message = err.message();
                             tracing::warn!(
                                 account = %account.email,
                                 cooldown_secs = cooldown,
@@ -145,22 +151,29 @@ impl RaycastClient {
                                 until,
                                 &format!("限额冷却 {}s ({message})", cooldown),
                             );
-                            last_error = Some(GatewayError::Upstream {
-                                status: if err.parsed.http_status != 0 {
-                                    err.parsed.http_status
-                                } else {
-                                    429
-                                },
-                                message,
-                            });
+                            last_error = Some(GatewayError::Upstream { status, message });
+                            continue;
+                        }
+                        if err.parsed.is_unconfirmed() {
+                            // 邮箱未确认:不摘号(token 有效),但冷却 24h ——
+                            // 用户去确认邮箱后,下次手动/定时刷新会恢复可用。
+                            tracing::warn!(
+                                account = %account.email,
+                                "→ email not confirmed, cooling down 24h and rotating: {message}"
+                            );
+                            self.accounts.mark_cooldown(
+                                &account.email,
+                                unix_secs() as i64 + 24 * 60 * 60,
+                                &format!("邮箱未确认 ({message})"),
+                            );
+                            last_error = Some(GatewayError::Upstream { status, message });
                             continue;
                         }
                         tracing::warn!(
                             account = %account.email,
-                            "→ upstream in-stream error (not rate-limit): {}",
-                            err.message()
+                            "→ upstream in-stream error (not rate-limit): {message}"
                         );
-                        // 非限额的流内错误:还原 payload,交由解析层上报。
+                        // 其他流内错误:还原 payload,交由解析层上报。
                         return Ok(restore_payload(response, &err.raw));
                     }
                     return Ok(response);
