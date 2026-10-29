@@ -95,10 +95,11 @@ impl ResponsesOutbound {
             let mut events = Box::pin(events);
             while let Some(event) = events.next().await {
                 let finished = matches!(event, CanonicalEvent::Finish { .. });
+                let failed = matches!(event, CanonicalEvent::Error { .. });
                 for frame in encoder.push(event) {
                     yield to_event(&frame);
                 }
-                if finished {
+                if finished || failed {
                     break;
                 }
             }
@@ -243,6 +244,9 @@ pub struct StreamEncoder {
     items: Vec<Value>,
     usage: ResponseUsage,
     finalized: bool,
+    /// Set when an in-stream upstream error arrived: `finalize` emits
+    /// `response.failed` instead of `response.completed`.
+    terminal_error: Option<(u16, String)>,
     /// Names of freeform (`custom`) tools: their calls emit
     /// `custom_tool_call` items with the raw text `input`.
     custom: HashSet<String>,
@@ -260,6 +264,7 @@ impl StreamEncoder {
             items: Vec::new(),
             usage: ResponseUsage::default(),
             finalized: false,
+            terminal_error: None,
             custom: HashSet::new(),
         }
     }
@@ -340,6 +345,12 @@ impl StreamEncoder {
                 self.usage = map_usage(usage);
                 Vec::new()
             }
+            CanonicalEvent::Error { status, message } => {
+                // Responses streams report failures via `response.failed`,
+                // carrying the standard OpenAI error envelope.
+                self.terminal_error = Some((status, message));
+                Vec::new()
+            }
         }
     }
 
@@ -352,6 +363,23 @@ impl StreamEncoder {
         self.finalized = true;
 
         let mut frames = self.close_current();
+
+        // An in-stream upstream error terminates the response as `response.failed`
+        // with the standard error envelope instead of `response.completed`.
+        if let Some((status, message)) = self.terminal_error.take() {
+            let mut response = self.response_snapshot("failed", Value::Null);
+            response["error"] = json!({
+                "message": message,
+                "type": "upstream_error",
+                "code": status.to_string(),
+            });
+            frames.push(self.frame(
+                "response.failed",
+                json!({ "type": "response.failed", "response": response }),
+            ));
+            return frames;
+        }
+
         // Serialize the shared `ResponseUsage` so the streamed usage is byte-for-byte
         // the same object the non-streaming response carries (incl. the optional
         // `input_tokens_details`).

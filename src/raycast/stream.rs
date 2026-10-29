@@ -50,26 +50,32 @@ pub fn canonical_events(
                     // so this generator's tail code never runs on the streaming
                     // path — record as soon as the terminating payload is seen.
                     // Anything after it is `[DONE]` / notifications.
-                    if matches!(event, CanonicalEvent::Finish { .. }) {
+                    if matches!(
+                        event,
+                        CanonicalEvent::Finish { .. } | CanonicalEvent::Error { .. }
+                    ) {
                         log.update_response(&id, &payloads.join("\n"));
                     }
                     // 打印解析后的规范事件
                     match &event {
                         CanonicalEvent::TextDelta(text) => {
-                            tracing::info!("→ text: {}", text);
+                            tracing::info!("→ text [{id}]: {}", text);
                         }
                         CanonicalEvent::ReasoningDelta(text) => {
-                            tracing::info!("→ reasoning: {}", text);
+                            tracing::info!("→ reasoning [{id}]: {}", text);
                         }
                         CanonicalEvent::ThoughtSignature(sig) => {
-                            tracing::info!("→ thought_signature: {}", sig);
+                            tracing::info!("→ thought_signature [{id}]: {}", sig);
                         }
                         CanonicalEvent::ToolCall(call) => {
-                            tracing::info!("→ tool_call: {} (id: {})", call.name, call.id);
+                            tracing::info!("→ tool_call [{id}]: {} (id: {})", call.name, call.id);
                         }
                         CanonicalEvent::Finish { reason, usage } => {
-                            tracing::info!("→ finish: reason={:?}, tokens={{input: {}, output: {}, cached: {}}}",
+                            tracing::info!("→ finish [{id}]: reason={:?}, tokens={{input: {}, output: {}, cached: {}}}",
                                 reason, usage.input_tokens, usage.output_tokens, usage.cached_tokens);
+                        }
+                        CanonicalEvent::Error { status, message } => {
+                            tracing::error!("→ upstream error [{id}]: status={status}, message={message}");
                         }
                     }
                     yield event;

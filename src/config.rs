@@ -32,6 +32,15 @@ pub const DEFAULT_PROVIDER: &str = "openai";
 /// Fallback upstream model when a requested model id can't be resolved.
 pub const DEFAULT_INTERNAL_MODEL: &str = "gpt-4o-mini";
 
+/// 限额账号冷却缺省时长(秒):上游未给 `retry_after` 时使用。
+pub const DEFAULT_COOLDOWN_SECS: u64 = 600;
+
+/// 冷却时长下限(秒):防止上游异常值导致账号长时间不可用。
+pub const MIN_COOLDOWN_SECS: u64 = 60;
+
+/// 冷却时长上限(秒):封顶一天。
+pub const MAX_COOLDOWN_SECS: u64 = 24 * 60 * 60;
+
 /// JSON configuration file structure.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ConfigFile {

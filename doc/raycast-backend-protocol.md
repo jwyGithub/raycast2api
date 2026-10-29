@@ -205,6 +205,28 @@ data: {"complete":true}
 
 `finish_reason` 取值:`stop`(正常结束)、`tool_calls`(需要执行工具)。
 
+### 3.5 流内错误 payload(限额拒绝)
+
+**注意**:上游部分错误(如账号额度耗尽)**不返回 HTTP 错误状态**,而是返回 HTTP 200 + SSE 流,错误以一个独立的 `data:` payload 出现在流内。真实抓包样本(试用账号触发 25 次/小时限额):
+
+```jsonc
+{
+  "error": {
+    "message": "You've reached your free trial limit of 25 AI requests per hour. Upgrade to Raycast Pro to continue, or try again in 7 minutes.",
+    "type": "model_rate_limit_reached_error",
+    "category": "usage_limit",
+    "code": "usage_limit_reached",
+    "subcode": "model_usage_limited",
+    "retryable": true,
+    "request_id": "334ff406-5c15-417d-8645-37660f640fc0",
+    "retry_after": 447,        // 秒;窗口过后自动恢复
+    "http_status": 429         // 上游"本应返回"的 HTTP 状态,仅写在流内
+  }
+}
+```
+
+该 payload 无 `text`/`finish_reason` 字段,若解析器只认内容字段会被静默丢弃 → 客户端收到空流 + `data:[DONE]`。网关将其解析为 `CanonicalEvent::Error`(取 `http_status`,缺省 502),非流式路径返回真实 HTTP 状态 + 上游原文,流式路径按客户端协议输出错误帧(OpenAI 系 `data:{"error":{...}}`、Anthropic `event: error`、Responses `response.failed`)。
+
 ---
 
 ## 4. 对网关(raycast2api)的映射要点
@@ -246,4 +268,4 @@ data: {"complete":true}
 1. **签名算法** `x-raycast-signature-v2`:本次抓包无法反推。实现时预期复用用户 Raycast token 及其 deviceid;若后端校验签名与 body 绑定,需要进一步逆向。
 2. **模型清单**:本包仅见 `claude-haiku-4-5-20251001-reasoning`、`gpt-5.6-luna`。完整可用模型与其 `provider`/是否支持 think,需要抓 Raycast 的模型列表接口(或 `x-raycast-experimental: autoModels` 相关接口)补全。
 3. **纯非 think 模型的响应**:本包中非 think 的仅为标题生成(`ai_chat_title`)调用;正式对话里非 think 模型的 `reasoning` 是否恒为空,建议再抓一条确认。
-4. **错误响应体结构**:本包无失败样本,后端错误时的 SSE/JSON 结构待补抓。
+4. **错误响应体结构**:流内错误 payload 已有真实样本(见 3.5,限额拒绝);HTTP 非 2xx 状态码下的错误体结构仍待补抓。

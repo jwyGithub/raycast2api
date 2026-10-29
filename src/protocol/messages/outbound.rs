@@ -55,13 +55,27 @@ impl OutboundAdapter for MessagesOutbound {
             yield to_event(&encoder.message_start(&id, &model));
 
             let mut events = Box::pin(events);
+            // Set when an in-stream upstream error terminated the loop: the
+            // terminal `error` frame is already emitted, so `finalize` (which
+            // would append message_delta/message_stop) must be skipped.
+            let mut failed = false;
             while let Some(event) = events.next().await {
                 let finished = matches!(event, CanonicalEvent::Finish { .. });
+                failed |= matches!(event, CanonicalEvent::Error { .. });
                 for frame in encoder.push(event) {
                     yield to_event(&frame);
                 }
-                if finished {
+                if finished || failed {
                     break;
+                }
+            }
+
+            // On an in-stream error the encoder already emitted the terminal
+            // `error` frame — skip `finalize` so no trailing message frames
+            // follow it.
+            if !failed {
+                for frame in encoder.finalize() {
+                    yield to_event(&frame);
                 }
             }
 
@@ -260,6 +274,26 @@ impl StreamEncoder {
                 // non-streaming `message_response`.
                 self.usage = usage;
                 Vec::new()
+            }
+            CanonicalEvent::Error { status, message } => {
+                // Anthropic streams report failures as a terminal `error` event
+                // (cf. `error_type` in `super::error` for the type taxonomy).
+                let kind = match status {
+                    400 => "invalid_request_error",
+                    401 => "authentication_error",
+                    403 => "permission_error",
+                    404 => "not_found_error",
+                    429 => "rate_limit_error",
+                    529 => "overloaded_error",
+                    _ => "api_error",
+                };
+                vec![SseFrame {
+                    event: "error",
+                    data: serde_json::json!({
+                        "type": "error",
+                        "error": { "type": kind, "message": message }
+                    }),
+                }]
             }
         }
     }

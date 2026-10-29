@@ -32,6 +32,13 @@ pub async fn run<O: OutboundAdapter>(
     request: CanonicalRequest,
 ) -> Result<Response, GatewayError> {
     let (provider, model) = state.resolve_model(&request.model).await;
+    tracing::info!(
+        client_model = %request.model,
+        upstream = %format!("{provider}/{model}"),
+        stream = request.stream,
+        messages = request.messages.len(),
+        "inference request"
+    );
     let raycast_request = build_chat_request(&request, &provider, &model);
 
     let response = state.client.send_chat(&raycast_request).await?;
@@ -45,18 +52,25 @@ pub async fn run<O: OutboundAdapter>(
     if request.stream {
         Ok(O::stream_with_tools(&client_model, &request.tools, events))
     } else {
-        let aggregated = aggregate(events).await;
-        Ok(O::render_complete_with_tools(
-            &client_model,
-            &request.tools,
-            &aggregated,
-        ))
+        match aggregate(events).await {
+            Ok(aggregated) => Ok(O::render_complete_with_tools(
+                &client_model,
+                &request.tools,
+                &aggregated,
+            )),
+            // The upstream failed inside its 200 stream — render the error in
+            // the client protocol's own envelope with the real status.
+            Err(error) => Ok(O::render_error(error)),
+        }
     }
 }
 
 /// Consume the whole canonical event stream, folding it into a single
-/// [`CanonicalResponse`] for the non-streaming path.
-async fn aggregate(events: impl Stream<Item = CanonicalEvent>) -> CanonicalResponse {
+/// [`CanonicalResponse`] for the non-streaming path. An in-stream upstream
+/// error aborts the fold with a [`GatewayError::Upstream`].
+async fn aggregate(
+    events: impl Stream<Item = CanonicalEvent>,
+) -> Result<CanonicalResponse, GatewayError> {
     let mut events = std::pin::pin!(events);
     let mut response = CanonicalResponse::default();
 
@@ -72,8 +86,11 @@ async fn aggregate(events: impl Stream<Item = CanonicalEvent>) -> CanonicalRespo
                 response.finish_reason = reason;
                 response.usage = usage;
             }
+            CanonicalEvent::Error { status, message } => {
+                return Err(GatewayError::Upstream { status, message });
+            }
         }
     }
 
-    response
+    Ok(response)
 }

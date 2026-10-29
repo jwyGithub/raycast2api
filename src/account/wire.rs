@@ -75,6 +75,9 @@ pub struct AccountView {
     pub remaining_usd: Option<f64>,
     pub next_credits_at: Option<String>,
     pub info_fetched_at: Option<String>,
+    /// 限额冷却截止(unix 秒);`None` = 不在冷却中。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_until: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }

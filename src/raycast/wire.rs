@@ -166,6 +166,53 @@ pub struct RaycastSseData {
     /// omit it), so the parser can skip them without misreading a delta.
     #[serde(default)]
     pub notification_type: Option<String>,
+    /// Set when the upstream rejects the request inside the 200 SSE stream
+    /// (usage limit, model unavailable, ...): `{ "error": { ... } }`. The
+    /// parser surfaces it as [`CanonicalEvent::Error`] instead of dropping it.
+    #[serde(default)]
+    pub error: Option<RaycastSseError>,
+}
+
+/// 一个完整 SSE `data:` payload 的顶层 JSON,供[流探测](super::peek)在换号
+/// 决策时偷看首 payload 用;只关心 `error` 字段,其余忽略。
+#[derive(Debug, Deserialize)]
+pub struct RaycastSsePayload {
+    #[serde(default)]
+    pub error: Option<RaycastSseError>,
+}
+
+/// The error object embedded in an in-stream rejection payload. Only `message`
+/// is guaranteed; the rest mirror Raycast's richer fields when present.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RaycastSseError {
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub subcode: Option<String>,
+    /// Raycast's own HTTP mapping (e.g. 429 for usage limits); 0 when absent.
+    #[serde(default)]
+    pub http_status: u16,
+    /// Seconds to wait before retrying, when the upstream says so.
+    #[serde(default)]
+    pub retry_after: Option<u64>,
+}
+
+impl RaycastSseError {
+    /// 是否为限额/额度类临时错误(冷却换号只对这类生效)。优先用结构化的
+    /// `category`/`code` 判断,样本:`category: "usage_limit"`、
+    /// `code: "usage_limit_reached"`。
+    pub fn is_usage_limit(&self) -> bool {
+        self.http_status == 429
+            || self.category.as_deref() == Some("usage_limit")
+            || self
+                .code
+                .as_deref()
+                .is_some_and(|c| c.contains("usage_limit") || c.contains("rate_limit"))
+    }
 }
 
 /// Tool call as delivered in the *stream* — the flat `{name, arguments, id}`

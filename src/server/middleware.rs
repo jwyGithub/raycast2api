@@ -86,5 +86,17 @@ pub async fn debug_capture(
     // Rebuild the request with the buffered body and run the handler within the
     // correlation-id scope; the upstream send happens inside this await.
     let request = Request::from_parts(parts, Body::from(bytes));
-    Ok(REQUEST_ID.scope(id, next.run(request)).await)
+    let started = std::time::Instant::now();
+    // handler 的 Err(GatewayError) 已由 axum 渲染为错误响应,这里只看状态码。
+    let response = REQUEST_ID.scope(id.clone(), next.run(request)).await;
+
+    // 请求/响应配对的完成日志:状态码 + 耗时,与 stream 层的 `[id]` 前缀
+    // 和 client 层的账号日志对得上。
+    let status = response.status();
+    if status.is_success() {
+        tracing::info!("← {status} [{id}] in {:?}", started.elapsed());
+    } else {
+        tracing::warn!("← {status} [{id}] in {:?}", started.elapsed());
+    }
+    Ok(response)
 }

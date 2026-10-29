@@ -8,10 +8,10 @@ use std::sync::Arc;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 
-use crate::account::store::AccountStore;
+use crate::account::store::{AccountRow, AccountStore};
 use crate::config::{
-    RAYCAST_AI_CREDITS_URL, RAYCAST_API_URL, RAYCAST_ME_URL, RAYCAST_MODELS_URL, Settings,
-    USER_AGENT,
+    DEFAULT_COOLDOWN_SECS, MAX_COOLDOWN_SECS, MIN_COOLDOWN_SECS, RAYCAST_AI_CREDITS_URL,
+    RAYCAST_API_URL, RAYCAST_ME_URL, RAYCAST_MODELS_URL, Settings, USER_AGENT,
 };
 use crate::debug;
 use crate::error::GatewayError;
@@ -19,6 +19,7 @@ use crate::log::store::RequestLogStore;
 use crate::signature::calculate_signature_v2;
 use crate::util::unix_secs;
 
+use super::peek::{peek_first_payload, restore_payload};
 use super::wire::{
     RaycastChatRequest, RaycastCredits, RaycastMe, RaycastModelsResponse, RaycastRawModel,
 };
@@ -89,17 +90,94 @@ impl RaycastClient {
 
     /// POST a chat request. Returns the streaming response on success (status
     /// already validated); the caller consumes `bytes_stream()`.
+    ///
+    /// 账号故障切换:401 摘号换下一个重试;200 但流内首 payload 是限额错误
+    /// 时给账号设冷却期(取上游 `retry_after`)再换号重试。池内全部不可用
+    /// 时把最后一个真实错误透传给客户端。
     pub async fn send_chat(
         &self,
         request: &RaycastChatRequest,
     ) -> Result<reqwest::Response, GatewayError> {
-        let account = self.accounts.next_available()?;
         let body = serde_json::to_string(request)?;
+        let attempts = self.accounts.count_available().max(1);
+        let mut last_error: Option<GatewayError> = None;
+
+        for _ in 0..attempts {
+            let account = self.accounts.next_available()?;
+            tracing::info!(account = %account.email, tag = ?account.tag, "→ using account");
+            match self.try_chat(&account, &body).await {
+                Ok(response) => {
+                    // 上游部分错误(限额)藏在 200 SSE 流内:偷看首 payload,
+                    // 是限额错误则冷却该账号并换号重试,否则把流原样还给调用方。
+                    let (peeked, response) = peek_first_payload(response).await;
+                    if let Some(err) = peeked {
+                        if err.parsed.is_usage_limit() {
+                            let cooldown = err
+                                .parsed
+                                .retry_after
+                                .unwrap_or(DEFAULT_COOLDOWN_SECS)
+                                .clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS);
+                            let until = unix_secs() as i64 + cooldown as i64;
+                            let message = err.message();
+                            tracing::warn!(
+                                account = %account.email,
+                                cooldown_secs = cooldown,
+                                "→ account rate-limited, cooling down and rotating: {message}"
+                            );
+                            self.accounts.mark_cooldown(
+                                &account.email,
+                                until,
+                                &format!("限额冷却 {}s ({message})", cooldown),
+                            );
+                            last_error = Some(GatewayError::Upstream {
+                                status: if err.parsed.http_status != 0 {
+                                    err.parsed.http_status
+                                } else {
+                                    429
+                                },
+                                message,
+                            });
+                            continue;
+                        }
+                        tracing::warn!(
+                            account = %account.email,
+                            "→ upstream in-stream error (not rate-limit): {}",
+                            err.message()
+                        );
+                        // 非限额的流内错误:还原 payload,交由解析层上报。
+                        return Ok(restore_payload(response, &err.raw));
+                    }
+                    return Ok(response);
+                }
+                // 401 = 该账号 token 失效:摘除后换号重试。
+                Err(err @ GatewayError::Upstream { status: 401, .. }) => {
+                    tracing::warn!(account = %account.email, "→ token invalid (401), removing account and rotating");
+                    self.accounts
+                        .mark_unavailable(&account.email, "token 失效 (401)");
+                    last_error = Some(err);
+                }
+                Err(err) => {
+                    tracing::error!(account = %account.email, "→ upstream request failed: {err}");
+                    return Err(err);
+                }
+            }
+        }
+
+        // 池内账号全部 401 / 限额:透传最后一个真实错误。
+        tracing::error!(attempts, "all available accounts failed; surfacing last error to client");
+        Err(last_error
+            .unwrap_or(GatewayError::NoAccount(
+                "no available Raycast account; add or refresh one via POST /v1/accounts".into(),
+            )))
+    }
+
+    /// 单次上游请求(签名 + 发送 + 状态校验),供 [`Self::send_chat`] 轮换调用。
+    async fn try_chat(&self, account: &AccountRow, body: &str) -> Result<reqwest::Response, GatewayError> {
         let timestamp = unix_secs().to_string();
         let signature = calculate_signature_v2(
             &timestamp,
             &self.settings.raycast_device_id,
-            &body,
+            body,
             self.settings.signature_secret(),
         );
 
@@ -118,20 +196,11 @@ impl RaycastClient {
             .http
             .post(RAYCAST_API_URL)
             .headers(headers)
-            .body(body)
+            .body(body.to_owned())
             .send()
             .await?;
 
-        match ensure_success(response).await {
-            Ok(response) => Ok(response),
-            // 401 = 该账号 token 失效:摘除后返回错误,下次请求自动换号。
-            Err(err @ GatewayError::Upstream { status: 401, .. }) => {
-                self.accounts
-                    .mark_unavailable(&account.email, "token 失效 (401)");
-                Err(err)
-            }
-            Err(err) => Err(err),
-        }
+        ensure_success(response).await
     }
 
     /// Fetch the raw list of models available to the account.
@@ -184,4 +253,23 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
     let status = response.status().as_u16();
     let message = response.text().await.unwrap_or_default();
     Err(GatewayError::Upstream { status, message })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cooldown_clamps_to_configured_bounds() {
+        // 上游给的 retry_after 会被夹到配置的上下限内。
+        assert_eq!(999.clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS), 999);
+        assert_eq!(
+            5.clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS),
+            MIN_COOLDOWN_SECS
+        );
+        assert_eq!(
+            (30 * 60 * 60).clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS),
+            MAX_COOLDOWN_SECS
+        );
+    }
 }

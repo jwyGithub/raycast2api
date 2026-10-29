@@ -12,7 +12,7 @@
 - **模型直通**：`GET /v1/models` 透出账号可用模型，可选择是否包含高级 / 已弃用模型。
 - **请求日志**：每个推理请求的入站体、发给上游的请求体与上游 SSE 响应自动存入 SQLite（`store/store.db`），按时间保留 3 天自动清理。`GET /v1/logs` 查看列表（`limit` 默认 50、上限 200，`before_id` 翻页），`GET /v1/logs/{request_id}` 查看三体全文。
 - **可选鉴权**：设置 `api_key` 后，所有推理与只读接口都需要携带该 key。
-- **多账号管理**：SQLite 账号池，启动从 `account.json` 导入（email 去重、token 变化自动更新），请求轮询分摊额度；401 / 额度耗尽自动摘除，额度恢复自动上线；每 6 小时后台刷新额度。
+- **多账号管理与智能路由**：SQLite 账号池，启动从 `account.json` 导入（email 去重、token 变化自动更新），请求轮询分摊额度。**故障自动切换**：401（token 失效）自动摘号换下一个账号重试；限额（上游 200 流内错误，见下方说明）自动给该账号设冷却期（取上游 `retry_after`，缺省 10 分钟）并换号重试，冷却到点自动恢复。池内所有账号都不可用时，把上游真实错误透传给客户端。每 6 小时后台刷新额度。
 - **双栈监听**：绑定 `0.0.0.0` 时自动同时监听 IPv6 `[::]`。
 
 ## 架构
@@ -170,4 +170,7 @@ tests/             契约测试与签名一致性测试
 
 ## 说明
 
+- **上游限额行为**：Raycast 试用账号有 **25 次/小时** 的对话次数限额（Pro 账号按额度计）。关键点：限额触发时上游**不返回 HTTP 错误状态**，而是返回 200 + SSE 流，错误藏在流内的一个 payload 里：
+  `{"error":{"message":"You've reached your free trial limit of 25 AI requests per hour...","code":"usage_limit_reached","http_status":429,"retry_after":447}}`
+  网关会解析流内错误并转成客户端协议的标准错误帧（OpenAI 系 `{"error":{...}}`、Anthropic `event: error`、Responses `response.failed`），错误信息透传，不会无声结束。额度窗口过后账号自动恢复，无需处理。
 - `bearer_token`、`device_id`、`api_key` 等属于敏感信息，`config.json`、`account.json` 与 `.env` 已在 `.gitignore` 中忽略，请勿提交。`account.json`（导入账号池）与 `store/store.db`（SQLite 存储库，含账号凭据与请求日志全文）同样包含明文凭据，切勿暴露。

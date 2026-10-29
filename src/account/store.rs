@@ -35,6 +35,9 @@ pub struct AccountRow {
     pub remaining_usd: Option<f64>,
     pub next_credits_at: Option<String>,
     pub info_fetched_at: Option<String>,
+    /// 限额冷却截止时间(unix 秒)。轮询跳过冷却中的账号,到点自动恢复;
+    /// 与 401 的 `available=0` 摘除不同,冷却不摘号,只是暂时避开。
+    pub cooldown_until: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -58,6 +61,7 @@ impl AccountRow {
             remaining_usd: self.remaining_usd,
             next_credits_at: self.next_credits_at.clone(),
             info_fetched_at: self.info_fetched_at.clone(),
+            cooldown_until: self.cooldown_until,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
         }
@@ -89,12 +93,29 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 ";
 
+/// 既有库的增量迁移:旧 schema 没有 `cooldown_until` 列,`ALTER TABLE`
+/// 加列幂等不可行,用 `PRAGMA table_info` 判断。
+fn migrate(conn: &rusqlite::Connection) {
+    let has_cooldown: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name = 'cooldown_until'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    if !has_cooldown {
+        conn.execute_batch("ALTER TABLE accounts ADD COLUMN cooldown_until INTEGER;")
+            .expect("migrate accounts: add cooldown_until");
+    }
+}
+
 /// 查询列的统一顺序(`list` / `next_available` 共用);`id` 在首位,
 /// 供轮询游标使用。
 const ROW_COLUMNS: &str = "id, email, tag, access_token, refresh_token, obtained_at, \
     available, unavailable_reason, tier, sub_status, trial_days_left, \
     current_period_end, remaining_credits, total_credits, remaining_usd, \
-    next_credits_at, info_fetched_at, created_at, updated_at";
+    next_credits_at, info_fetched_at, cooldown_until, created_at, updated_at";
 
 pub struct AccountStore {
     db: Db,
@@ -104,11 +125,14 @@ pub struct AccountStore {
 }
 
 impl AccountStore {
-    /// 构造并建表(幂等)。
+    /// 构造并建表(幂等),并做既有库的增量迁移。
     pub fn new(db: Db) -> Self {
-        db.lock()
-            .execute_batch(SCHEMA)
-            .expect("create accounts schema");
+        {
+            let conn = db.lock();
+            conn.execute_batch(SCHEMA)
+                .expect("create accounts schema");
+            migrate(&conn);
+        }
         Self {
             db,
             last_id: AtomicI64::new(0),
@@ -193,6 +217,21 @@ impl AccountStore {
         Ok(rows.into_iter().map(|(_, row)| row).collect())
     }
 
+    /// 当前可选(未摘除、不在冷却)的账号数,作为 `send_chat` 换号重试的上限。
+    pub fn count_available(&self) -> usize {
+        let now = unix_secs() as i64;
+        self.db
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM accounts
+                 WHERE available = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?1)",
+                [now],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+            .unwrap_or(0)
+    }
+
     /// 删除;返回是否存在。
     pub fn delete(&self, email: &str) -> Result<bool, GatewayError> {
         let conn = self.db.lock();
@@ -202,16 +241,21 @@ impl AccountStore {
         Ok(n > 0)
     }
 
-    /// 轮询取下一个可用账号;全不可用报 [`GatewayError::NoAccount`]。
+    /// 轮询取下一个可用账号(未摘除且不在限额冷却期);全不可用报
+    /// [`GatewayError::NoAccount`]。
     pub fn next_available(&self) -> Result<AccountRow, GatewayError> {
+        let now = unix_secs() as i64;
         let rows = {
             let conn = self.db.lock();
             let mut stmt = conn
                 .prepare(&format!(
-                    "SELECT {ROW_COLUMNS} FROM accounts WHERE available = 1 ORDER BY id"
+                    "SELECT {ROW_COLUMNS} FROM accounts
+                     WHERE available = 1
+                       AND (cooldown_until IS NULL OR cooldown_until <= ?1)
+                     ORDER BY id"
                 ))
                 .map_err(sql_err)?;
-            stmt.query_map([], row_to_account)
+            stmt.query_map([now], row_to_account)
                 .map_err(sql_err)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(sql_err)?
@@ -233,6 +277,20 @@ impl AccountStore {
     /// 摘除(401 / 额度耗尽)。
     pub fn mark_unavailable(&self, email: &str, reason: &str) {
         self.set_available(email, false, Some(reason));
+    }
+
+    /// 限额冷却:账号保持 `available=1`,但轮询在 `until`(unix 秒)前
+    /// 跳过它。到期自动恢复,无需显式清除。
+    pub fn mark_cooldown(&self, email: &str, until_unix_secs: i64, reason: &str) {
+        let conn = self.db.lock();
+        let _ = conn.execute(
+            "UPDATE accounts
+                SET cooldown_until = ?2,
+                    unavailable_reason = ?3,
+                    updated_at = ?4
+             WHERE email = ?1",
+            rusqlite::params![email, until_unix_secs, reason, unix_secs().to_string()],
+        );
     }
 
     /// 设置可用性;`available = true` 时清空原因。
@@ -299,8 +357,9 @@ fn row_to_account(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, AccountRow)> 
             remaining_usd: r.get(14)?,
             next_credits_at: r.get(15)?,
             info_fetched_at: r.get(16)?,
-            created_at: r.get(17)?,
-            updated_at: r.get(18)?,
+            cooldown_until: r.get(17)?,
+            created_at: r.get(18)?,
+            updated_at: r.get(19)?,
         },
     ))
 }
@@ -378,6 +437,25 @@ mod tests {
         assert_eq!(s.next_available().unwrap().email, "c@x");
         assert_eq!(s.next_available().unwrap().email, "a@x");
         assert_eq!(s.next_available().unwrap().email, "c@x");
+    }
+
+    #[test]
+    fn cooldown_skips_account_until_expiry() {
+        let s = store();
+        s.upsert(&rec("a@x", "ta")).unwrap();
+        s.upsert(&rec("b@x", "tb")).unwrap();
+
+        // a 进入冷却:轮询只剩 b。
+        s.mark_cooldown("a@x", unix_secs() as i64 + 600, "限额 25/h");
+        assert_eq!(s.next_available().unwrap().email, "b@x");
+        assert_eq!(s.next_available().unwrap().email, "b@x");
+        let a = &s.list().unwrap()[0];
+        assert!(a.available, "冷却不摘号");
+        assert!(a.cooldown_until.is_some());
+
+        // 冷却到期自动恢复。
+        s.mark_cooldown("a@x", unix_secs() as i64 - 1, "已过期");
+        assert_eq!(s.next_available().unwrap().email, "a@x");
     }
 
     #[test]

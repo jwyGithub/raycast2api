@@ -38,6 +38,19 @@ pub fn parse_events(payload: &str) -> Vec<CanonicalEvent> {
         return Vec::new();
     }
 
+    // An in-stream rejection (200 status, error payload inside the stream).
+    // Surfaced as a first-class event so no outbound adapter can silently
+    // swallow it — previously this arm returned `Vec::new()` and the client
+    // saw an empty completion.
+    if let Some(err) = data.error {
+        let message = err
+            .message
+            .unwrap_or_else(|| "upstream error (no message provided)".to_string());
+        let status = if err.http_status != 0 { err.http_status } else { 502 };
+        tracing::warn!(status, %message, "upstream in-stream error");
+        return vec![CanonicalEvent::Error { status, message }];
+    }
+
     let mut events = Vec::new();
 
     // Reasoning end delivers the thought signature (with empty reasoning/text).
@@ -97,6 +110,22 @@ fn usage(raw: Option<RaycastUsage>) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_stream_error_payload_becomes_error_event() {
+        // Real capture: Raycast rejects an exhausted account inside a 200 SSE
+        // stream instead of returning an HTTP error status.
+        let payload = r#"{"error":{"message":"You've reached your free trial limit of 25 AI requests per hour. Upgrade to Raycast Pro to continue, or try again in 7 minutes.","type":"model_rate_limit_reached_error","category":"usage_limit","code":"usage_limit_reached","subcode":"model_usage_limited","retryable":true,"request_id":"334ff406","retry_after":447,"http_status":429}}"#;
+        let events = parse_events(payload);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            CanonicalEvent::Error { status, message } => {
+                assert_eq!(*status, 429);
+                assert!(message.contains("free trial limit"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
 
     #[test]
     fn ignores_notifications_pings_and_sentinels() {

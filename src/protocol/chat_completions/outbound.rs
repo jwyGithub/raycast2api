@@ -131,6 +131,20 @@ impl OutboundAdapter for ChatCompletionsOutbound {
                         yield sse_json(&usage_chunk);
                         break;
                     }
+                    CanonicalEvent::Error { status, message } => {
+                        // Terminal in-stream upstream failure: OpenAI streams
+                        // report this as an `error` data event instead of a
+                        // final chunk, so the client sees the real cause.
+                        let err = serde_json::json!({
+                            "error": {
+                                "message": message,
+                                "type": "upstream_error",
+                                "code": status.to_string(),
+                            }
+                        });
+                        yield Ok(Event::default().data(err.to_string()));
+                        return;
+                    }
                     // Reasoning and thought signatures stay off the byte-compatible
                     // chat/completions stream (available as an opt-in extension).
                     _ => {}
