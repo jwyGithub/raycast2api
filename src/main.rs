@@ -41,7 +41,12 @@ async fn main() {
 
     let request_log = Arc::new(raycast2api::log::store::RequestLogStore::new(db));
 
-    let client = RaycastClient::new(http, settings.clone(), accounts.clone(), request_log.clone());
+    let client = RaycastClient::new(
+        http,
+        settings.clone(),
+        accounts.clone(),
+        request_log.clone(),
+    );
     let state = Arc::new(AppState::new(
         settings.clone(),
         client.clone(),
@@ -55,8 +60,8 @@ async fn main() {
         let client = client;
         tokio::spawn(async move {
             loop {
-                raycast2api::account::refresh::refresh_all(&accounts, &client).await;
-                tokio::time::sleep(raycast2api::account::refresh::REFRESH_INTERVAL).await;
+                raycast2api::account::quota_refresh::refresh_all(&accounts, &client).await;
+                tokio::time::sleep(raycast2api::account::quota_refresh::REFRESH_INTERVAL).await;
             }
         });
     }

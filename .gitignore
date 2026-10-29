@@ -12,3 +12,7 @@ account.json
 store/
 .claude
 scripts
+# 账号 token 文件(含敏感凭据,只放本地/由配置导入)
+/accounts/
+account.json
+store/

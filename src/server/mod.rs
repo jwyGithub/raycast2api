@@ -9,7 +9,7 @@ pub mod state;
 
 use axum::Router;
 use axum::http::Method;
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -32,7 +32,14 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::accounts::list).post(handlers::accounts::upsert),
         )
         .route("/v1/accounts/refresh", post(handlers::accounts::refresh))
-        .route("/v1/accounts/{email}", delete(handlers::accounts::delete))
+        .route(
+            "/v1/accounts/{email}/restore",
+            post(handlers::accounts::restore),
+        )
+        .route(
+            "/v1/accounts/{email}",
+            get(handlers::accounts::get_one).delete(handlers::accounts::delete),
+        )
         .route("/v1/logs", get(handlers::logs::list))
         .route("/v1/logs/{request_id}", get(handlers::logs::detail))
         .route(

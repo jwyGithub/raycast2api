@@ -51,13 +51,7 @@ impl RequestLogStore {
             "INSERT OR IGNORE INTO request_logs
                 (request_id, created_at, method, path, inbound_json)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                request_id,
-                unix_secs() as i64,
-                method,
-                path,
-                inbound_json,
-            ],
+            rusqlite::params![request_id, unix_secs() as i64, method, path, inbound_json,],
         );
         if let Err(e) = res {
             tracing::warn!("request log insert ({request_id}): {e}");
@@ -157,10 +151,11 @@ impl RequestLogStore {
     /// 删除超过保留窗口的行。
     fn cleanup(&self) {
         let cutoff = unix_secs() as i64 - RETENTION_SECS;
-        if let Err(e) = self.db.lock().execute(
-            "DELETE FROM request_logs WHERE created_at < ?1",
-            [cutoff],
-        ) {
+        if let Err(e) = self
+            .db
+            .lock()
+            .execute("DELETE FROM request_logs WHERE created_at < ?1", [cutoff])
+        {
             tracing::warn!("request log cleanup: {e}");
         }
     }

@@ -12,7 +12,7 @@
 - **模型直通**：`GET /v1/models` 透出账号可用模型，可选择是否包含高级 / 已弃用模型。
 - **请求日志**：每个推理请求的入站体、发给上游的请求体与上游 SSE 响应自动存入 SQLite（`store/store.db`），按时间保留 3 天自动清理。`GET /v1/logs` 查看列表（`limit` 默认 50、上限 200，`before_id` 翻页），`GET /v1/logs/{request_id}` 查看三体全文。
 - **可选鉴权**：设置 `api_key` 后，所有推理与只读接口都需要携带该 key。
-- **多账号管理与智能路由**：SQLite 账号池，启动从 `account.json` 导入（email 去重、token 变化自动更新），请求轮询分摊额度。**故障自动切换**：401（token 失效）自动摘号换下一个账号重试；限额（上游 200 流内错误，见下方说明）自动给该账号设冷却期（取上游 `retry_after`，缺省 10 分钟）并换号重试，冷却到点自动恢复。池内所有账号都不可用时，把上游真实错误透传给客户端。每 6 小时后台刷新额度。
+- **多账号管理与智能路由**：SQLite 账号池，启动从 `account.json` 导入（email 去重、token 变化自动更新），请求轮询分摊额度。**故障自动切换**：401（token 失效）先用账号的 `refresh_token` 自动换新（rotation 一次一换，新 token 对原子写回）并当场重试，刷新不可行（无 refresh_token 或 `invalid_grant`）才摘号换下一个账号；限额（上游 200 流内错误，见下方说明）自动给该账号设冷却期（取上游 `retry_after`，缺省 10 分钟）并换号重试，冷却到点自动恢复；邮箱未确认（403 confirm email）冷却 24h，确认后可 `POST /v1/accounts/{email}/restore` 立即恢复。池内所有账号都不可用时，把上游真实错误透传给客户端。每 6 小时后台刷新额度（401 账号同样先自动续命再查额度），并自动摘除试用已到期（`trial_days_left <= 0`）的账号。
 - **双栈监听**：绑定 `0.0.0.0` 时自动同时监听 IPv6 `[::]`。
 
 ## 架构
@@ -49,9 +49,12 @@
 
 | 路径 | 说明 | 典型客户端 |
 | --- | --- | --- |
-| `GET /v1/accounts` | 账号列表（token 掩码） | — |
+| `GET /v1/accounts` | 账号列表（token 掩码，含额度/订阅/Pro 状态/试用限额） | — |
+| `GET /v1/accounts/{email}` | 单账号信息（读库缓存，零上游开销） | — |
+| `GET /v1/accounts/{email}?live=1` | 单账号实时信息（调上游 /me + /ai/credits 并写回；401 自动刷新重试） | — |
 | `POST /v1/accounts` | 新增/更新账号（按 email upsert） | — |
 | `POST /v1/accounts/refresh` | 手动触发额度刷新（202，后台执行） | — |
+| `POST /v1/accounts/{email}/restore` | 手动恢复账号：清冷却 + 置可用 + 实时验证（如确认邮箱后） | — |
 | `DELETE /v1/accounts/{email}` | 删除账号 | — |
 | `GET /v1/logs` | 请求日志列表（不含请求体） | — |
 | `GET /v1/logs/{request_id}` | 请求日志详情（入站/上游/响应全文） | — |
@@ -114,7 +117,8 @@ cp config.example.json config.json
 
 ## 使用示例
 
-以下示例假设网关运行在 `http://localhost:8787`。若设置了 `api_key`，请加上 `-H "Authorization: Bearer <你的 api_key>"`。
+以下示例假设网关运行在 `http://localhost:8787`。若设置了 `api_key`，鉴权头两种形式任选其一（与客户端协议一致即可）：
+OpenAI 风格 `-H "Authorization: Bearer <你的 api_key>"`，或 Anthropic 风格 `-H "x-api-key: <你的 api_key>"`（Claude Code / Anthropic SDK 默认发送后者）。两个头都带时优先取 `Authorization: Bearer`。
 
 OpenAI Chat Completions（流式）：
 

@@ -151,3 +151,29 @@ async fn missing_api_key_is_unauthorized() {
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn anthropic_x_api_key_is_accepted() {
+    let (app, _store) = app();
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/accounts")
+        .header("x-api-key", "test-key")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn wrong_x_api_key_is_unauthorized() {
+    let (app, _store) = app();
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/accounts")
+        .header("x-api-key", "wrong-key")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

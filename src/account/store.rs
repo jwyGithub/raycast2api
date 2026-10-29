@@ -26,10 +26,13 @@ pub struct AccountRow {
     pub obtained_at: Option<String>,
     pub available: bool,
     pub unavailable_reason: Option<String>,
+    pub has_pro_features: Option<bool>,
     pub tier: Option<String>,
     pub sub_status: Option<String>,
     pub trial_days_left: Option<i64>,
     pub current_period_end: Option<i64>,
+    /// 试用账号每小时请求限额(仅非 Pro 号有)。
+    pub trial_requests_per_hour: Option<f64>,
     pub remaining_credits: Option<f64>,
     pub total_credits: Option<f64>,
     pub remaining_usd: Option<f64>,
@@ -52,10 +55,12 @@ impl AccountRow {
             available: self.available,
             unavailable_reason: self.unavailable_reason.clone(),
             obtained_at: self.obtained_at.clone(),
+            has_pro_features: self.has_pro_features,
             tier: self.tier.clone(),
             sub_status: self.sub_status.clone(),
             trial_days_left: self.trial_days_left,
             current_period_end: self.current_period_end,
+            trial_requests_per_hour: self.trial_requests_per_hour,
             remaining_credits: self.remaining_credits,
             total_credits: self.total_credits,
             remaining_usd: self.remaining_usd,
@@ -79,10 +84,12 @@ CREATE TABLE IF NOT EXISTS accounts (
     user_json           TEXT,
     available           INTEGER NOT NULL DEFAULT 1,
     unavailable_reason  TEXT,
+    has_pro_features    INTEGER,
     tier                TEXT,
     sub_status          TEXT,
     trial_days_left     INTEGER,
     current_period_end  INTEGER,
+    trial_requests_per_hour REAL,
     remaining_credits   REAL,
     total_credits       REAL,
     remaining_usd       REAL,
@@ -93,28 +100,43 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 ";
 
-/// 既有库的增量迁移:旧 schema 没有 `cooldown_until` 列,`ALTER TABLE`
-/// 加列幂等不可行,用 `PRAGMA table_info` 判断。
+/// 既有库的增量迁移:旧 schema 没有 `cooldown_until` / `has_pro_features`
+/// 列,`ALTER TABLE` 加列幂等不可行,用 `PRAGMA table_info` 判断。
 fn migrate(conn: &rusqlite::Connection) {
-    let has_cooldown: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name = 'cooldown_until'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|n| n > 0)
-        .unwrap_or(false);
-    if !has_cooldown {
-        conn.execute_batch("ALTER TABLE accounts ADD COLUMN cooldown_until INTEGER;")
-            .expect("migrate accounts: add cooldown_until");
+    for (column, ddl) in [
+        (
+            "cooldown_until",
+            "ALTER TABLE accounts ADD COLUMN cooldown_until INTEGER;",
+        ),
+        (
+            "has_pro_features",
+            "ALTER TABLE accounts ADD COLUMN has_pro_features INTEGER;",
+        ),
+        (
+            "trial_requests_per_hour",
+            "ALTER TABLE accounts ADD COLUMN trial_requests_per_hour REAL;",
+        ),
+    ] {
+        let has: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name = ?1",
+                [column],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        if !has {
+            conn.execute_batch(ddl)
+                .unwrap_or_else(|e| panic!("migrate accounts: add {column}: {e}"));
+        }
     }
 }
 
 /// 查询列的统一顺序(`list` / `next_available` 共用);`id` 在首位,
 /// 供轮询游标使用。
 const ROW_COLUMNS: &str = "id, email, tag, access_token, refresh_token, obtained_at, \
-    available, unavailable_reason, tier, sub_status, trial_days_left, \
-    current_period_end, remaining_credits, total_credits, remaining_usd, \
+    available, unavailable_reason, has_pro_features, tier, sub_status, trial_days_left, \
+    current_period_end, trial_requests_per_hour, remaining_credits, total_credits, remaining_usd, \
     next_credits_at, info_fetched_at, cooldown_until, created_at, updated_at";
 
 pub struct AccountStore {
@@ -129,8 +151,7 @@ impl AccountStore {
     pub fn new(db: Db) -> Self {
         {
             let conn = db.lock();
-            conn.execute_batch(SCHEMA)
-                .expect("create accounts schema");
+            conn.execute_batch(SCHEMA).expect("create accounts schema");
             migrate(&conn);
         }
         Self {
@@ -217,6 +238,20 @@ impl AccountStore {
         Ok(rows.into_iter().map(|(_, row)| row).collect())
     }
 
+    /// 按 email 取单个账号;不存在返回 `None`。
+    pub fn get(&self, email: &str) -> Result<Option<AccountRow>, GatewayError> {
+        let conn = self.db.lock();
+        match conn.query_row(
+            &format!("SELECT {ROW_COLUMNS} FROM accounts WHERE email = ?1"),
+            [email],
+            row_to_account,
+        ) {
+            Ok((_, row)) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(sql_err(e)),
+        }
+    }
+
     /// 当前可选(未摘除、不在冷却)的账号数,作为 `send_chat` 换号重试的上限。
     pub fn count_available(&self) -> usize {
         let now = unix_secs() as i64;
@@ -266,10 +301,7 @@ impl AccountStore {
             ));
         }
         let last = self.last_id.load(Ordering::Relaxed);
-        let (id, row) = rows
-            .iter()
-            .find(|(id, _)| *id > last)
-            .unwrap_or(&rows[0]);
+        let (id, row) = rows.iter().find(|(id, _)| *id > last).unwrap_or(&rows[0]);
         self.last_id.store(*id, Ordering::Relaxed);
         Ok(row.clone())
     }
@@ -277,6 +309,51 @@ impl AccountStore {
     /// 摘除(401 / 额度耗尽)。
     pub fn mark_unavailable(&self, email: &str, reason: &str) {
         self.set_available(email, false, Some(reason));
+    }
+
+    /// 原子写回刷新后的 token 对并恢复可用。refresh_token 是一次一换:
+    /// 刷新成功必须同时落盘新 access_token 与新 refresh_token,否则旧的
+    /// refresh_token 已作废、账号就死了。返回是否确实有更新。
+    pub fn update_tokens(
+        &self,
+        email: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+    ) -> Result<bool, GatewayError> {
+        let now = unix_secs().to_string();
+        let conn = self.db.lock();
+        let n = conn
+            .execute(
+                "UPDATE accounts SET
+                    access_token = ?2,
+                    refresh_token = COALESCE(?3, refresh_token),
+                    available = 1,
+                    unavailable_reason = NULL,
+                    updated_at = ?4
+                 WHERE email = ?1",
+                rusqlite::params![email, access_token, refresh_token, now],
+            )
+            .map_err(sql_err)?;
+        Ok(n > 0)
+    }
+
+    /// 立即恢复账号(清冷却 + 置可用)。用于用户处理完(如确认邮箱)后
+    /// 手动恢复,不等冷却自然到期。返回是否存在该账号。
+    pub fn reinstate(&self, email: &str) -> Result<bool, GatewayError> {
+        let now = unix_secs().to_string();
+        let conn = self.db.lock();
+        let n = conn
+            .execute(
+                "UPDATE accounts SET
+                    available = 1,
+                    unavailable_reason = NULL,
+                    cooldown_until = NULL,
+                    updated_at = ?2
+                 WHERE email = ?1",
+                rusqlite::params![email, now],
+            )
+            .map_err(sql_err)?;
+        Ok(n > 0)
     }
 
     /// 限额冷却:账号保持 `available=1`,但轮询在 `until`(unix 秒)前
@@ -313,17 +390,20 @@ impl AccountStore {
         let conn = self.db.lock();
         conn.execute(
             "UPDATE accounts SET
-                tier = ?2, sub_status = ?3, trial_days_left = ?4,
-                current_period_end = ?5, remaining_credits = ?6, total_credits = ?7,
-                remaining_usd = ?8, next_credits_at = ?9,
-                info_fetched_at = ?10, updated_at = ?10
+                has_pro_features = ?2, tier = ?3, sub_status = ?4, trial_days_left = ?5,
+                current_period_end = ?6, trial_requests_per_hour = ?7,
+                remaining_credits = ?8, total_credits = ?9,
+                remaining_usd = ?10, next_credits_at = ?11,
+                info_fetched_at = ?12, updated_at = ?12
              WHERE email = ?1",
             rusqlite::params![
                 email,
+                info.has_pro_features.map(|b| b as i64),
                 info.tier,
                 info.sub_status,
                 info.trial_days_left,
                 info.current_period_end,
+                info.trial_requests_per_hour,
                 info.remaining_credits,
                 info.total_credits,
                 info.remaining_usd,
@@ -348,18 +428,20 @@ fn row_to_account(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, AccountRow)> 
             obtained_at: r.get(5)?,
             available: r.get::<_, i64>(6)? != 0,
             unavailable_reason: r.get(7)?,
-            tier: r.get(8)?,
-            sub_status: r.get(9)?,
-            trial_days_left: r.get(10)?,
-            current_period_end: r.get(11)?,
-            remaining_credits: r.get(12)?,
-            total_credits: r.get(13)?,
-            remaining_usd: r.get(14)?,
-            next_credits_at: r.get(15)?,
-            info_fetched_at: r.get(16)?,
-            cooldown_until: r.get(17)?,
-            created_at: r.get(18)?,
-            updated_at: r.get(19)?,
+            has_pro_features: r.get::<_, Option<i64>>(8)?.map(|n| n != 0),
+            tier: r.get(9)?,
+            sub_status: r.get(10)?,
+            trial_days_left: r.get(11)?,
+            current_period_end: r.get(12)?,
+            trial_requests_per_hour: r.get(13)?,
+            remaining_credits: r.get(14)?,
+            total_credits: r.get(15)?,
+            remaining_usd: r.get(16)?,
+            next_credits_at: r.get(17)?,
+            info_fetched_at: r.get(18)?,
+            cooldown_until: r.get(19)?,
+            created_at: r.get(20)?,
+            updated_at: r.get(21)?,
         },
     ))
 }
@@ -393,9 +475,15 @@ mod tests {
     fn upsert_three_states() {
         let s = store();
         // 插入
-        assert_eq!(s.upsert(&rec("a@x", "t1")).unwrap(), UpsertOutcome::Inserted);
+        assert_eq!(
+            s.upsert(&rec("a@x", "t1")).unwrap(),
+            UpsertOutcome::Inserted
+        );
         // token 相同 → 跳过
-        assert_eq!(s.upsert(&rec("a@x", "t1")).unwrap(), UpsertOutcome::Unchanged);
+        assert_eq!(
+            s.upsert(&rec("a@x", "t1")).unwrap(),
+            UpsertOutcome::Unchanged
+        );
         // token 变化 → 更新
         assert_eq!(s.upsert(&rec("a@x", "t2")).unwrap(), UpsertOutcome::Updated);
         assert_eq!(s.list().unwrap()[0].access_token, "t2");
@@ -412,6 +500,27 @@ mod tests {
         let row = s.list().unwrap()[0].clone();
         assert!(row.available);
         assert_eq!(row.unavailable_reason, None);
+    }
+
+    #[test]
+    fn get_single_account() {
+        let s = store();
+        // 不存在 → None
+        assert!(s.get("a@x").unwrap().is_none());
+        s.upsert(&rec("a@x", "t1")).unwrap();
+        let row = s.get("a@x").unwrap().expect("should exist");
+        assert_eq!(row.access_token, "t1");
+        assert_eq!(row.has_pro_features, None);
+        // 带 has_pro 的完整信息写入后再读出
+        s.update_info(
+            "a@x",
+            &crate::account::wire::AccountInfo {
+                has_pro_features: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(s.get("a@x").unwrap().unwrap().has_pro_features, Some(true));
     }
 
     #[test]

@@ -19,6 +19,13 @@ pub enum GatewayError {
     Config(String),
     /// The upstream Raycast backend returned an error (surfaced as 502).
     Upstream { status: u16, message: String },
+    /// The account's access_token was rejected (upstream 401). Callers use
+    /// this as a semantic signal to rotate accounts / attempt a refresh,
+    /// instead of destructuring `Upstream` and comparing the status field.
+    TokenInvalid {
+        /// Why the token is considered dead; goes into logs and the response.
+        message: String,
+    },
     /// No usable Raycast account in the store (503).
     NoAccount(String),
     /// Any other internal failure (500).
@@ -46,11 +53,14 @@ impl GatewayError {
                 "bad_gateway",
                 format!("Raycast API error ({status}): {message}"),
             ),
-            GatewayError::NoAccount(m) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                m.clone(),
+            GatewayError::TokenInvalid { message } => (
+                StatusCode::BAD_GATEWAY,
+                "bad_gateway",
+                format!("Raycast account token invalid: {message}"),
             ),
+            GatewayError::NoAccount(m) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "server_error", m.clone())
+            }
             GatewayError::Internal(m) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "relay_error", m.clone())
             }

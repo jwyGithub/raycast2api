@@ -64,9 +64,7 @@ impl InboundAdapter for ResponsesInbound {
         let messages = match request.input {
             None => Vec::new(),
             Some(Input::Text(text)) => vec![Message::text(Role::User, text)],
-            Some(Input::Items(items)) => {
-                conversation(items, &mut system_parts, &mut extra_tools)
-            }
+            Some(Input::Items(items)) => conversation(items, &mut system_parts, &mut extra_tools),
         };
 
         // A request must carry at least one conversational turn.
@@ -262,7 +260,6 @@ fn flatten_tools(tools: Vec<InboundTool>, out: &mut Vec<ToolDef>) {
         }
     }
 }
-
 
 /// Map Responses' `tool_choice` taxonomy onto the canonical policy.
 fn tool_choice(choice: InboundToolChoice) -> ToolChoice {

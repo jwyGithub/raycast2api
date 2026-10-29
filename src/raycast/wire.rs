@@ -287,6 +287,8 @@ pub struct RaycastModelsResponse {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RaycastMe {
     #[serde(default)]
+    pub has_pro_features: Option<bool>,
+    #[serde(default)]
     pub subscription: Option<RaycastSubscription>,
 }
 
@@ -326,6 +328,98 @@ where
         serde_json::Value::String(s) => s.parse().ok(),
         _ => None,
     }))
+}
+
+// --- 额度明细与试用状态(逆向自 backend/index.mjs,2026-10-29) ----------
+
+/// `GET /api/v1/ai/credits/details?range=<today|7d|30d>&tz=<时区>` 的瘦响应。
+/// `buckets` 是时间分段的用量;`grants` 是额度来源及剩余。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaycastCreditsDetails {
+    #[serde(default, deserialize_with = "string_or_number_f64")]
+    pub total_credits: Option<f64>,
+    #[serde(default)]
+    pub buckets: Vec<RaycastUsageBucket>,
+    #[serde(default)]
+    pub grants: Vec<RaycastCreditGrant>,
+}
+
+/// 一段时间的用量(今天按小时段,7d/30d 按天)。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaycastUsageBucket {
+    #[serde(default, deserialize_with = "string_or_number_f64")]
+    pub amount_credits: Option<f64>,
+    #[serde(default)]
+    pub starts_at: Option<String>,
+    #[serde(default)]
+    pub ends_at: Option<String>,
+}
+
+/// 一笔额度发放(kind: allowance|top_up|promo|adjustment)。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaycastCreditGrant {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default, deserialize_with = "string_or_number_f64")]
+    pub amount_credits: Option<f64>,
+    #[serde(default, deserialize_with = "string_or_number_f64")]
+    pub remaining_credits: Option<f64>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// `GET /api/v1/me/trial_status` 的瘦响应:只取试用限额。
+/// 仅试用账号有意义;Pro 号一般 404 或无 `trial_limits`。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaycastTrialStatus {
+    #[serde(default)]
+    pub trial_limits: Option<RaycastTrialLimits>,
+}
+
+/// 试用限额(字段按需取;上游缺字段时为 `None`)。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RaycastTrialLimits {
+    #[serde(default, deserialize_with = "string_or_number_f64")]
+    pub ai_requests_per_hour: Option<f64>,
+    #[serde(default)]
+    pub reset_after_seconds: Option<f64>,
+}
+
+#[cfg(test)]
+mod credits_details_tests {
+    use super::*;
+
+    #[test]
+    fn parses_credits_details_shape() {
+        let raw = r#"{
+            "total_credits": "12.5",
+            "buckets": [
+                {"amount_credits": 3.2, "starts_at": "2026-10-29T00:00:00Z", "ends_at": "2026-10-29T01:00:00Z"}
+            ],
+            "grants": [
+                {"kind": "allowance", "amount_credits": "500", "remaining_credits": 12.5,
+                 "created_at": "2026-10-01T00:00:00Z", "expires_at": null}
+            ]
+        }"#;
+        let d: RaycastCreditsDetails = serde_json::from_str(raw).unwrap();
+        assert_eq!(d.total_credits, Some(12.5));
+        assert_eq!(d.buckets.len(), 1);
+        assert_eq!(d.buckets[0].amount_credits, Some(3.2));
+        assert_eq!(d.grants[0].kind.as_deref(), Some("allowance"));
+        assert_eq!(d.grants[0].remaining_credits, Some(12.5));
+        assert!(d.grants[0].expires_at.is_none());
+    }
+
+    #[test]
+    fn parses_trial_status_tolerantly() {
+        let d: RaycastTrialStatus =
+            serde_json::from_str(r#"{"trial_limits": {"ai_requests_per_hour": 25}}"#).unwrap();
+        assert_eq!(d.trial_limits.unwrap().ai_requests_per_hour, Some(25.0));
+        let empty: RaycastTrialStatus = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(empty.trial_limits.is_none());
+    }
 }
 
 #[cfg(test)]

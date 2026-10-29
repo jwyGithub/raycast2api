@@ -20,6 +20,20 @@ pub const RAYCAST_ME_URL: &str = "https://backend.raycast.com/api/v1/me";
 /// Endpoint returning the account's AI credit balance.
 pub const RAYCAST_AI_CREDITS_URL: &str = "https://backend.raycast.com/api/v1/ai/credits";
 
+/// Endpoint returning credit usage details (buckets + grants) for a time range.
+pub const RAYCAST_AI_CREDITS_DETAILS_URL: &str =
+    "https://backend.raycast.com/api/v1/ai/credits/details";
+
+/// Endpoint returning trial status (limits/organizations) for trial accounts.
+pub const RAYCAST_TRIAL_STATUS_URL: &str = "https://backend.raycast.com/api/v1/me/trial_status";
+
+/// Endpoint issuing/refreshing OAuth tokens (access_token 换新).
+pub const OAUTH_TOKEN_URL: &str = "https://backend.raycast.com/oauth/token";
+
+/// Raycast 桌面客户端的公开 OAuth client id(逆向自 backend/index.mjs;
+/// 与 scripts/ 下的注册/刷新脚本硬编码值一致 —— 上游变更时同改)。
+pub const OAUTH_CLIENT_ID: &str = "FRsHICIAlyPB_v2m4tfVqHtVUS40Ieco_da0Y6zBwgA";
+
 /// User-Agent string sent with every upstream request (matches the captured client).
 pub const USER_AGENT: &str = "Raycast/1.94.2 (macOS Version 15.3.2 (Build 24D81))";
 
@@ -244,9 +258,8 @@ fn parse_proxies(
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
     for p in &proxies {
-        let ok = p.starts_with("http://")
-            || p.starts_with("https://")
-            || p.starts_with("socks5://");
+        let ok =
+            p.starts_with("http://") || p.starts_with("https://") || p.starts_with("socks5://");
         if !ok {
             return Err(format!(
                 "invalid proxy '{p}': must start with http://, https:// or socks5://"

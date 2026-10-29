@@ -46,7 +46,11 @@ pub fn parse_events(payload: &str) -> Vec<CanonicalEvent> {
         let message = err
             .message
             .unwrap_or_else(|| "upstream error (no message provided)".to_string());
-        let status = if err.http_status != 0 { err.http_status } else { 502 };
+        let status = if err.http_status != 0 {
+            err.http_status
+        } else {
+            502
+        };
         tracing::warn!(status, %message, "upstream in-stream error");
         return vec![CanonicalEvent::Error { status, message }];
     }

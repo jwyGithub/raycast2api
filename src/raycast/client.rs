@@ -10,8 +10,9 @@ use reqwest::header::{HeaderMap, HeaderValue};
 
 use crate::account::store::{AccountRow, AccountStore};
 use crate::config::{
-    DEFAULT_COOLDOWN_SECS, MAX_COOLDOWN_SECS, MIN_COOLDOWN_SECS, RAYCAST_AI_CREDITS_URL,
-    RAYCAST_API_URL, RAYCAST_ME_URL, RAYCAST_MODELS_URL, Settings, USER_AGENT,
+    DEFAULT_COOLDOWN_SECS, MAX_COOLDOWN_SECS, MIN_COOLDOWN_SECS, RAYCAST_AI_CREDITS_DETAILS_URL,
+    RAYCAST_AI_CREDITS_URL, RAYCAST_API_URL, RAYCAST_ME_URL, RAYCAST_MODELS_URL,
+    RAYCAST_TRIAL_STATUS_URL, Settings, USER_AGENT,
 };
 use crate::debug;
 use crate::error::GatewayError;
@@ -21,7 +22,8 @@ use crate::util::unix_secs;
 
 use super::peek::{peek_first_payload, restore_payload};
 use super::wire::{
-    RaycastChatRequest, RaycastCredits, RaycastMe, RaycastModelsResponse, RaycastRawModel,
+    RaycastChatRequest, RaycastCredits, RaycastCreditsDetails, RaycastMe, RaycastModelsResponse,
+    RaycastRawModel, RaycastTrialStatus,
 };
 
 /// Cheap-to-clone handle to the Raycast backend (wraps a shared `reqwest::Client`).
@@ -51,9 +53,10 @@ impl RaycastClient {
             .map(|url| {
                 let proxy = reqwest::Proxy::all(url)
                     .unwrap_or_else(|e| panic!("invalid proxy '{url}': {e}"));
-                let client = Client::builder().proxy(proxy).build().unwrap_or_else(|e| {
-                    panic!("failed to build proxy client '{url}': {e}")
-                });
+                let client = Client::builder()
+                    .proxy(proxy)
+                    .build()
+                    .unwrap_or_else(|e| panic!("failed to build proxy client '{url}': {e}"));
                 (url.clone(), client)
             })
             .collect();
@@ -69,6 +72,11 @@ impl RaycastClient {
     /// 账号池(刷新任务与测试使用)。
     pub fn accounts(&self) -> &Arc<AccountStore> {
         &self.accounts
+    }
+
+    /// 共享 HTTP 客户端(含代理配置):供 token 自动刷新等复用主链路通道。
+    pub fn http(&self) -> &Client {
+        &self.http
     }
 
     /// Common headers shared by every request. When `signature` is `Some`, the
@@ -178,12 +186,43 @@ impl RaycastClient {
                     }
                     return Ok(response);
                 }
-                // 401 = 该账号 token 失效:摘除后换号重试。
-                Err(err @ GatewayError::Upstream { status: 401, .. }) => {
-                    tracing::warn!(account = %account.email, "→ token invalid (401), removing account and rotating");
-                    self.accounts
-                        .mark_unavailable(&account.email, "token 失效 (401)");
-                    last_error = Some(err);
+                // token 失效:有 refresh_token 就自动刷新重试,
+                // 刷新失败(或没有 refresh_token)才摘号换下一个。
+                Err(GatewayError::TokenInvalid { .. }) => {
+                    match self.try_refresh_account(&account).await {
+                        Ok(new_token) => {
+                            // 刷新成功:DB 里 token 已更新,本账号立即用新 token 重试。
+                            let mut fresh = account.clone();
+                            fresh.access_token = new_token;
+                            tracing::info!(account = %account.email, "→ token refreshed, retrying with new token");
+                            match self.try_chat_with_fallback(&fresh, &body).await {
+                                Ok(response) => return Ok(response),
+                                Err(err @ GatewayError::TokenInvalid { .. }) => {
+                                    // 新 token 也失效:账号本身有问题,摘号。
+                                    tracing::warn!(account = %account.email, "→ refreshed token still invalid, removing account");
+                                    self.accounts.mark_unavailable(
+                                        &account.email,
+                                        "刷新后 token 仍失效 (401)",
+                                    );
+                                    last_error = Some(err);
+                                }
+                                Err(err) => {
+                                    tracing::error!(account = %account.email, "→ upstream request failed after refresh: {err}");
+                                    return Err(err);
+                                }
+                            }
+                        }
+                        Err(err @ GatewayError::TokenInvalid { .. }) => {
+                            tracing::warn!(account = %account.email, "→ token invalid, no refresh possible, removing account and rotating");
+                            self.accounts
+                                .mark_unavailable(&account.email, "token 失效 (401)");
+                            last_error = Some(err);
+                        }
+                        Err(err) => {
+                            tracing::error!(account = %account.email, "→ upstream request failed: {err}");
+                            return Err(err);
+                        }
+                    }
                 }
                 Err(err) => {
                     tracing::error!(account = %account.email, "→ upstream request failed: {err}");
@@ -193,11 +232,40 @@ impl RaycastClient {
         }
 
         // 池内账号全部 401 / 限额:透传最后一个真实错误。
-        tracing::error!(attempts, "all available accounts failed; surfacing last error to client");
-        Err(last_error
-            .unwrap_or(GatewayError::NoAccount(
-                "no available Raycast account; add or refresh one via POST /v1/accounts".into(),
-            )))
+        tracing::error!(
+            attempts,
+            "all available accounts failed; surfacing last error to client"
+        );
+        Err(last_error.unwrap_or(GatewayError::NoAccount(
+            "no available Raycast account; add or refresh one via POST /v1/accounts".into(),
+        )))
+    }
+
+    /// 401 自动恢复:用账号的 refresh_token 换新 token 并原子写回 DB。
+    /// 返回 `Ok(new_token)` 表示已刷新且入库,调用方可立即用新 token 重试;
+    /// `Err(GatewayError::TokenInvalid{..})` = 没有 refresh_token 或已作废
+    /// (`invalid_grant`,账号只能重新走注册授权);`Err(其他)` = 落盘/网络异常。
+    async fn try_refresh_account(&self, account: &AccountRow) -> Result<String, GatewayError> {
+        let Some(refresh_token) = crate::account::token_renewal::extract_refresh_token(account)
+        else {
+            return Err(GatewayError::TokenInvalid {
+                message: "no refresh_token stored for this account".into(),
+            });
+        };
+        crate::account::token_renewal::renew_and_persist(
+            &self.http,
+            &self.accounts,
+            &account.email,
+            &refresh_token,
+        )
+        .await
+        .map_err(|()| {
+            // 刷新失败的细分原因已由 renew_and_persist 记日志;这里统一按
+            // token 失效语义上报,让 send_chat 走摘号换号路径。
+            GatewayError::TokenInvalid {
+                message: "refresh_token is no longer valid (invalid_grant)".into(),
+            }
+        })
     }
 
     /// 直连 + 代理回退的上游请求:先直连,网络层失败(连接不上/超时,即
@@ -257,8 +325,10 @@ impl RaycastClient {
         // Record the outgoing upstream body in the request-log store,
         // correlated to the inbound request via the task-local id set by
         // `debug_capture`. Fire-and-forget.
-        self.log
-            .update_upstream(&debug::current_request_id(), &debug::body_to_value(body.as_bytes()));
+        self.log.update_upstream(
+            &debug::current_request_id(),
+            &debug::body_to_value(body.as_bytes()),
+        );
 
         let response = http
             .post(RAYCAST_API_URL)
@@ -298,6 +368,29 @@ impl RaycastClient {
         self.get_json(RAYCAST_AI_CREDITS_URL, token).await
     }
 
+    /// Fetch credit usage details (buckets + grants) for a time range
+    /// (`today` | `7d` | `30d`,同客户端设置页)。
+    pub async fn fetch_credits_details(
+        &self,
+        token: &str,
+        range: &str,
+    ) -> Result<RaycastCreditsDetails, GatewayError> {
+        let url = format!(
+            "{RAYCAST_AI_CREDITS_DETAILS_URL}?range={range}&tz={}",
+            encode_query_value(&tz_name())
+        );
+        self.get_json(&url, token).await
+    }
+
+    /// Fetch trial status (limits + organizations). 试用号专用;Pro 号可能
+    /// 404,由调用方按错误分类处理。
+    pub async fn fetch_trial_status(
+        &self,
+        token: &str,
+    ) -> Result<RaycastTrialStatus, GatewayError> {
+        self.get_json(RAYCAST_TRIAL_STATUS_URL, token).await
+    }
+
     /// Shared bearer-only GET returning parsed JSON.
     async fn get_json<T: serde::de::DeserializeOwned>(
         &self,
@@ -312,14 +405,39 @@ impl RaycastClient {
     }
 }
 
-/// Turn a non-2xx upstream response into a [`GatewayError::Upstream`].
+/// Turn a non-2xx upstream response into a [`GatewayError::Upstream`]
+/// (401 gets the dedicated [`GatewayError::TokenInvalid`] variant).
 async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, GatewayError> {
     if response.status().is_success() {
         return Ok(response);
     }
     let status = response.status().as_u16();
     let message = response.text().await.unwrap_or_default();
+    if status == 401 {
+        return Err(GatewayError::TokenInvalid { message });
+    }
     Err(GatewayError::Upstream { status, message })
+}
+
+/// 时区名(IANA,如 `Asia/Shanghai`),与客户端一致;取不到回退 UTC。
+fn tz_name() -> String {
+    // `TZ` 环境变量是容器/服务器场景下最可靠的信号;Windows 上通常没设,
+    // 直接用 UTC(上游只拿它做展示对齐,不影响数值)。
+    std::env::var("TZ").unwrap_or_else(|_| "UTC".into())
+}
+
+/// 最小 query 值转义:保留字母数字与 `-._~`,其余转 `%XX`。
+fn encode_query_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

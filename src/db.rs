@@ -47,7 +47,10 @@ mod tests {
         db.lock()
             .execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);")
             .unwrap();
-        let x: i64 = db.lock().query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
+        let x: i64 = db
+            .lock()
+            .query_row("SELECT x FROM t", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(x, 1);
     }
 

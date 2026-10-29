@@ -269,3 +269,44 @@ data: {"complete":true}
 2. **模型清单**:本包仅见 `claude-haiku-4-5-20251001-reasoning`、`gpt-5.6-luna`。完整可用模型与其 `provider`/是否支持 think,需要抓 Raycast 的模型列表接口(或 `x-raycast-experimental: autoModels` 相关接口)补全。
 3. **纯非 think 模型的响应**:本包中非 think 的仅为标题生成(`ai_chat_title`)调用;正式对话里非 think 模型的 `reasoning` 是否恒为空,建议再抓一条确认。
 4. **错误响应体结构**:流内错误 payload 已有真实样本(见 3.5,限额拒绝);HTTP 非 2xx 状态码下的错误体结构仍待补抓。
+
+---
+
+## 6. 账号域接口与常量(逆向自 backend/index.mjs,2026-10-29)
+
+> 本节是**账号相关常量的权威表**:Rust 侧集中在 `src/config.rs`,scripts/ 下的
+> JS 脚本有各自的硬编码拷贝 —— 上游变更时以本表为准同步。
+
+### 6.1 常量
+
+| 常量 | 值 | 说明 |
+| --- | --- | --- |
+| OAuth client_id | `FRsHICIAlyPB_v2m4tfVqHtVUS40Ieco_da0Y6zBwgA` | 桌面客户端公开 id,PKCE S256,scope `read write` |
+| OAuth token endpoint | `https://backend.raycast.com/oauth/token` | 授权码/refresh_token 共用 |
+| API base | `https://backend.raycast.com/api/v1` | 所有业务接口前缀 |
+
+### 6.2 token 刷新(rotation!)
+
+```
+POST /oauth/token
+Content-Type: application/json   (form-urlencoded 亦被接受)
+{"grant_type":"refresh_token","refresh_token":"<旧>","client_id":"<client_id>"}
+```
+
+- **refresh_token 一次一换**:响应携带新 refresh_token,旧的立即作废;刷新同时作废旧
+  access_token。调用方**必须原子落盘新 token 对**,否则账号即死。
+- 400 + `{"error":"invalid_grant"}` = refresh_token 已作废(被重新授权过/太久没用),
+  账号只能重新走注册授权,不可自动恢复。
+- 客户端有 15 分钟刷新去抖;新 token 需再调 `GET /me` 验证。
+
+### 6.3 账号信息接口(均只需 `Authorization: Bearer <access_token>`)
+
+| 接口 | 说明 | 响应关键字段 |
+| --- | --- | --- |
+| `GET /me` | 账号 + 订阅 | `email`、`has_pro_features`、`subscription{tier,status,trial_days_left,current_period_end,…}`;status ∈ `trialing\|active\|canceled`,tier ∈ `pro\|pro_plus\|max` |
+| `GET /ai/credits` | 额度余额 | `remaining_balance_credits`、`total_balance_credits`、`remaining_balance_usd`(数字或字符串)、`next_credits_at` |
+| `GET /ai/credits/details?range=today\|7d\|30d&tz=<IANA 时区>` | 用量明细 | `total_credits`、`buckets[]{amount_credits,starts_at,ends_at}`、`grants[]{kind(allowance\|top_up\|promo\|adjustment),amount_credits,remaining_credits,created_at,expires_at}` |
+| `GET /me/trial_status` | 试用限额 | `trial_limits{ai_requests_per_hour,…}`、`organizations[]`;仅试用号有意义,Pro 号 404 属正常 |
+| `GET /pricing` | 模型定价表 | 未接入,待成本核算需求 |
+| `POST /oauth/revoke` | 吊销 token | body `{token,client_id}`;未接入 |
+| `POST /ai/credits/top_up` | 充值(花钱,勿自动调用) | body `{package_id,idempotency_key}`,响应同 /ai/credits |

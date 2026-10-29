@@ -28,13 +28,17 @@ impl AccountRecord {
     }
 }
 
-/// 一次额度刷新拉到的信息(来自上游 `/me` + `/ai/credits`)。
+/// 一次额度刷新拉到的信息(来自上游 `/me` + `/ai/credits`,非 Pro 号
+/// 附带 `/me/trial_status` 的限额)。
 #[derive(Debug, Clone, Default)]
 pub struct AccountInfo {
+    pub has_pro_features: Option<bool>,
     pub tier: Option<String>,
     pub sub_status: Option<String>,
     pub trial_days_left: Option<i64>,
     pub current_period_end: Option<i64>,
+    /// 试用账号每小时请求限额(仅非 Pro 号有;Pro 号为 `None`)。
+    pub trial_requests_per_hour: Option<f64>,
     pub remaining_credits: Option<f64>,
     pub total_credits: Option<f64>,
     pub remaining_usd: Option<f64>,
@@ -45,10 +49,12 @@ impl From<(RaycastMe, RaycastCredits)> for AccountInfo {
     fn from((me, credits): (RaycastMe, RaycastCredits)) -> Self {
         let sub = me.subscription;
         Self {
+            has_pro_features: me.has_pro_features,
             tier: sub.as_ref().and_then(|s| s.tier.clone()),
             sub_status: sub.as_ref().and_then(|s| s.status.clone()),
             trial_days_left: sub.as_ref().and_then(|s| s.trial_days_left),
             current_period_end: sub.as_ref().and_then(|s| s.current_period_end),
+            trial_requests_per_hour: None,
             remaining_credits: credits.remaining_balance_credits,
             total_credits: credits.total_balance_credits,
             remaining_usd: credits.remaining_balance_usd,
@@ -66,10 +72,12 @@ pub struct AccountView {
     pub available: bool,
     pub unavailable_reason: Option<String>,
     pub obtained_at: Option<String>,
+    pub has_pro_features: Option<bool>,
     pub tier: Option<String>,
     pub sub_status: Option<String>,
     pub trial_days_left: Option<i64>,
     pub current_period_end: Option<i64>,
+    pub trial_requests_per_hour: Option<f64>,
     pub remaining_credits: Option<f64>,
     pub total_credits: Option<f64>,
     pub remaining_usd: Option<f64>,

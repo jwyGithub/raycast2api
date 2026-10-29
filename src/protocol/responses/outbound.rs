@@ -56,7 +56,12 @@ impl OutboundAdapter for ResponsesOutbound {
         tools: &[ToolDef],
         response: &CanonicalResponse,
     ) -> Response {
-        Json(response_object_with_tools(model, &custom_names(tools), response)).into_response()
+        Json(response_object_with_tools(
+            model,
+            &custom_names(tools),
+            response,
+        ))
+        .into_response()
     }
 
     fn stream<S>(model: &str, events: S) -> Response

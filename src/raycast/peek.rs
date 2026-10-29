@@ -143,7 +143,10 @@ struct ByteStream {
 impl Stream for ByteStream {
     type Item = reqwest::Result<ByteChunk>;
 
-    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
         if let Some(prefix) = self.prefix.take() {
             return std::task::Poll::Ready(Some(Ok(prefix)));
         }
@@ -166,7 +169,10 @@ impl ByteStream {
 
     /// 无前缀,直接透传。
     fn plain(inner: futures_util::stream::BoxStream<'static, reqwest::Result<ByteChunk>>) -> Self {
-        Self { inner, prefix: None }
+        Self {
+            inner,
+            prefix: None,
+        }
     }
 }
 

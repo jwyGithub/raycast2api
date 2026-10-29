@@ -56,7 +56,10 @@ mod tests {
 
     fn tmp_file(name: &str, content: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("r2a-import-test-{name}-{}.json", std::process::id()));
+        p.push(format!(
+            "r2a-import-test-{name}-{}.json",
+            std::process::id()
+        ));
         std::fs::write(&p, content).unwrap();
         p
     }
@@ -70,7 +73,13 @@ mod tests {
                 { "tag": "b", "user": { "email": "b@x" }, "access_token": "t2" }]"#,
         );
         let s = import_file(&store, file.to_str().unwrap()).unwrap();
-        assert_eq!(s, ImportSummary { inserted: 2, ..Default::default() });
+        assert_eq!(
+            s,
+            ImportSummary {
+                inserted: 2,
+                ..Default::default()
+            }
+        );
 
         // token 变化 → 更新;相同 → 跳过;无 email → skipped
         let file2 = tmp_file(
@@ -82,7 +91,12 @@ mod tests {
         let s = import_file(&store, file2.to_str().unwrap()).unwrap();
         assert_eq!(
             s,
-            ImportSummary { inserted: 0, updated: 1, unchanged: 1, skipped: 1 }
+            ImportSummary {
+                inserted: 0,
+                updated: 1,
+                unchanged: 1,
+                skipped: 1
+            }
         );
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_file(&file2);
