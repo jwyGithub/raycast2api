@@ -108,6 +108,7 @@ cp config.example.json config.json
 | `port` | `PORT` | 否 | `8787` | 监听端口 |
 | `show_advanced` | `ADVANCED` | 否 | `true` | `/v1/models` 是否包含高级（premium）模型 |
 | `include_deprecated` | `INCLUDE_DEPRECATED` | 否 | `true` | `/v1/models` 是否包含已弃用模型 |
+| `proxies` | `PROXIES` | 否 | `[]` | 上游代理链（http/https/socks5 URL 数组；环境变量用逗号分隔）。上游直连发生网络错误时按顺序逐个换代理重试，全失败才报错；缺省纯直连 |
 
 日志级别通过 `RUST_LOG` 控制（基于 `tracing-subscriber` 的 env-filter）。
 

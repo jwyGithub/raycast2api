@@ -28,6 +28,8 @@ use super::wire::{
 #[derive(Clone)]
 pub struct RaycastClient {
     http: Client,
+    /// 代理客户端链,与 `settings.proxies` 一一对应;直连失败时按顺序换用。
+    proxies: Vec<(String, Client)>,
     settings: Arc<Settings>,
     /// 账号池:每次请求轮询取一个可用账号的 token。
     accounts: Arc<AccountStore>,
@@ -42,8 +44,22 @@ impl RaycastClient {
         accounts: Arc<AccountStore>,
         log: Arc<RequestLogStore>,
     ) -> Self {
+        // 每个代理一个共享客户端(连接池复用);构造失败视为配置错误,启动即崩。
+        let proxies = settings
+            .proxies
+            .iter()
+            .map(|url| {
+                let proxy = reqwest::Proxy::all(url)
+                    .unwrap_or_else(|e| panic!("invalid proxy '{url}': {e}"));
+                let client = Client::builder().proxy(proxy).build().unwrap_or_else(|e| {
+                    panic!("failed to build proxy client '{url}': {e}")
+                });
+                (url.clone(), client)
+            })
+            .collect();
         Self {
             http,
+            proxies,
             settings,
             accounts,
             log,
@@ -105,7 +121,7 @@ impl RaycastClient {
         for _ in 0..attempts {
             let account = self.accounts.next_available()?;
             tracing::info!(account = %account.email, tag = ?account.tag, "→ using account");
-            match self.try_chat(&account, &body).await {
+            match self.try_chat_with_fallback(&account, &body).await {
                 Ok(response) => {
                     // 上游部分错误(限额)藏在 200 SSE 流内:偷看首 payload,
                     // 是限额错误则冷却该账号并换号重试,否则把流原样还给调用方。
@@ -171,8 +187,47 @@ impl RaycastClient {
             )))
     }
 
+    /// 直连 + 代理回退的上游请求:先直连,网络层失败(连接不上/超时,即
+    /// `GatewayError::Internal`)时按配置顺序逐个换代理重试。代理失败也继续
+    /// 换下一个;所有代理都失败才把最后的网络错误返回。HTTP 4xx/5xx 不触发
+    /// 代理回退(那是上游的业务响应,换通道没用)。
+    async fn try_chat_with_fallback(
+        &self,
+        account: &AccountRow,
+        body: &str,
+    ) -> Result<reqwest::Response, GatewayError> {
+        let mut last_err = match self.try_chat(&self.http, account, body).await {
+            Ok(response) => return Ok(response),
+            Err(err @ GatewayError::Internal(_)) if !self.proxies.is_empty() => err,
+            Err(err) => return Err(err),
+        };
+
+        for (url, client) in &self.proxies {
+            tracing::warn!(
+                proxy = %url,
+                account = %account.email,
+                "→ direct connection failed, retrying via proxy"
+            );
+            match self.try_chat(client, account, body).await {
+                Ok(response) => return Ok(response),
+                Err(err @ GatewayError::Internal(_)) => {
+                    tracing::warn!(proxy = %url, "→ proxy request failed: {err}");
+                    last_err = err;
+                }
+                // 经代理拿到了上游响应(含 HTTP 错误状态):比网络错误更有价值,直接返回。
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_err)
+    }
+
     /// 单次上游请求(签名 + 发送 + 状态校验),供 [`Self::send_chat`] 轮换调用。
-    async fn try_chat(&self, account: &AccountRow, body: &str) -> Result<reqwest::Response, GatewayError> {
+    async fn try_chat(
+        &self,
+        http: &Client,
+        account: &AccountRow,
+        body: &str,
+    ) -> Result<reqwest::Response, GatewayError> {
         let timestamp = unix_secs().to_string();
         let signature = calculate_signature_v2(
             &timestamp,
@@ -192,8 +247,7 @@ impl RaycastClient {
         self.log
             .update_upstream(&debug::current_request_id(), &debug::body_to_value(body.as_bytes()));
 
-        let response = self
-            .http
+        let response = http
             .post(RAYCAST_API_URL)
             .headers(headers)
             .body(body.to_owned())

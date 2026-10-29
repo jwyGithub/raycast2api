@@ -53,6 +53,10 @@ pub struct ConfigFile {
     pub include_deprecated: Option<bool>,
     /// SQLite 存储库路径,默认 `store/store.db`。
     pub accounts_db: Option<String>,
+    /// 上游代理链(可选):`http://`/`https://`/`socks5://` URL 列表。上游请求
+    /// 直连失败(网络错误)时按顺序逐个换代理重试;缺省/空 = 纯直连。
+    #[serde(default, alias = "proxies")]
+    pub proxies: Option<Vec<String>>,
     /// Client-facing model id → gateway model id (e.g. `"gpt-6-astra"` →
     /// `"openai-gpt-6-astra"`), applied before the upstream model lookup.
     #[serde(default, alias = "modelOverrides")]
@@ -81,6 +85,8 @@ pub struct Settings {
     pub model_overrides: HashMap<String, String>,
     /// SQLite 账号库路径(账号表与后续模块共用)。
     pub accounts_db: String,
+    /// 上游代理链:直连失败后按顺序重试的代理 URL;空 = 纯直连。
+    pub proxies: Vec<String>,
 }
 
 impl Settings {
@@ -144,6 +150,8 @@ impl Settings {
             None
         };
 
+        let proxies = parse_proxies(config.proxies, env_opt("PROXIES"))?;
+
         Ok(Self {
             raycast_device_id,
             raycast_signature_secret: env_opt("RAYCAST_SIGNATURE_SECRET")
@@ -158,6 +166,7 @@ impl Settings {
             ),
             model_overrides: config.model_overrides.unwrap_or_default(),
             accounts_db,
+            proxies,
         })
     }
 
@@ -195,6 +204,8 @@ impl Settings {
             None
         };
 
+        let proxies = parse_proxies(None, env_opt("PROXIES"))?;
+
         Ok(Self {
             raycast_device_id,
             raycast_signature_secret: env_opt("RAYCAST_SIGNATURE_SECRET"),
@@ -206,12 +217,76 @@ impl Settings {
             // No env-var form for a map; aliases are config-file only.
             model_overrides: HashMap::new(),
             accounts_db,
+            proxies,
         })
     }
 
     /// The signing secret as an `Option<&str>`, ready for the signature code.
     pub fn signature_secret(&self) -> Option<&str> {
         self.raycast_signature_secret.as_deref()
+    }
+}
+
+/// 解析代理配置:接受 config.json 的数组或 `PROXIES` 环境变量的逗号分隔串,
+/// 去空白项,校验 `http://` / `https://` / `socks5://` 前缀。写错配置在启动时
+/// 就报错,而不是第一次网络抖动时才发现代理根本没生效。
+fn parse_proxies(
+    from_file: Option<Vec<String>>,
+    from_env: Option<String>,
+) -> Result<Vec<String>, String> {
+    let list = match from_env {
+        // 环境变量覆盖文件,与 device_id/api_key 等的优先级一致。
+        Some(s) => s.split(',').map(|p| p.trim().to_string()).collect(),
+        None => from_file.unwrap_or_default(),
+    };
+    let proxies = list
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    for p in &proxies {
+        let ok = p.starts_with("http://")
+            || p.starts_with("https://")
+            || p.starts_with("socks5://");
+        if !ok {
+            return Err(format!(
+                "invalid proxy '{p}': must start with http://, https:// or socks5://"
+            ));
+        }
+    }
+    Ok(proxies)
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    #[test]
+    fn parse_proxies_validates_scheme_and_skips_empty() {
+        assert!(parse_proxies(None, None).unwrap().is_empty());
+        assert!(parse_proxies(Some(vec![]), None).unwrap().is_empty());
+        assert!(parse_proxies(None, Some("  ,,".into())).unwrap().is_empty());
+
+        let ok = parse_proxies(
+            Some(vec![
+                "http://127.0.0.1:7897".into(),
+                "socks5://user:pass@1.2.3.4:1080".into(),
+                "https://proxy.example.com".into(),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(ok.len(), 3);
+
+        // 环境变量逗号串切分 + 去空白,并覆盖文件配置。
+        let env = parse_proxies(
+            Some(vec!["http://file.example:1".into()]),
+            Some(" http://a:1 , socks5://b:2 ,".into()),
+        )
+        .unwrap();
+        assert_eq!(env, vec!["http://a:1", "socks5://b:2"]);
+
+        let err = parse_proxies(Some(vec!["ftp://1.2.3.4".into()]), None).unwrap_err();
+        assert!(err.contains("invalid proxy"));
     }
 }
 

@@ -24,6 +24,7 @@ fn app() -> (axum::Router, Arc<AccountStore>) {
         include_deprecated: true,
         model_overrides: Default::default(),
         accounts_db: ":memory:".into(),
+        proxies: Vec::new(),
     });
     let log_store = Arc::new(raycast2api::log::store::RequestLogStore::new(
         Db::open(":memory:").unwrap(),

@@ -28,6 +28,7 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
         include_deprecated: true,
         model_overrides: Default::default(),
         accounts_db: ":memory:".into(),
+        proxies: Vec::new(),
     });
     let client = raycast2api::raycast::client::RaycastClient::new(
         reqwest::Client::new(),
