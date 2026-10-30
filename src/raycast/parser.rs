@@ -34,12 +34,11 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
     };
 
     // Notifications and pings set `notification_type` and carry no content.
-    if data.notification_type.is_some() {
-        if let Some(notification) = data.notification.as_deref()
-            && !notification.is_empty()
-        {
-            notifications.push(notification.to_string());
-        }
+    if data.notification_type.is_some()
+        && let Some(notification) = data.notification.as_deref()
+        && !notification.is_empty()
+    {
+        notifications.push(notification.to_string());
     }
 
     // An in-stream rejection (200 status, error payload inside the stream).

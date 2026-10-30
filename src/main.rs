@@ -34,10 +34,6 @@ async fn main() {
         std::process::exit(1);
     });
     let accounts = Arc::new(raycast2api::account::store::AccountStore::new(db.clone()));
-    if let Err(err) = raycast2api::account::import::import_file(&accounts, "account.json") {
-        eprintln!("account import error: {err}");
-        std::process::exit(1);
-    }
 
     let request_log = Arc::new(raycast2api::log::store::RequestLogStore::new(db));
 

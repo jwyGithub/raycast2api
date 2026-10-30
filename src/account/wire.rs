@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::raycast::wire::{RaycastCredits, RaycastMe};
 
-/// account.json 的一条账号(也是 `POST /v1/accounts` 的请求体)。
+/// `POST /v1/accounts` 的账号请求体。
 /// `user` 保留完整原始对象(存 `user_json` 列),email 从中提取。
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccountRecord {
