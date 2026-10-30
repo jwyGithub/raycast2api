@@ -63,8 +63,6 @@ pub struct ConfigFile {
     pub api_key: Option<String>,
     pub raycast_device_id: Option<String>,
     pub raycast_signature_secret: Option<String>,
-    pub show_advanced: Option<bool>,
-    pub include_deprecated: Option<bool>,
     /// SQLite 存储库路径,默认 `store/store.db`。
     pub accounts_db: Option<String>,
     /// 上游代理链(可选):`http://`/`https://`/`socks5://` URL 列表。上游请求
@@ -90,10 +88,6 @@ pub struct Settings {
     pub bind_addr: SocketAddr,
     /// Dual-stack: secondary address for dual IPv4/IPv6 binding. `None` if single-stack.
     pub bind_addr_dual: Option<SocketAddr>,
-    /// Include premium ("better AI") models in `/v1/models`. Default `true`.
-    pub show_advanced: bool,
-    /// Include deprecated models in `/v1/models`. Default `true`.
-    pub include_deprecated: bool,
     /// Client-facing model id → gateway model id, applied before the upstream
     /// model lookup. Requests naming an aliased id are sent as the mapped id.
     pub model_overrides: HashMap<String, String>,
@@ -173,11 +167,6 @@ impl Settings {
             api_key: env_opt("API_KEY").or(config.api_key),
             bind_addr,
             bind_addr_dual,
-            show_advanced: env_flag("ADVANCED", config.show_advanced.unwrap_or(true)),
-            include_deprecated: env_flag(
-                "INCLUDE_DEPRECATED",
-                config.include_deprecated.unwrap_or(true),
-            ),
             model_overrides: config.model_overrides.unwrap_or_default(),
             accounts_db,
             proxies,
@@ -226,8 +215,6 @@ impl Settings {
             api_key: env_opt("API_KEY"),
             bind_addr,
             bind_addr_dual,
-            show_advanced: env_flag("ADVANCED", true),
-            include_deprecated: env_flag("INCLUDE_DEPRECATED", true),
             // No env-var form for a map; aliases are config-file only.
             model_overrides: HashMap::new(),
             accounts_db,
@@ -278,15 +265,6 @@ fn env_required(key: &str) -> Result<String, String> {
 
 fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
-}
-
-/// Boolean flag from the environment. Matches the reference semantics: any value
-/// other than the literal `"false"` (case-insensitive) is treated as enabled.
-fn env_flag(key: &str, default: bool) -> bool {
-    match env_opt(key) {
-        Some(v) => !v.eq_ignore_ascii_case("false"),
-        None => default,
-    }
 }
 
 #[cfg(test)]

@@ -314,4 +314,7 @@ pub struct ModelEntry {
     pub object: &'static str,
     pub created: u64,
     pub owned_by: String,
+    /// 上游模型的其余字段(description/pricing/abilities 等)原样透传。
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }

@@ -14,7 +14,7 @@
 //! ignorant of Raycast's wire format.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 // --- Request ------------------------------------------------------------
 
@@ -276,6 +276,10 @@ pub struct RaycastRawModel {
     pub requires_better_ai: bool,
     #[serde(default)]
     pub availability: Option<String>,
+    /// 未声明的上游字段(name/description/pricing/abilities 等)原样保留,
+    /// 以便 `/v1/models` 透传给客户端。
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// Top-level shape of the `GET /models` response.

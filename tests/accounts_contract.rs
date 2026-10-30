@@ -20,8 +20,6 @@ fn app() -> (axum::Router, Arc<AccountStore>) {
         api_key: Some("test-key".into()),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,
-        show_advanced: true,
-        include_deprecated: true,
         model_overrides: Default::default(),
         accounts_db: ":memory:".into(),
         proxies: Vec::new(),
