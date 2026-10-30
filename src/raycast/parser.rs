@@ -24,7 +24,7 @@ pub const DONE_SENTINEL: &str = "[DONE]";
 /// Returns an empty vec for anything that isn't content: the `[DONE]`
 /// sentinel, `{"complete":true}`, `provider_status` / `ping` notifications, or
 /// a payload that fails to decode.
-pub fn parse_events(payload: &str) -> Vec<CanonicalEvent> {
+pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<CanonicalEvent> {
     if payload == DONE_SENTINEL {
         return Vec::new();
     }
@@ -35,7 +35,11 @@ pub fn parse_events(payload: &str) -> Vec<CanonicalEvent> {
 
     // Notifications and pings set `notification_type` and carry no content.
     if data.notification_type.is_some() {
-        return Vec::new();
+        if let Some(notification) = data.notification.as_deref()
+            && !notification.is_empty()
+        {
+            notifications.push(notification.to_string());
+        }
     }
 
     // An in-stream rejection (200 status, error payload inside the stream).
@@ -43,9 +47,15 @@ pub fn parse_events(payload: &str) -> Vec<CanonicalEvent> {
     // swallow it — previously this arm returned `Vec::new()` and the client
     // saw an empty completion.
     if let Some(err) = data.error {
-        let message = err
+        let mut message = err
             .message
             .unwrap_or_else(|| "upstream error (no message provided)".to_string());
+        if !notifications.is_empty() {
+            message.push_str(" (upstream notification: ");
+            message.push_str(&notifications.join("; "));
+            message.push(')');
+            notifications.clear();
+        }
         let status = if err.http_status != 0 {
             err.http_status
         } else {
@@ -53,6 +63,10 @@ pub fn parse_events(payload: &str) -> Vec<CanonicalEvent> {
         };
         tracing::warn!(status, %message, "upstream in-stream error");
         return vec![CanonicalEvent::Error { status, message }];
+    }
+
+    if data.notification_type.is_some() {
+        return Vec::new();
     }
 
     let mut events = Vec::new();
@@ -120,7 +134,7 @@ mod tests {
         // Real capture: Raycast rejects an exhausted account inside a 200 SSE
         // stream instead of returning an HTTP error status.
         let payload = r#"{"error":{"message":"You've reached your free trial limit of 25 AI requests per hour. Upgrade to Raycast Pro to continue, or try again in 7 minutes.","type":"model_rate_limit_reached_error","category":"usage_limit","code":"usage_limit_reached","subcode":"model_usage_limited","retryable":true,"request_id":"334ff406","retry_after":447,"http_status":429}}"#;
-        let events = parse_events(payload);
+        let events = parse_events(payload, &mut Vec::new());
         assert_eq!(events.len(), 1);
         match &events[0] {
             CanonicalEvent::Error { status, message } => {
@@ -133,28 +147,57 @@ mod tests {
 
     #[test]
     fn ignores_notifications_pings_and_sentinels() {
-        assert!(parse_events(DONE_SENTINEL).is_empty());
-        assert!(parse_events(r#"{"complete":true}"#).is_empty());
+        let mut notifications = Vec::new();
+        assert!(parse_events(DONE_SENTINEL, &mut notifications).is_empty());
+        assert!(parse_events(r#"{"complete":true}"#, &mut notifications).is_empty());
         assert!(
-            parse_events(r#"{"notification_type":"ping","notification":"","text":""}"#).is_empty()
+            parse_events(
+                r#"{"notification_type":"ping","notification":"","text":""}"#,
+                &mut notifications
+            )
+            .is_empty()
         );
-        assert!(parse_events("not json").is_empty());
+        assert!(parse_events("not json", &mut notifications).is_empty());
+    }
+
+    #[test]
+    fn preceding_notification_is_attached_to_stream_error() {
+        let mut notifications = Vec::new();
+        assert!(parse_events(
+            r#"{"notification_type":"model_updated","notification":"No valid Advanced AI subscription. Using claude-haiku-5-5 instead"}"#,
+            &mut notifications,
+        )
+        .is_empty());
+
+        let events = parse_events(
+            r#"{"error":{"message":"Something went wrong. Please try again in a few minutes.","http_status":500}}"#,
+            &mut notifications,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [CanonicalEvent::Error { status: 500, message }]
+                if message.contains("Something went wrong")
+                    && message.contains("No valid Advanced AI subscription")
+                    && message.contains("Using claude-haiku-5-5 instead")
+        ));
+        assert!(notifications.is_empty());
     }
 
     #[test]
     fn text_delta_becomes_text_event() {
-        let events = parse_events(r#"{"text":"hello"}"#);
+        let events = parse_events(r#"{"text":"hello"}"#, &mut Vec::new());
         assert_eq!(events.len(), 1);
         matches!(&events[0], CanonicalEvent::TextDelta(t) if t == "hello");
     }
 
     #[test]
     fn reasoning_and_signature_events() {
-        let events = parse_events(r#"{"reasoning":"think","text":""}"#);
+        let events = parse_events(r#"{"reasoning":"think","text":""}"#, &mut Vec::new());
         assert!(matches!(events.as_slice(), [CanonicalEvent::ReasoningDelta(t)] if t == "think"));
 
         let events = parse_events(
             r#"{"reasoning":"","text":"","extra_content":{"anthropic":{"thought_signature":"sig"}}}"#,
+            &mut Vec::new(),
         );
         assert!(matches!(events.as_slice(), [CanonicalEvent::ThoughtSignature(s)] if s == "sig"));
     }
@@ -163,6 +206,7 @@ mod tests {
     fn finish_with_usage() {
         let events = parse_events(
             r#"{"text":"","finish_reason":"stop","usage":{"input_tokens":5,"output_tokens":7,"cached_tokens":1}}"#,
+            &mut Vec::new(),
         );
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -180,6 +224,7 @@ mod tests {
     fn tool_calls_then_finish() {
         let events = parse_events(
             r#"{"finish_reason":"tool_calls","text":"","tool_calls":[{"name":"ask","arguments":"{}","id":"t1"}],"usage":{"input_tokens":1,"output_tokens":2,"cached_tokens":0}}"#,
+            &mut Vec::new(),
         );
         assert_eq!(events.len(), 2);
         assert!(

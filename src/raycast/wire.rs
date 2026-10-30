@@ -166,6 +166,9 @@ pub struct RaycastSseData {
     /// omit it), so the parser can skip them without misreading a delta.
     #[serde(default)]
     pub notification_type: Option<String>,
+    /// Human-readable context supplied by notification events.
+    #[serde(default)]
+    pub notification: Option<String>,
     /// Set when the upstream rejects the request inside the 200 SSE stream
     /// (usage limit, model unavailable, ...): `{ "error": { ... } }`. The
     /// parser surfaces it as [`CanonicalEvent::Error`] instead of dropping it.

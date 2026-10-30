@@ -39,6 +39,7 @@ pub fn canonical_events(
         let mut bytes = response.bytes_stream();
         let mut decoder = SseDecoder::new();
         let mut text_log = DeltaLogBuffer::default();
+        let mut notifications = Vec::new();
 
         while let Some(chunk) = bytes.next().await {
             let Ok(chunk) = chunk else { break };
@@ -47,7 +48,7 @@ pub fn canonical_events(
                 // ponytail: 打印原始 SSE 数据用于调试
                 tracing::debug!("upstream SSE payload: {}", payload);
 
-                for event in parse_events(&payload) {
+                for event in parse_events(&payload, &mut notifications) {
                     // The outbound adapters stop polling the stream at `Finish`,
                     // so this generator's tail code never runs on the streaming
                     // path — record as soon as the terminating payload is seen.
