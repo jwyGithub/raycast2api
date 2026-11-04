@@ -5,8 +5,8 @@ use crate::db::Db;
 use crate::log::wire::{LogDetail, LogEntry};
 use crate::util::unix_secs;
 
-/// 保留窗口:3 天(秒)。
-pub const RETENTION_SECS: i64 = 3 * 24 * 60 * 60;
+/// 保留窗口:7 天(秒)。
+pub const RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS request_logs (
@@ -27,18 +27,19 @@ pub struct RequestLogStore {
 }
 
 impl RequestLogStore {
-    /// 构造并建表(幂等);顺带做一次过期清理(即启动清理)。
+    /// 构造并建表(幂等);启动时清理过期日志,有删除时压缩数据库。
     pub fn new(db: Db) -> Self {
         if let Err(e) = db.lock().execute_batch(SCHEMA) {
             tracing::error!("request log schema: {e}");
         }
         let store = Self { db };
-        store.cleanup();
+        if store.cleanup_expired() > 0 {
+            store.vacuum();
+        }
         store
     }
 
     /// 记录入站请求(INSERT OR IGNORE:同 id 重放不撞键、不覆盖)。
-    /// 顺带清理过期行 —— created_at 有索引,无过期行时近零成本。
     pub fn insert_request(
         &self,
         request_id: &str,
@@ -56,7 +57,6 @@ impl RequestLogStore {
         if let Err(e) = res {
             tracing::warn!("request log insert ({request_id}): {e}");
         }
-        self.cleanup();
     }
 
     /// 补写发给上游的请求体(行不存在时静默丢弃 —— 旁路,不影响请求)。
@@ -148,15 +148,30 @@ impl RequestLogStore {
         .ok()
     }
 
-    /// 删除超过保留窗口的行。
-    fn cleanup(&self) {
+    /// 删除超过保留窗口的行,返回删除数量。
+    pub fn cleanup_expired(&self) -> usize {
         let cutoff = unix_secs() as i64 - RETENTION_SECS;
-        if let Err(e) = self
+        match self
             .db
             .lock()
             .execute("DELETE FROM request_logs WHERE created_at < ?1", [cutoff])
         {
-            tracing::warn!("request log cleanup: {e}");
+            Ok(deleted) => deleted,
+            Err(e) => {
+                tracing::warn!("request log cleanup: {e}");
+                0
+            }
+        }
+    }
+
+    /// 压缩 SQLite 文件并截断 WAL,回收已删除日志占用的磁盘空间。
+    pub fn vacuum(&self) {
+        if let Err(e) = self
+            .db
+            .lock()
+            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+        {
+            tracing::warn!("request log vacuum: {e}");
         }
     }
 }
@@ -265,11 +280,41 @@ mod tests {
         let s = store();
         let now = crate::util::unix_secs() as i64;
         row(&s, "old", now - RETENTION_SECS - 1);
+        row(&s, "boundary", now - RETENTION_SECS);
         row(&s, "fresh", now);
-        // insert_request 顺带触发 cleanup。
-        s.insert_request("trigger", "POST", "/x", &serde_json::json!({}));
+        s.cleanup_expired();
         assert!(s.detail("old").is_none());
+        assert!(s.detail("boundary").is_some());
         assert!(s.detail("fresh").is_some());
-        assert!(s.detail("trigger").is_some());
+    }
+
+    #[test]
+    fn cleanup_compacts_database_after_deleting_rows() {
+        let s = store();
+        row(
+            &s,
+            "large",
+            crate::util::unix_secs() as i64 - RETENTION_SECS - 1,
+        );
+        s.db.lock()
+            .execute(
+                "UPDATE request_logs SET inbound_json = ?1 WHERE request_id = 'large'",
+                ["x".repeat(1024 * 1024)],
+            )
+            .unwrap();
+        let pages_before: i64 =
+            s.db.lock()
+                .query_row("PRAGMA page_count", [], |r| r.get(0))
+                .unwrap();
+
+        assert_eq!(s.cleanup_expired(), 1);
+        s.vacuum();
+
+        let pages_after: i64 =
+            s.db.lock()
+                .query_row("PRAGMA page_count", [], |r| r.get(0))
+                .unwrap();
+        assert!(pages_after < pages_before);
+        assert!(s.detail("large").is_none());
     }
 }

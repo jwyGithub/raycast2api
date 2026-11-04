@@ -37,6 +37,26 @@ async fn main() {
 
     let request_log = Arc::new(raycast2api::log::store::RequestLogStore::new(db));
 
+    // 启动后每小时清理一次,避免服务空闲时过期日志滞留。
+    {
+        let request_log = request_log.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            interval.tick().await;
+            let mut last_vacuum = std::time::Instant::now();
+            loop {
+                interval.tick().await;
+                let deleted = request_log.cleanup_expired();
+                if deleted > 0
+                    && last_vacuum.elapsed() >= std::time::Duration::from_secs(24 * 60 * 60)
+                {
+                    request_log.vacuum();
+                    last_vacuum = std::time::Instant::now();
+                }
+            }
+        });
+    }
+
     let client = RaycastClient::new(
         http,
         settings.clone(),

@@ -6,7 +6,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::account::store::{AccountStore, UpsertOutcome};
 use crate::account::wire::{AccountRecord, AccountView};
@@ -14,9 +14,18 @@ use crate::error::GatewayError;
 use crate::server::state::SharedState;
 
 /// `POST /v1/accounts` 的结果回执。
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum UpsertRequest {
+    One(AccountRecord),
+    Many(Vec<AccountRecord>),
+}
+
 #[derive(Serialize)]
-pub struct UpsertResponse {
-    pub result: &'static str,
+#[serde(untagged)]
+pub enum UpsertResponse {
+    One { result: &'static str },
+    Many { results: Vec<&'static str> },
 }
 
 /// `GET /v1/accounts` — 全部账号(token 掩码)。
@@ -30,6 +39,18 @@ pub async fn list(
         .map(|row| row.to_view())
         .collect();
     Ok(Json(views))
+}
+
+/// GET /v1/accounts/export — 导出可直接导入的账号凭据。
+pub async fn export(
+    State(state): State<SharedState>,
+) -> Result<Json<Vec<AccountRecord>>, GatewayError> {
+    if state.settings.api_key.is_none() {
+        return Err(GatewayError::Unauthorized(
+            "account export requires API_KEY to be configured".into(),
+        ));
+    }
+    Ok(Json(state.accounts.export_records()?))
 }
 
 /// `GET /v1/accounts/{email}` — 单个账号。默认读库(零上游开销);
@@ -121,14 +142,36 @@ pub async fn get_one(
 /// `POST /v1/accounts` — 新增或更新一个账号(按 email upsert)。
 pub async fn upsert(
     State(state): State<SharedState>,
-    Json(record): Json<AccountRecord>,
+    Json(request): Json<UpsertRequest>,
 ) -> Result<Json<UpsertResponse>, GatewayError> {
-    let result = match state.accounts.upsert(&record)? {
+    match request {
+        UpsertRequest::One(record) => Ok(Json(UpsertResponse::One {
+            result: upsert_result(&state.accounts, &record)?,
+        })),
+        UpsertRequest::Many(records) => {
+            if records.iter().any(|record| record.email().is_none()) {
+                return Err(GatewayError::BadRequest(
+                    "every account entry must contain user.email".into(),
+                ));
+            }
+            let results = records
+                .iter()
+                .map(|record| upsert_result(&state.accounts, record))
+                .collect::<Result<_, _>>()?;
+            Ok(Json(UpsertResponse::Many { results }))
+        }
+    }
+}
+
+fn upsert_result(
+    accounts: &AccountStore,
+    record: &AccountRecord,
+) -> Result<&'static str, GatewayError> {
+    Ok(match accounts.upsert(record)? {
         UpsertOutcome::Inserted => "inserted",
         UpsertOutcome::Updated => "updated",
         UpsertOutcome::Unchanged => "unchanged",
-    };
-    Ok(Json(UpsertResponse { result }))
+    })
 }
 
 /// `DELETE /v1/accounts/{email}` — 删除;不存在 404。

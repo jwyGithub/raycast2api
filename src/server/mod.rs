@@ -31,6 +31,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/v1/accounts",
             get(handlers::accounts::list).post(handlers::accounts::upsert),
         )
+        .route("/v1/accounts/export", get(handlers::accounts::export))
         .route("/v1/accounts/refresh", post(handlers::accounts::refresh))
         .route(
             "/v1/accounts/{email}/restore",

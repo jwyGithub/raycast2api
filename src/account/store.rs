@@ -238,6 +238,44 @@ impl AccountStore {
         Ok(rows.into_iter().map(|(_, row)| row).collect())
     }
 
+    /// 导出可直接提交给 POST /v1/accounts 的原始账号凭据。
+    pub fn export_records(&self) -> Result<Vec<AccountRecord>, GatewayError> {
+        let conn = self.db.lock();
+        let mut stmt = conn
+            .prepare("SELECT user_json, tag, access_token, refresh_token, obtained_at FROM accounts ORDER BY id")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(sql_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+
+        rows.into_iter()
+            .map(
+                |(user_json, tag, access_token, refresh_token, obtained_at)| {
+                    let user = serde_json::from_str(&user_json).map_err(|e| {
+                        GatewayError::Internal(format!("account store: invalid user_json: {e}"))
+                    })?;
+                    Ok(AccountRecord {
+                        tag,
+                        user,
+                        access_token,
+                        refresh_token,
+                        obtained_at,
+                    })
+                },
+            )
+            .collect()
+    }
+
     /// 按 email 取单个账号;不存在返回 `None`。
     pub fn get(&self, email: &str) -> Result<Option<AccountRow>, GatewayError> {
         let conn = self.db.lock();

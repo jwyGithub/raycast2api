@@ -7,7 +7,7 @@ use crate::raycast::wire::{RaycastCredits, RaycastMe};
 
 /// `POST /v1/accounts` 的账号请求体。
 /// `user` 保留完整原始对象(存 `user_json` 列),email 从中提取。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AccountRecord {
     #[serde(default)]
     pub tag: Option<String>,

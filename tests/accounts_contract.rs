@@ -13,11 +13,15 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 fn app() -> (axum::Router, Arc<AccountStore>) {
+    app_with_api_key(Some("test-key"))
+}
+
+fn app_with_api_key(api_key: Option<&str>) -> (axum::Router, Arc<AccountStore>) {
     let store = Arc::new(AccountStore::new(Db::open(":memory:").unwrap()));
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
         raycast_signature_secret: None,
-        api_key: Some("test-key".into()),
+        api_key: api_key.map(str::to_owned),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,
         model_overrides: Default::default(),
@@ -129,6 +133,52 @@ async fn list_upsert_delete_round_trip() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = call(&app, Method::DELETE, "/v1/accounts/a@x", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn export_can_be_posted_directly_to_upsert() {
+    let (source_app, source_store) = app();
+    source_store
+        .upsert(&serde_json::from_value(account_body("a@x", "rca_secret")).unwrap())
+        .unwrap();
+    source_store
+        .upsert(
+            &serde_json::from_value(serde_json::json!({
+                "tag": "second",
+                "user": { "email": "b@x", "id": "user-2" },
+                "access_token": "rca_second",
+                "refresh_token": "refresh-2",
+                "obtained_at": "2026-11-04T00:00:00Z"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+    let (status, export) = call(&source_app, Method::GET, "/v1/accounts/export", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(export.as_array().unwrap().len(), 2);
+    assert_eq!(export[0]["access_token"], "rca_secret");
+    assert_eq!(export[1]["user"]["id"], "user-2");
+
+    let (destination_app, destination_store) = app();
+    let (status, response) =
+        call(&destination_app, Method::POST, "/v1/accounts", Some(export)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response["results"],
+        serde_json::json!(["inserted", "inserted"])
+    );
+    let imported = destination_store.list().unwrap();
+    assert_eq!(imported.len(), 2);
+    assert_eq!(imported[0].access_token, "rca_secret");
+    assert_eq!(imported[1].refresh_token.as_deref(), Some("refresh-2"));
+}
+
+#[tokio::test]
+async fn export_requires_configured_api_key() {
+    let (app, _) = app_with_api_key(None);
+    let (status, _) = call(&app, Method::GET, "/v1/accounts/export", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
