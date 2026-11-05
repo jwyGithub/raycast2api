@@ -217,6 +217,18 @@ impl RaycastSseError {
                 .is_some_and(|c| c.contains("usage_limit") || c.contains("rate_limit"))
     }
 
+    /// 是否为账号被风控封禁类错误:token 本身有效但账号已被上游标记,
+    /// 重试无意义,必须摘号。真实样本:http_status=403,
+    /// subcode="account_unavailable", message="Account flagged for suspicious
+    /// activity, please contact support."
+    pub fn is_flagged(&self) -> bool {
+        self.subcode.as_deref() == Some("account_unavailable")
+            || self
+                .message
+                .as_deref()
+                .is_some_and(|m| m.to_lowercase().contains("flagged for suspicious"))
+    }
+
     /// 是否为邮箱未确认类错误:账号 token 有效但 AI 不可用,需用户去邮箱
     /// 点确认链接。冷却 24h 而非摘号 —— 确认后刷新任务会恢复可用。
     /// 真实样本:http_status=403, message="Please confirm your email address
@@ -452,7 +464,25 @@ mod credits_tests {
         // 邮箱未确认:403 + confirm your email。
         assert!(mk(403, "Please confirm your email address to use AI.").is_unconfirmed());
         assert!(!mk(429, "limit").is_unconfirmed());
-        assert!(!mk(403, "forbidden for other reason").is_unconfirmed());
+        assert!(!mk(403, "forbidden other reason").is_unconfirmed());
+
+        // 账号被风控:subcode=account_unavailable / "flagged for suspicious"。
+        assert!(mk(403, "Account flagged for suspicious activity").is_flagged());
+        assert!(!mk(403, "confirm your email").is_flagged());
+        let by_subcode = RaycastSseError {
+            message: None,
+            code: None,
+            category: None,
+            subcode: Some("account_unavailable".into()),
+            http_status: 403,
+            retry_after: None,
+        };
+        assert!(by_subcode.is_flagged());
+        let other_subcode = RaycastSseError {
+            subcode: Some("usage_limit_reached".into()),
+            ..by_subcode.clone()
+        };
+        assert!(!other_subcode.is_flagged());
     }
 
     #[test]

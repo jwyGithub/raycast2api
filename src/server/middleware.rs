@@ -108,12 +108,24 @@ pub async fn debug_capture(
     let response = REQUEST_ID.scope(id.clone(), next.run(request)).await;
 
     // 请求/响应配对的完成日志:状态码 + 耗时,与 stream 层的 `[id]` 前缀
-    // 和 client 层的账号日志对得上。
+    // 和 client 层的账号日志对得上。配置了代理时,上游客户端会登记实际
+    // 走的通道("direct" 或代理 URL),这里带出来方便排查走线;未登记
+    // (无代理配置)保持原格式。
     let status = response.status();
-    if status.is_success() {
-        tracing::info!("← {status} [{id}] in {:?}", started.elapsed());
-    } else {
-        tracing::warn!("← {status} [{id}] in {:?}", started.elapsed());
+    let elapsed = started.elapsed();
+    match debug::take_channel(&id) {
+        Some(channel) if status.is_success() => {
+            tracing::info!("← {status} [{id}] via {channel} in {elapsed:?}");
+        }
+        Some(channel) => {
+            tracing::warn!("← {status} [{id}] via {channel} in {elapsed:?}");
+        }
+        None if status.is_success() => {
+            tracing::info!("← {status} [{id}] in {elapsed:?}");
+        }
+        None => {
+            tracing::warn!("← {status} [{id}] in {elapsed:?}");
+        }
     }
     Ok(response)
 }

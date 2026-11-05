@@ -162,6 +162,19 @@ impl RaycastClient {
                             last_error = Some(GatewayError::Upstream { status, message });
                             continue;
                         }
+                        if err.parsed.is_flagged() {
+                            // 账号被上游风控标记:摘号换下一个(token 有效
+                            // 但账号已废,重试无意义)。mark_unavailable
+                            // 会把原因写进 unavailable_reason 供排查。
+                            tracing::warn!(
+                                account = %account.email,
+                                "→ account flagged by upstream, removing from pool: {message}"
+                            );
+                            self.accounts
+                                .mark_unavailable(&account.email, &format!("账号被风控 ({message})"));
+                            last_error = Some(GatewayError::Upstream { status, message });
+                            continue;
+                        }
                         if err.parsed.is_unconfirmed() {
                             // 邮箱未确认:不摘号(token 有效),但冷却 24h ——
                             // 用户去确认邮箱后,下次手动/定时刷新会恢复可用。
@@ -225,6 +238,21 @@ impl RaycastClient {
                     }
                 }
                 Err(err) => {
+                    // HTTP 层错误(非流内):若为账号被风控(403 +
+                    // account_unavailable / "flagged for suspicious"),摘号
+                    // 换下一个继续,否则透传终止。
+                    if is_flagged_upstream(&err) {
+                        tracing::warn!(
+                            account = %account.email,
+                            "→ account flagged by upstream (HTTP error), removing from pool: {err}"
+                        );
+                        self.accounts.mark_unavailable(
+                            &account.email,
+                            &format!("账号被风控 ({err})"),
+                        );
+                        last_error = Some(err);
+                        continue;
+                    }
                     tracing::error!(account = %account.email, "→ upstream request failed: {err}");
                     return Err(err);
                 }
@@ -277,7 +305,7 @@ impl RaycastClient {
         account: &AccountRow,
         body: &str,
     ) -> Result<reqwest::Response, GatewayError> {
-        let mut last_err = match self.try_chat(&self.http, account, body).await {
+        let mut last_err = match self.try_chat(&self.http, account, body, "direct").await {
             Ok(response) => return Ok(response),
             Err(err @ GatewayError::Internal(_)) if !self.proxies.is_empty() => err,
             Err(err) => return Err(err),
@@ -289,7 +317,7 @@ impl RaycastClient {
                 account = %account.email,
                 "→ direct connection failed, retrying via proxy"
             );
-            match self.try_chat(client, account, body).await {
+            match self.try_chat(client, account, body, url).await {
                 Ok(response) => return Ok(response),
                 Err(err @ GatewayError::Internal(_)) => {
                     tracing::warn!(proxy = %url, "→ proxy request failed: {err}");
@@ -303,11 +331,14 @@ impl RaycastClient {
     }
 
     /// 单次上游请求(签名 + 发送 + 状态校验),供 [`Self::send_chat`] 轮换调用。
+    /// `channel` 是本通道的标签("direct" 或代理 URL),成功后登记进
+    /// request-id 通道表,供中间件的完成 trace 打印走线信息。
     async fn try_chat(
         &self,
         http: &Client,
         account: &AccountRow,
         body: &str,
+        channel: &str,
     ) -> Result<reqwest::Response, GatewayError> {
         let timestamp = unix_secs().to_string();
         let signature = calculate_signature_v2(
@@ -337,7 +368,14 @@ impl RaycastClient {
             .send()
             .await?;
 
-        ensure_success(response).await
+        let response = ensure_success(response).await?;
+        // 请求成功送达上游:登记所用通道,完成 trace 里打印("direct" 或代理
+        // URL)。配置了代理才有意义 —— "direct" 且无代理时不登记、不打印。
+        let request_id = debug::current_request_id();
+        if request_id != "-" && !(channel == "direct" && self.proxies.is_empty()) {
+            debug::record_channel(&request_id, channel);
+        }
+        Ok(response)
     }
 
     /// Fetch the raw list of models available to the account.
@@ -417,6 +455,18 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
         return Err(GatewayError::TokenInvalid { message });
     }
     Err(GatewayError::Upstream { status, message })
+}
+
+/// HTTP 层(非流内)错误是否为账号被风控:`ensure_success` 只保留了原始
+/// 响应文本,这里从文本里识别上游风控样本的特征串。两个特征分别来自
+/// 真实样本的 message("Account flagged for suspicious activity")与
+/// subcode("account_unavailable")—— message 内容可能变,但 subcode
+/// 是 Raycast 的结构化字段,双保险。
+fn is_flagged_upstream(err: &GatewayError) -> bool {
+    let GatewayError::Upstream { message, .. } = err else {
+        return false;
+    };
+    message.contains("account_unavailable") || message.contains("flagged for suspicious")
 }
 
 /// 时区名(IANA,如 `Asia/Shanghai`),与客户端一致;取不到回退 UTC。
