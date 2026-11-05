@@ -6,5 +6,6 @@
   "raycast_signature_secret": null,
   "show_advanced": true,
   "include_deprecated": true,
-  "proxies": []
+  "proxies": [],
+  "proxies_enabled": false
 }

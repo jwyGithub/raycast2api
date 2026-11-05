@@ -65,10 +65,14 @@ pub struct ConfigFile {
     pub raycast_signature_secret: Option<String>,
     /// SQLite 存储库路径,默认 `store/store.db`。
     pub accounts_db: Option<String>,
-    /// 上游代理链(可选):`http://`/`https://`/`socks5://` URL 列表。上游请求
-    /// 直连失败(网络错误)时按顺序逐个换代理重试;缺省/空 = 纯直连。
+    /// 上游代理链(可选):`http://`/`https://`/`socks5://` URL 列表。
+    /// `proxies_enabled` 决定代理是首选还是回退通道;缺省/空 = 纯直连。
     #[serde(default, alias = "proxies")]
     pub proxies: Option<Vec<String>>,
+    /// 代理通道模式:`true` = 代理优先,全挂回退直连;`false`(缺省) =
+    /// 直连优先,网络失败换代理。两种模式都要求代理链非空才生效。
+    #[serde(default, alias = "proxiesEnabled")]
+    pub proxies_enabled: Option<bool>,
     /// Client-facing model id → gateway model id (e.g. `"gpt-6-astra"` →
     /// `"openai-gpt-6-astra"`), applied before the upstream model lookup.
     #[serde(default, alias = "modelOverrides")]
@@ -93,8 +97,11 @@ pub struct Settings {
     pub model_overrides: HashMap<String, String>,
     /// SQLite 账号库路径(账号表与后续模块共用)。
     pub accounts_db: String,
-    /// 上游代理链:直连失败后按顺序重试的代理 URL;空 = 纯直连。
+    /// 上游代理链:按顺序尝试的代理 URL;空 = 纯直连。
     pub proxies: Vec<String>,
+    /// 代理通道模式:`true` = 代理优先(全挂回退直连),`false` = 直连优先
+    /// (网络失败换代理)。
+    pub proxies_enabled: bool,
 }
 
 impl Settings {
@@ -159,6 +166,7 @@ impl Settings {
         };
 
         let proxies = parse_proxies(config.proxies, env_opt("PROXIES"))?;
+        let proxies_enabled = config.proxies_enabled.unwrap_or(false);
 
         Ok(Self {
             raycast_device_id,
@@ -170,6 +178,7 @@ impl Settings {
             model_overrides: config.model_overrides.unwrap_or_default(),
             accounts_db,
             proxies,
+            proxies_enabled,
         })
     }
 
@@ -208,6 +217,8 @@ impl Settings {
         };
 
         let proxies = parse_proxies(None, env_opt("PROXIES"))?;
+        // 环境变量模式没有 config 文件,PROXIES 存在即视为代理优先。
+        let proxies_enabled = !proxies.is_empty();
 
         Ok(Self {
             raycast_device_id,
@@ -219,6 +230,7 @@ impl Settings {
             model_overrides: HashMap::new(),
             accounts_db,
             proxies,
+            proxies_enabled,
         })
     }
 

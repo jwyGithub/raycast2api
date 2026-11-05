@@ -296,11 +296,55 @@ impl RaycastClient {
         })
     }
 
-    /// 直连 + 代理回退的上游请求:先直连,网络层失败(连接不上/超时,即
-    /// `GatewayError::Internal`)时按配置顺序逐个换代理重试。代理失败也继续
-    /// 换下一个;所有代理都失败才把最后的网络错误返回。HTTP 4xx/5xx 不触发
-    /// 代理回退(那是上游的业务响应,换通道没用)。
+    /// 上游通道选择:由 `proxies_enabled` 决定代理与直连的主次。
+    /// - `proxies_enabled = true`:代理优先,按顺序逐个试,网络层失败
+    ///   (连接不上/超时,即 `GatewayError::Internal`)换下一个;全部网络
+    ///   失败才回退直连。
+    /// - `proxies_enabled = false`:直连优先,网络失败后按顺序换代理。
+    /// HTTP 4xx/5xx 两种模式下都不触发换通道(那是上游的业务响应,换通道
+    /// 没用),直接返回。未配置代理 = 纯直连。
     async fn try_chat_with_fallback(
+        &self,
+        account: &AccountRow,
+        body: &str,
+    ) -> Result<reqwest::Response, GatewayError> {
+        if self.settings.proxies_enabled {
+            self.proxy_first(account, body).await
+        } else {
+            self.direct_first(account, body).await
+        }
+    }
+
+    /// 代理优先:逐个试代理,全挂回退直连。
+    async fn proxy_first(
+        &self,
+        account: &AccountRow,
+        body: &str,
+    ) -> Result<reqwest::Response, GatewayError> {
+        let mut last_err: Option<GatewayError> = None;
+        for (url, client) in &self.proxies {
+            match self.try_chat(client, account, body, url).await {
+                Ok(response) => return Ok(response),
+                Err(err @ GatewayError::Internal(_)) => {
+                    tracing::warn!(proxy = %url, account = %account.email, "→ proxy request failed, trying next channel: {err}");
+                    last_err = Some(err);
+                }
+                // 经代理拿到了上游响应(含 HTTP 错误状态):比网络错误更有价值,直接返回。
+                Err(err) => return Err(err),
+            }
+        }
+        if let Some(err) = &last_err {
+            tracing::warn!(
+                account = %account.email,
+                last_error = %err,
+                "→ all proxies failed at network level, falling back to direct"
+            );
+        }
+        self.try_chat(&self.http, account, body, "direct").await
+    }
+
+    /// 直连优先:直连网络失败后逐个换代理。
+    async fn direct_first(
         &self,
         account: &AccountRow,
         body: &str,
