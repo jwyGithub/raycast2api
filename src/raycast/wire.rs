@@ -229,6 +229,19 @@ impl RaycastSseError {
                 .is_some_and(|m| m.to_lowercase().contains("flagged for suspicious"))
     }
 
+    /// 是否为订阅缺失类错误:账号没有(或已失去)Raycast Pro,AI 不可用。
+    /// 与风控同语义:token 有效但账号用不了 AI,换号重试,本账号摘除。
+    /// 真实样本:http_status=402, message="A Raycast Pro subscription is
+    /// required to use Raycast AI. Open Settings → Account to subscribe and
+    /// continue."
+    pub fn is_subscription_required(&self) -> bool {
+        self.http_status == 402
+            || self
+                .message
+                .as_deref()
+                .is_some_and(|m| m.to_lowercase().contains("subscription is required"))
+    }
+
     /// 是否为邮箱未确认类错误:账号 token 有效但 AI 不可用,需用户去邮箱
     /// 点确认链接。冷却 24h 而非摘号 —— 确认后刷新任务会恢复可用。
     /// 真实样本:http_status=403, message="Please confirm your email address
@@ -483,6 +496,12 @@ mod credits_tests {
             ..by_subcode.clone()
         };
         assert!(!other_subcode.is_flagged());
+
+        // 订阅缺失:402 / "subscription is required"。
+        assert!(mk(402, "A Raycast Pro subscription is required to use Raycast AI.").is_subscription_required());
+        assert!(mk(403, "A Raycast Pro subscription is required.").is_subscription_required());
+        assert!(!mk(403, "flagged for suspicious activity").is_subscription_required());
+        assert!(!mk(200, "x").is_subscription_required());
     }
 
     #[test]

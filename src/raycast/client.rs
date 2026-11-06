@@ -175,6 +175,20 @@ impl RaycastClient {
                             last_error = Some(GatewayError::Upstream { status, message });
                             continue;
                         }
+                        if err.parsed.is_subscription_required() {
+                            // 订阅缺失(402):账号没有/已失去 Pro,token 有效
+                            // 但 AI 用不了 —— 同风控语义,摘号换下一个。
+                            tracing::warn!(
+                                account = %account.email,
+                                "→ subscription required, removing account and rotating: {message}"
+                            );
+                            self.accounts.mark_unavailable(
+                                &account.email,
+                                &format!("订阅缺失/已失效 ({message})"),
+                            );
+                            last_error = Some(GatewayError::Upstream { status, message });
+                            continue;
+                        }
                         if err.parsed.is_unconfirmed() {
                             // 邮箱未确认:不摘号(token 有效),但冷却 24h ——
                             // 用户去确认邮箱后,下次手动/定时刷新会恢复可用。
@@ -238,17 +252,16 @@ impl RaycastClient {
                     }
                 }
                 Err(err) => {
-                    // HTTP 层错误(非流内):若为账号被风控(403 +
-                    // account_unavailable / "flagged for suspicious"),摘号
-                    // 换下一个继续,否则透传终止。
-                    if is_flagged_upstream(&err) {
+                    // HTTP 层错误(非流内):若为账号本身不可用(风控 403 /
+                    // 订阅缺失 402),摘号换下一个继续,否则透传终止。
+                    if is_account_dead_upstream(&err) {
                         tracing::warn!(
                             account = %account.email,
-                            "→ account flagged by upstream (HTTP error), removing from pool: {err}"
+                            "→ account unusable upstream (HTTP error), removing from pool: {err}"
                         );
                         self.accounts.mark_unavailable(
                             &account.email,
-                            &format!("账号被风控 ({err})"),
+                            &format!("账号不可用 ({err})"),
                         );
                         last_error = Some(err);
                         continue;
@@ -501,15 +514,19 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
     Err(GatewayError::Upstream { status, message })
 }
 
-/// HTTP 层(非流内)错误是否为账号被风控:`ensure_success` 只保留了原始
-/// 响应文本,这里从文本里识别上游风控样本的特征串。两个特征分别来自
-/// 真实样本的 message("Account flagged for suspicious activity")与
-/// subcode("account_unavailable")—— message 内容可能变,但 subcode
+/// HTTP 层(非流内)错误是否为账号本身不可用(风控/订阅缺失):`ensure_success`
+/// 只保留了原始响应文本,这里从文本里识别上游样本的特征串。特征来自真实
+/// 样本的 message/subcode—— message 内容可能变,但 subcode("account_unavailable")
 /// 是 Raycast 的结构化字段,双保险。
-fn is_flagged_upstream(err: &GatewayError) -> bool {
-    let GatewayError::Upstream { message, .. } = err else {
+fn is_account_dead_upstream(err: &GatewayError) -> bool {
+    let GatewayError::Upstream { status, message } = err else {
         return false;
     };
+    // 订阅缺失:402 + "subscription is required"。
+    if *status == 402 || message.contains("subscription is required") {
+        return true;
+    }
+    // 风控封禁:403 + subcode / message 特征。
     message.contains("account_unavailable") || message.contains("flagged for suspicious")
 }
 
