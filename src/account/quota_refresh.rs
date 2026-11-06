@@ -60,7 +60,9 @@ pub async fn refresh_all(store: &Arc<AccountStore>, client: &RaycastClient) {
         crate::account::store::AccountList::Page(_) => unreachable!("refresh query is unpaged"),
     };
     for account in &accounts {
-        refresh_account(store, client, account).await;
+        if let Err(err) = refresh_account(store, client, account).await {
+            tracing::warn!("account refresh: {} failed: {err}", account.email);
+        }
     }
     tracing::info!("account refresh: {} accounts processed", accounts.len());
 }
@@ -74,18 +76,19 @@ pub async fn refresh_one(
     let account = store
         .get(email)?
         .ok_or_else(|| GatewayError::NotFound(format!("no account with email {email}")))?;
-    refresh_account(store, client, &account).await;
-    Ok(())
+    refresh_account(store, client, &account).await
 }
 
-async fn refresh_account(store: &Arc<AccountStore>, client: &RaycastClient, account: &AccountRow) {
+async fn refresh_account(
+    store: &Arc<AccountStore>,
+    client: &RaycastClient,
+    account: &AccountRow,
+) -> Result<(), GatewayError> {
     match fetch_info(client, &account.access_token).await {
         Ok(Some(info)) => {
-            if let Err(err) = store.update_info(&account.email, &info) {
-                tracing::warn!("account refresh: {} update failed: {err}", account.email);
-                return;
-            }
+            store.update_info(&account.email, &info)?;
             apply_decision(store, &account.email, &info);
+            Ok(())
         }
         // 401:token 失效 —— 有 refresh_token 就自动换新重试一次,
         // 换新失败(invalid_grant/网络)才摘号。
@@ -101,7 +104,7 @@ async fn refresh_account(store: &Arc<AccountStore>, client: &RaycastClient, acco
                         .unwrap_or_else(|| account.access_token.clone());
                     match fetch_info(client, &token).await {
                         Ok(Some(info)) => {
-                            let _ = store.update_info(&account.email, &info);
+                            store.update_info(&account.email, &info)?;
                             apply_decision(store, &account.email, &info);
                             tracing::info!(
                                 "account refresh: {} auto-renewed (available={})",
@@ -113,21 +116,37 @@ async fn refresh_account(store: &Arc<AccountStore>, client: &RaycastClient, acco
                                     .map(|r| r.available)
                                     .unwrap_or(false)
                             );
+                            Ok(())
                         }
-                        _ => {
+                        Ok(None) => {
+                            store.mark_unavailable(&account.email, "token 自动刷新后仍失效 (401)");
+                            Err(GatewayError::TokenInvalid {
+                                message: "token 自动刷新后仍失效 (401)".into(),
+                            })
+                        }
+                        Err(err) => {
                             store.mark_unavailable(&account.email, "token 自动刷新后查询失败");
+                            Err(err)
                         }
                     }
                 }
-                Ok(false) => {}
+                Ok(false) => {
+                    store.mark_unavailable(&account.email, "token 失效 (401),没有 refresh_token");
+                    Err(GatewayError::TokenInvalid {
+                        message: "token 失效 (401),且账号没有 refresh_token".into(),
+                    })
+                }
                 // 刷新失败:摘号,原因已记日志。
                 Err(()) => {
                     store.mark_unavailable(&account.email, "token 失效 (401),自动刷新失败");
+                    Err(GatewayError::TokenInvalid {
+                        message: "token 失效 (401),自动刷新失败".into(),
+                    })
                 }
             }
         }
-        // 其他错误:不动状态,已记日志。
-        Err(()) => {}
+        // 网络或其他上游错误不改变账号可用状态,交给调用方处理。
+        Err(err) => Err(err),
     }
 }
 
@@ -149,14 +168,17 @@ fn apply_decision(store: &Arc<AccountStore>, email: &str, info: &AccountInfo) {
 }
 
 /// 拉一个账号的 me + credits(非 Pro 号再查 trial_status)。
-/// `Ok(None)` = token 失效;`Err(())` = 其他错误(已记日志)。
-pub async fn fetch_info(client: &RaycastClient, token: &str) -> Result<Option<AccountInfo>, ()> {
+/// `Ok(None)` = token 失效;`Err(_)` = 其他错误(已记日志)。
+pub async fn fetch_info(
+    client: &RaycastClient,
+    token: &str,
+) -> Result<Option<AccountInfo>, GatewayError> {
     let me = match client.fetch_me(token).await {
         Ok(me) => me,
         Err(GatewayError::TokenInvalid { .. }) => return Ok(None),
         Err(err) => {
             tracing::warn!("account refresh: /me failed: {err}");
-            return Err(());
+            return Err(err);
         }
     };
     let credits = match client.fetch_credits(token).await {
@@ -164,7 +186,7 @@ pub async fn fetch_info(client: &RaycastClient, token: &str) -> Result<Option<Ac
         Err(GatewayError::TokenInvalid { .. }) => return Ok(None),
         Err(err) => {
             tracing::warn!("account refresh: /ai/credits failed: {err}");
-            return Err(());
+            return Err(err);
         }
     };
     let mut info = AccountInfo::from((me, credits));

@@ -230,7 +230,8 @@ async fn root_serves_account_console_without_api_authentication() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
     assert!(html.contains("Raycast 账号管理"));
-    assert!(html.contains("request('create'"));
+    assert!(html.contains("async request(path, body)"));
+    assert!(html.contains("'/v1/accounts/' + path"));
 }
 
 #[tokio::test]
