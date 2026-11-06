@@ -3,16 +3,17 @@
 //! 各业务模块(如 `account`)的 store 持有一个 [`Db`],自己执行各自的
 //! `CREATE TABLE IF NOT EXISTS`。新增使用方不需要改动本文件。
 
+use diesel::connection::SimpleConnection;
+use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
 use std::sync::{Arc, Mutex, MutexGuard};
-
-use rusqlite::Connection;
 
 /// 一个共享的 SQLite 连接(引用计数 + 互斥)。
 ///
 /// 网关流量下 SQLite 操作是微秒级,一把互斥锁足够;若未来需要异步
 /// 驱动,只替换本文件,业务 store 的 `&Db` 签名不变。
 #[derive(Clone)]
-pub struct Db(Arc<Mutex<Connection>>);
+pub struct Db(Arc<Mutex<SqliteConnection>>);
 
 impl Db {
     /// 打开(或创建)数据库文件;`:memory:` 用于测试。父目录不存在时
@@ -24,15 +25,15 @@ impl Db {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create db dir '{}': {e}", parent.display()))?;
         }
-        let conn = Connection::open(path)
+        let mut conn = SqliteConnection::establish(path)
             .map_err(|e| format!("failed to open sqlite db '{path}': {e}"))?;
-        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
+        conn.batch_execute("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
             .map_err(|e| format!("failed to configure sqlite db '{path}': {e}"))?;
         Ok(Self(Arc::new(Mutex::new(conn))))
     }
 
     /// 锁住并访问底层连接。锁中毒(某处 panic)视为致命错误。
-    pub fn lock(&self) -> MutexGuard<'_, Connection> {
+    pub fn lock(&self) -> MutexGuard<'_, SqliteConnection> {
         self.0.lock().expect("db connection lock poisoned")
     }
 }
@@ -45,12 +46,18 @@ mod tests {
     fn opens_in_memory_and_runs_sql() {
         let db = Db::open(":memory:").unwrap();
         db.lock()
-            .execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);")
+            .batch_execute("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);")
             .unwrap();
-        let x: i64 = db
-            .lock()
-            .query_row("SELECT x FROM t", [], |r| r.get(0))
-            .unwrap();
+        use diesel::sql_types::BigInt;
+        #[derive(diesel::QueryableByName)]
+        struct Value {
+            #[diesel(sql_type = BigInt)]
+            x: i64,
+        }
+        let x = diesel::sql_query("SELECT x FROM t")
+            .get_result::<Value>(&mut *db.lock())
+            .unwrap()
+            .x;
         assert_eq!(x, 1);
     }
 
@@ -60,7 +67,7 @@ mod tests {
         path.push(format!("r2a-db-mkdir-{}/nested/x.db", std::process::id()));
         let db = Db::open(path.to_str().unwrap()).unwrap();
         db.lock()
-            .execute_batch("CREATE TABLE t (x INTEGER)")
+            .batch_execute("CREATE TABLE t (x INTEGER)")
             .unwrap();
         assert!(path.exists());
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());

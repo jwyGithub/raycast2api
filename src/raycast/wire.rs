@@ -498,7 +498,13 @@ mod credits_tests {
         assert!(!other_subcode.is_flagged());
 
         // 订阅缺失:402 / "subscription is required"。
-        assert!(mk(402, "A Raycast Pro subscription is required to use Raycast AI.").is_subscription_required());
+        assert!(
+            mk(
+                402,
+                "A Raycast Pro subscription is required to use Raycast AI."
+            )
+            .is_subscription_required()
+        );
         assert!(mk(403, "A Raycast Pro subscription is required.").is_subscription_required());
         assert!(!mk(403, "flagged for suspicious activity").is_subscription_required());
         assert!(!mk(200, "x").is_subscription_required());

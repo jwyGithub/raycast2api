@@ -10,9 +10,9 @@
 - **流式与非流式**：三条路径都同时支持 SSE 流式与聚合后的非流式响应。
 - **请求签名**：自动计算 Raycast 所需的 `X-Raycast-Signature-v2` 头（ROT13/ROT5 + HMAC-SHA256）。
 - **模型直通**：`GET /v1/models` 透出账号可用模型，可选择是否包含高级 / 已弃用模型。
-- **请求日志**：每个推理请求的入站体、发给上游的请求体与上游 SSE 响应自动存入 SQLite（`store/store.db`），按时间保留 7 天自动清理。`GET /v1/logs` 查看列表（`limit` 默认 50、上限 200，`before_id` 翻页），`GET /v1/logs/{request_id}` 查看三体全文。
+- **请求日志**：每个推理请求的入站体、发给上游的请求体与上游 SSE 响应自动存入 SQLite（`store/store.db`），按时间保留 7 天自动清理。`POST /v1/logs/list` 默认分页（`page=1`、`page_size=10`），支持按 `created_at`、`request_id` 筛选；`POST /v1/logs/detail` 查看三体全文。
 - **可选鉴权**：设置 `api_key` 后，所有推理与只读接口都需要携带该 key。
-- **多账号管理与智能路由**：SQLite 账号池，通过 `POST /v1/accounts` 接口新增或更新账号（按 email 去重，token 变化时更新），请求轮询分摊额度。**故障自动切换**：401（token 失效）先用账号的 `refresh_token` 自动换新（rotation 一次一换，新 token 对原子写回）并当场重试，刷新不可行（无 refresh_token 或 `invalid_grant`）才摘号换下一个账号；限额（上游 200 流内错误，见下方说明）自动给该账号设冷却期（取上游 `retry_after`，缺省 10 分钟）并换号重试，冷却到点自动恢复；邮箱未确认（403 confirm email）冷却 24h，确认后可 `POST /v1/accounts/{email}/restore` 立即恢复。池内所有账号都不可用时，把上游真实错误透传给客户端。每 6 小时后台刷新额度（401 账号同样先自动续命再查额度），并自动摘除试用已到期（`trial_days_left <= 0`）的账号。
+- **多账号管理与智能路由**：SQLite 账号池，通过 `POST /v1/accounts/create` 接口新增或更新账号（按 email 去重，token 变化时更新），请求轮询分摊额度。**故障自动切换**：401（token 失效）先用账号的 `refresh_token` 自动换新（rotation 一次一换，新 token 对原子写回）并当场重试，刷新不可行（无 refresh_token 或 `invalid_grant`）才摘号换下一个账号；限额（上游 200 流内错误，见下方说明）自动给该账号设冷却期（取上游 `retry_after`，缺省 10 分钟）并换号重试，冷却到点自动恢复；邮箱未确认（403 confirm email）冷却 24h，确认后可 `POST /v1/accounts/restore`（body 含 email） 立即恢复。池内所有账号都不可用时，把上游真实错误透传给客户端。每 6 小时后台刷新额度（401 账号同样先自动续命再查额度），并自动摘除试用已到期（`trial_days_left <= 0`）的账号。
 - **双栈监听**：绑定 `0.0.0.0` 时自动同时监听 IPv6 `[::]`。
 
 ## 架构
@@ -47,18 +47,19 @@
 
 ### 账号管理接口
 
+账号、日志和模型管理接口（`/v1/*` 与 `/console/api/*`）统一返回 `{ code, message, data }`。列表与分页对象都放在 `data` 中；删除成功返回 HTTP 200 和 `data: null`。错误响应也使用此包络，错误原因位于 `message`，`data` 为 `null`。三种推理接口以及 `/health`、`/ready` 保持原有协议。
+
 | 路径 | 说明 | 典型客户端 |
 | --- | --- | --- |
-| `GET /v1/accounts` | 账号列表（token 掩码，含额度/订阅/Pro 状态/试用限额） | — |
-| `GET /v1/accounts/export` | 导出可直接提交给 `POST /v1/accounts` 的账号 JSON 数组（含明文 token；需配置 `API_KEY`） | — |
-| `GET /v1/accounts/{email}` | 单账号信息（读库缓存，零上游开销） | — |
-| `GET /v1/accounts/{email}?live=1` | 单账号实时信息（调上游 /me + /ai/credits 并写回；401 自动刷新重试） | — |
-| `POST /v1/accounts` | 新增/更新账号（按 email upsert；支持单个对象或账号数组） | — |
-| `POST /v1/accounts/refresh` | 手动触发额度刷新（202，后台执行） | — |
-| `POST /v1/accounts/{email}/restore` | 手动恢复账号：清冷却 + 置可用 + 实时验证（如确认邮箱后） | — |
-| `DELETE /v1/accounts/{email}` | 删除账号 | — |
-| `GET /v1/logs` | 请求日志列表（不含请求体） | — |
-| `GET /v1/logs/{request_id}` | 请求日志详情（入站/上游/响应全文） | — |
+| `POST /v1/accounts/list` | 账号列表（body: `page`、`page_size`、`status`，默认每页 10 个） | — |
+| `POST /v1/accounts/detail` | 单账号信息（body: `email`） | — |
+| `POST /v1/accounts/create` | 新增/更新账号（按 email upsert；支持单个对象或账号数组） | — |
+| `POST /v1/accounts/delete` | 删除账号（body: `email`） | — |
+| `POST /v1/accounts/restore` | 手动恢复账号（body: `email`） | — |
+| `POST /v1/accounts/refresh` | 刷新指定账号额度（body: `email`） | — |
+| `GET /v1/accounts/export` | 导出可直接提交给 `POST /v1/accounts/create` 的账号 JSON 数组（含明文 token；需配置 `API_KEY`） | — |
+| `POST /v1/logs/list` | 请求日志列表（body: `page`、`page_size`、`created_at`、`request_id`；不含请求体） | — |
+| `POST /v1/logs/detail` | 请求日志详情（body: `request_id`；返回入站/上游/响应全文） | — |
 
 ## 环境要求
 

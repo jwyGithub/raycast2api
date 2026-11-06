@@ -3,9 +3,16 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use crate::account::wire::{AccountInfo, AccountRecord, AccountView};
+use diesel::connection::SimpleConnection;
+use diesel::prelude::*;
+use diesel::sql_types::Text;
+use diesel::sqlite::Sqlite;
+
+use crate::account::wire::{AccountInfo, AccountRecord};
+use crate::core::page::Page;
 use crate::db::Db;
 use crate::error::GatewayError;
+use crate::schema::accounts;
 use crate::util::unix_secs;
 
 /// 一次 upsert 的三态结果。
@@ -45,32 +52,78 @@ pub struct AccountRow {
     pub updated_at: String,
 }
 
-impl AccountRow {
-    /// 转为对外视图:token 掩码。
-    pub fn to_view(&self) -> AccountView {
-        AccountView {
-            email: self.email.clone(),
-            tag: self.tag.clone(),
-            access_token: crate::account::wire::mask_token(&self.access_token),
-            available: self.available,
-            unavailable_reason: self.unavailable_reason.clone(),
-            obtained_at: self.obtained_at.clone(),
-            has_pro_features: self.has_pro_features,
-            tier: self.tier.clone(),
-            sub_status: self.sub_status.clone(),
-            trial_days_left: self.trial_days_left,
-            current_period_end: self.current_period_end,
-            trial_requests_per_hour: self.trial_requests_per_hour,
-            remaining_credits: self.remaining_credits,
-            total_credits: self.total_credits,
-            remaining_usd: self.remaining_usd,
-            next_credits_at: self.next_credits_at.clone(),
-            info_fetched_at: self.info_fetched_at.clone(),
-            cooldown_until: self.cooldown_until,
-            created_at: self.created_at.clone(),
-            updated_at: self.updated_at.clone(),
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = accounts)]
+#[diesel(check_for_backend(Sqlite))]
+struct StoredAccount {
+    id: i64,
+    email: String,
+    tag: Option<String>,
+    access_token: String,
+    refresh_token: Option<String>,
+    obtained_at: Option<String>,
+    available: i32,
+    unavailable_reason: Option<String>,
+    has_pro_features: Option<i32>,
+    tier: Option<String>,
+    sub_status: Option<String>,
+    trial_days_left: Option<i64>,
+    current_period_end: Option<i64>,
+    trial_requests_per_hour: Option<f64>,
+    remaining_credits: Option<f64>,
+    total_credits: Option<f64>,
+    remaining_usd: Option<f64>,
+    next_credits_at: Option<String>,
+    info_fetched_at: Option<String>,
+    cooldown_until: Option<i64>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<StoredAccount> for AccountRow {
+    fn from(row: StoredAccount) -> Self {
+        Self {
+            email: row.email,
+            tag: row.tag,
+            access_token: row.access_token,
+            refresh_token: row.refresh_token,
+            obtained_at: row.obtained_at,
+            available: row.available != 0,
+            unavailable_reason: row.unavailable_reason,
+            has_pro_features: row.has_pro_features.map(|value| value != 0),
+            tier: row.tier,
+            sub_status: row.sub_status,
+            trial_days_left: row.trial_days_left,
+            current_period_end: row.current_period_end,
+            trial_requests_per_hour: row.trial_requests_per_hour,
+            remaining_credits: row.remaining_credits,
+            total_credits: row.total_credits,
+            remaining_usd: row.remaining_usd,
+            next_credits_at: row.next_credits_at,
+            info_fetched_at: row.info_fetched_at,
+            cooldown_until: row.cooldown_until,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
         }
     }
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = accounts)]
+struct NewAccount<'a> {
+    email: &'a str,
+    tag: Option<&'a str>,
+    access_token: &'a str,
+    refresh_token: Option<&'a str>,
+    obtained_at: Option<&'a str>,
+    user_json: &'a str,
+    created_at: &'a str,
+    updated_at: &'a str,
+}
+
+pub enum AccountList {
+    All(Vec<AccountRow>),
+    Page(Page<AccountRow>),
 }
 
 const SCHEMA: &str = "
@@ -102,7 +155,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 /// 既有库的增量迁移:旧 schema 没有 `cooldown_until` / `has_pro_features`
 /// 列,`ALTER TABLE` 加列幂等不可行,用 `PRAGMA table_info` 判断。
-fn migrate(conn: &rusqlite::Connection) {
+fn migrate(conn: &mut diesel::sqlite::SqliteConnection) {
     for (column, ddl) in [
         (
             "cooldown_until",
@@ -117,27 +170,24 @@ fn migrate(conn: &rusqlite::Connection) {
             "ALTER TABLE accounts ADD COLUMN trial_requests_per_hour REAL;",
         ),
     ] {
-        let has: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name = ?1",
-                [column],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false);
+        #[derive(diesel::QueryableByName)]
+        struct Count {
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            count: i64,
+        }
+        let has = diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM pragma_table_info('accounts') WHERE name = ?",
+        )
+        .bind::<Text, _>(column)
+        .get_result::<Count>(conn)
+        .map(|row| row.count > 0)
+        .unwrap_or(false);
         if !has {
-            conn.execute_batch(ddl)
+            conn.batch_execute(ddl)
                 .unwrap_or_else(|e| panic!("migrate accounts: add {column}: {e}"));
         }
     }
 }
-
-/// 查询列的统一顺序(`list` / `next_available` 共用);`id` 在首位,
-/// 供轮询游标使用。
-const ROW_COLUMNS: &str = "id, email, tag, access_token, refresh_token, obtained_at, \
-    available, unavailable_reason, has_pro_features, tier, sub_status, trial_days_left, \
-    current_period_end, trial_requests_per_hour, remaining_credits, total_credits, remaining_usd, \
-    next_credits_at, info_fetched_at, cooldown_until, created_at, updated_at";
 
 pub struct AccountStore {
     db: Db,
@@ -150,9 +200,9 @@ impl AccountStore {
     /// 构造并建表(幂等),并做既有库的增量迁移。
     pub fn new(db: Db) -> Self {
         {
-            let conn = db.lock();
-            conn.execute_batch(SCHEMA).expect("create accounts schema");
-            migrate(&conn);
+            let mut conn = db.lock();
+            conn.batch_execute(SCHEMA).expect("create accounts schema");
+            migrate(&mut conn);
         }
         Self {
             db,
@@ -167,57 +217,48 @@ impl AccountStore {
             .ok_or_else(|| GatewayError::BadRequest("account entry has no user.email".into()))?;
         let user_json = serde_json::to_string(&record.user).unwrap_or_default();
         let now = unix_secs().to_string();
-        let conn = self.db.lock();
-
-        let existing: Option<(String, Option<String>)> = conn
-            .query_row(
-                "SELECT access_token, refresh_token FROM accounts WHERE email = ?1",
-                [&email],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .ok();
+        let mut conn = self.db.lock();
+        let existing = accounts::table
+            .filter(accounts::email.eq(&email))
+            .select((accounts::access_token, accounts::refresh_token))
+            .first::<(String, Option<String>)>(&mut *conn)
+            .optional()
+            .map_err(sql_err)?;
 
         match existing {
             None => {
-                conn.execute(
-                    "INSERT INTO accounts
-                        (email, tag, access_token, refresh_token, obtained_at,
-                         user_json, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-                    rusqlite::params![
-                        email,
-                        record.tag,
-                        record.access_token,
-                        record.refresh_token,
-                        record.obtained_at,
-                        user_json,
-                        now,
-                    ],
-                )
-                .map_err(sql_err)?;
+                diesel::insert_into(accounts::table)
+                    .values(&NewAccount {
+                        email: &email,
+                        tag: record.tag.as_deref(),
+                        access_token: &record.access_token,
+                        refresh_token: record.refresh_token.as_deref(),
+                        obtained_at: record.obtained_at.as_deref(),
+                        user_json: &user_json,
+                        created_at: &now,
+                        updated_at: &now,
+                    })
+                    .execute(&mut *conn)
+                    .map_err(sql_err)?;
                 Ok(UpsertOutcome::Inserted)
             }
             Some((access, refresh))
                 if access != record.access_token || refresh != record.refresh_token =>
             {
                 // token 变了:更新全部业务字段并恢复可用(新 token 可能已复活)。
-                conn.execute(
-                    "UPDATE accounts SET
-                        tag = ?2, access_token = ?3, refresh_token = ?4,
-                        obtained_at = ?5, user_json = ?6,
-                        available = 1, unavailable_reason = NULL, updated_at = ?7
-                     WHERE email = ?1",
-                    rusqlite::params![
-                        email,
-                        record.tag,
-                        record.access_token,
-                        record.refresh_token,
-                        record.obtained_at,
-                        user_json,
-                        now,
-                    ],
-                )
-                .map_err(sql_err)?;
+                diesel::update(accounts::table.filter(accounts::email.eq(&email)))
+                    .set((
+                        accounts::tag.eq(record.tag.as_deref()),
+                        accounts::access_token.eq(&record.access_token),
+                        accounts::refresh_token.eq(record.refresh_token.as_deref()),
+                        accounts::obtained_at.eq(record.obtained_at.as_deref()),
+                        accounts::user_json.eq(&user_json),
+                        accounts::available.eq(1),
+                        accounts::unavailable_reason.eq(None::<String>),
+                        accounts::updated_at.eq(&now),
+                    ))
+                    .execute(&mut *conn)
+                    .map_err(sql_err)?;
                 Ok(UpsertOutcome::Updated)
             }
             Some(_) => Ok(UpsertOutcome::Unchanged),
@@ -225,45 +266,137 @@ impl AccountStore {
     }
 
     /// 全部账号(含不可用的;refresh 需要它们的 token)。
-    pub fn list(&self) -> Result<Vec<AccountRow>, GatewayError> {
-        let conn = self.db.lock();
-        let mut stmt = conn
-            .prepare(&format!("SELECT {ROW_COLUMNS} FROM accounts ORDER BY id"))
-            .map_err(sql_err)?;
-        let rows = stmt
-            .query_map([], row_to_account)
-            .map_err(sql_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sql_err)?;
-        Ok(rows.into_iter().map(|(_, row)| row).collect())
+    pub fn list(
+        &self,
+        page: Option<u32>,
+        page_size: Option<u32>,
+        status: Option<&str>,
+    ) -> Result<AccountList, GatewayError> {
+        let mut conn = self.db.lock();
+        let status = status.filter(|value| !value.is_empty() && *value != "all");
+        if status.is_some_and(|value| !matches!(value, "available" | "cooldown" | "unavailable")) {
+            return Err(GatewayError::BadRequest(
+                "status must be one of all, available, cooldown, unavailable".into(),
+            ));
+        }
+        let now = unix_secs() as i64;
+        let mut query = accounts::table.into_boxed::<Sqlite>();
+        let mut count_query = accounts::table.into_boxed::<Sqlite>();
+        match status {
+            Some("available") => {
+                let filter = accounts::available.eq(1).and(
+                    accounts::cooldown_until
+                        .is_null()
+                        .or(accounts::cooldown_until.le(now)),
+                );
+                query = query.filter(filter);
+                count_query = count_query.filter(filter);
+            }
+            Some("cooldown") => {
+                let filter = accounts::available
+                    .eq(1)
+                    .and(accounts::cooldown_until.gt(now));
+                query = query.filter(filter);
+                count_query = count_query.filter(filter);
+            }
+            Some("unavailable") => {
+                query = query.filter(accounts::available.eq(0));
+                count_query = count_query.filter(accounts::available.eq(0));
+            }
+            _ => {}
+        }
+        if let (Some(page), Some(page_size)) = (page, page_size) {
+            let total = count_query
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .map_err(sql_err)? as u64;
+            let rows = query
+                .order(accounts::id.asc())
+                .limit(i64::from(page_size))
+                .offset(i64::from(page - 1) * i64::from(page_size))
+                .select(StoredAccount::as_select())
+                .load::<StoredAccount>(&mut *conn)
+                .map_err(sql_err)?
+                .into_iter()
+                .map(AccountRow::from)
+                .collect();
+            Ok(AccountList::Page(Page::new(rows, total, page, page_size)))
+        } else {
+            let rows = query
+                .order(accounts::id.asc())
+                .select(StoredAccount::as_select())
+                .load::<StoredAccount>(&mut *conn)
+                .map_err(sql_err)?
+                .into_iter()
+                .map(AccountRow::from)
+                .collect();
+            Ok(AccountList::All(rows))
+        }
     }
 
-    /// 导出可直接提交给 POST /v1/accounts 的原始账号凭据。
-    pub fn export_records(&self) -> Result<Vec<AccountRecord>, GatewayError> {
-        let conn = self.db.lock();
-        let mut stmt = conn
-            .prepare("SELECT user_json, tag, access_token, refresh_token, obtained_at FROM accounts ORDER BY id")
-            .map_err(sql_err)?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                ))
-            })
-            .map_err(sql_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sql_err)?;
+    pub fn counts(&self) -> Result<(u64, u64, u64, u64), GatewayError> {
+        let now = unix_secs() as i64;
+        let mut conn = self.db.lock();
+        let total = accounts::table
+            .count()
+            .get_result::<i64>(&mut *conn)
+            .map_err(sql_err)? as u64;
+        let available = accounts::table
+            .filter(
+                accounts::available.eq(1).and(
+                    accounts::cooldown_until
+                        .is_null()
+                        .or(accounts::cooldown_until.le(now)),
+                ),
+            )
+            .count()
+            .get_result::<i64>(&mut *conn)
+            .map_err(sql_err)? as u64;
+        let cooldown = accounts::table
+            .filter(
+                accounts::available
+                    .eq(1)
+                    .and(accounts::cooldown_until.gt(now)),
+            )
+            .count()
+            .get_result::<i64>(&mut *conn)
+            .map_err(sql_err)? as u64;
+        let unavailable = accounts::table
+            .filter(accounts::available.eq(0))
+            .count()
+            .get_result::<i64>(&mut *conn)
+            .map_err(sql_err)? as u64;
+        Ok((total, available, cooldown, unavailable))
+    }
 
-        rows.into_iter()
+    /// 导出可直接提交给 POST /v1/accounts/create 的原始账号凭据。
+    pub fn export_records(&self) -> Result<Vec<AccountRecord>, GatewayError> {
+        let mut conn = self.db.lock();
+        accounts::table
+            .select((
+                accounts::user_json,
+                accounts::tag,
+                accounts::access_token,
+                accounts::refresh_token,
+                accounts::obtained_at,
+            ))
+            .order(accounts::id.asc())
+            .load::<(
+                Option<String>,
+                Option<String>,
+                String,
+                Option<String>,
+                Option<String>,
+            )>(&mut *conn)
+            .map_err(sql_err)?
+            .into_iter()
             .map(
                 |(user_json, tag, access_token, refresh_token, obtained_at)| {
-                    let user = serde_json::from_str(&user_json).map_err(|e| {
-                        GatewayError::Internal(format!("account store: invalid user_json: {e}"))
-                    })?;
+                    let user = serde_json::from_str(user_json.as_deref().unwrap_or("{}")).map_err(
+                        |e| {
+                            GatewayError::Internal(format!("account store: invalid user_json: {e}"))
+                        },
+                    )?;
                     Ok(AccountRecord {
                         tag,
                         user,
@@ -278,38 +411,39 @@ impl AccountStore {
 
     /// 按 email 取单个账号;不存在返回 `None`。
     pub fn get(&self, email: &str) -> Result<Option<AccountRow>, GatewayError> {
-        let conn = self.db.lock();
-        match conn.query_row(
-            &format!("SELECT {ROW_COLUMNS} FROM accounts WHERE email = ?1"),
-            [email],
-            row_to_account,
-        ) {
-            Ok((_, row)) => Ok(Some(row)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(sql_err(e)),
-        }
+        let mut conn = self.db.lock();
+        accounts::table
+            .filter(accounts::email.eq(email))
+            .select(StoredAccount::as_select())
+            .first::<StoredAccount>(&mut *conn)
+            .optional()
+            .map(|row| row.map(AccountRow::from))
+            .map_err(sql_err)
     }
 
     /// 当前可选(未摘除、不在冷却)的账号数,作为 `send_chat` 换号重试的上限。
     pub fn count_available(&self) -> usize {
         let now = unix_secs() as i64;
-        self.db
-            .lock()
-            .query_row(
-                "SELECT COUNT(*) FROM accounts
-                 WHERE available = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?1)",
-                [now],
-                |r| r.get::<_, i64>(0),
+        let mut conn = self.db.lock();
+        accounts::table
+            .filter(
+                accounts::available.eq(1).and(
+                    accounts::cooldown_until
+                        .is_null()
+                        .or(accounts::cooldown_until.le(now)),
+                ),
             )
+            .count()
+            .get_result::<i64>(&mut *conn)
             .map(|n| n as usize)
             .unwrap_or(0)
     }
 
     /// 删除;返回是否存在。
     pub fn delete(&self, email: &str) -> Result<bool, GatewayError> {
-        let conn = self.db.lock();
-        let n = conn
-            .execute("DELETE FROM accounts WHERE email = ?1", [email])
+        let mut conn = self.db.lock();
+        let n = diesel::delete(accounts::table.filter(accounts::email.eq(email)))
+            .execute(&mut *conn)
             .map_err(sql_err)?;
         Ok(n > 0)
     }
@@ -319,23 +453,27 @@ impl AccountStore {
     pub fn next_available(&self) -> Result<AccountRow, GatewayError> {
         let now = unix_secs() as i64;
         let rows = {
-            let conn = self.db.lock();
-            let mut stmt = conn
-                .prepare(&format!(
-                    "SELECT {ROW_COLUMNS} FROM accounts
-                     WHERE available = 1
-                       AND (cooldown_until IS NULL OR cooldown_until <= ?1)
-                     ORDER BY id"
-                ))
-                .map_err(sql_err)?;
-            stmt.query_map([now], row_to_account)
+            let mut conn = self.db.lock();
+            accounts::table
+                .filter(
+                    accounts::available.eq(1).and(
+                        accounts::cooldown_until
+                            .is_null()
+                            .or(accounts::cooldown_until.le(now)),
+                    ),
+                )
+                .order(accounts::id.asc())
+                .select(StoredAccount::as_select())
+                .load::<StoredAccount>(&mut *conn)
                 .map_err(sql_err)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(sql_err)?
+                .into_iter()
+                .map(|row| (row.id, AccountRow::from(row)))
+                .collect::<Vec<_>>()
         };
         if rows.is_empty() {
             return Err(GatewayError::NoAccount(
-                "no available Raycast account; add or refresh one via POST /v1/accounts".into(),
+                "no available Raycast account; add or refresh one via POST /v1/accounts/create"
+                    .into(),
             ));
         }
         let last = self.last_id.load(Ordering::Relaxed);
@@ -349,9 +487,6 @@ impl AccountStore {
         self.set_available(email, false, Some(reason));
     }
 
-    /// 原子写回刷新后的 token 对并恢复可用。refresh_token 是一次一换:
-    /// 刷新成功必须同时落盘新 access_token 与新 refresh_token,否则旧的
-    /// refresh_token 已作废、账号就死了。返回是否确实有更新。
     pub fn update_tokens(
         &self,
         email: &str,
@@ -359,133 +494,94 @@ impl AccountStore {
         refresh_token: Option<&str>,
     ) -> Result<bool, GatewayError> {
         let now = unix_secs().to_string();
-        let conn = self.db.lock();
-        let n = conn
-            .execute(
-                "UPDATE accounts SET
-                    access_token = ?2,
-                    refresh_token = COALESCE(?3, refresh_token),
-                    available = 1,
-                    unavailable_reason = NULL,
-                    updated_at = ?4
-                 WHERE email = ?1",
-                rusqlite::params![email, access_token, refresh_token, now],
-            )
-            .map_err(sql_err)?;
+        let mut conn = self.db.lock();
+        let n = if let Some(refresh_token) = refresh_token {
+            diesel::update(accounts::table.filter(accounts::email.eq(email)))
+                .set((
+                    accounts::access_token.eq(access_token),
+                    accounts::refresh_token.eq(refresh_token),
+                    accounts::available.eq(1),
+                    accounts::unavailable_reason.eq(None::<String>),
+                    accounts::updated_at.eq(&now),
+                ))
+                .execute(&mut *conn)
+        } else {
+            diesel::update(accounts::table.filter(accounts::email.eq(email)))
+                .set((
+                    accounts::access_token.eq(access_token),
+                    accounts::available.eq(1),
+                    accounts::unavailable_reason.eq(None::<String>),
+                    accounts::updated_at.eq(&now),
+                ))
+                .execute(&mut *conn)
+        }
+        .map_err(sql_err)?;
         Ok(n > 0)
     }
 
-    /// 立即恢复账号(清冷却 + 置可用)。用于用户处理完(如确认邮箱)后
-    /// 手动恢复,不等冷却自然到期。返回是否存在该账号。
     pub fn reinstate(&self, email: &str) -> Result<bool, GatewayError> {
         let now = unix_secs().to_string();
-        let conn = self.db.lock();
-        let n = conn
-            .execute(
-                "UPDATE accounts SET
-                    available = 1,
-                    unavailable_reason = NULL,
-                    cooldown_until = NULL,
-                    updated_at = ?2
-                 WHERE email = ?1",
-                rusqlite::params![email, now],
-            )
+        let mut conn = self.db.lock();
+        let n = diesel::update(accounts::table.filter(accounts::email.eq(email)))
+            .set((
+                accounts::available.eq(1),
+                accounts::unavailable_reason.eq(None::<String>),
+                accounts::cooldown_until.eq(None::<i64>),
+                accounts::updated_at.eq(&now),
+            ))
+            .execute(&mut *conn)
             .map_err(sql_err)?;
         Ok(n > 0)
     }
 
-    /// 限额冷却:账号保持 `available=1`,但轮询在 `until`(unix 秒)前
-    /// 跳过它。到期自动恢复,无需显式清除。
     pub fn mark_cooldown(&self, email: &str, until_unix_secs: i64, reason: &str) {
-        let conn = self.db.lock();
-        let _ = conn.execute(
-            "UPDATE accounts
-                SET cooldown_until = ?2,
-                    unavailable_reason = ?3,
-                    updated_at = ?4
-             WHERE email = ?1",
-            rusqlite::params![email, until_unix_secs, reason, unix_secs().to_string()],
-        );
+        let mut conn = self.db.lock();
+        let _ = diesel::update(accounts::table.filter(accounts::email.eq(email)))
+            .set((
+                accounts::cooldown_until.eq(Some(until_unix_secs)),
+                accounts::unavailable_reason.eq(Some(reason)),
+                accounts::updated_at.eq(unix_secs().to_string()),
+            ))
+            .execute(&mut *conn);
     }
 
-    /// 设置可用性;`available = true` 时清空原因。
     pub fn set_available(&self, email: &str, available: bool, reason: Option<&str>) {
         let now = unix_secs().to_string();
-        let conn = self.db.lock();
-        let _ = conn.execute(
-            "UPDATE accounts
-                SET available = ?2,
-                    unavailable_reason = ?3,
-                    updated_at = ?4
-             WHERE email = ?1",
-            rusqlite::params![email, available, reason, now],
-        );
+        let mut conn = self.db.lock();
+        let _ = diesel::update(accounts::table.filter(accounts::email.eq(email)))
+            .set((
+                accounts::available.eq(i32::from(available)),
+                accounts::unavailable_reason.eq(reason),
+                accounts::updated_at.eq(now),
+            ))
+            .execute(&mut *conn);
     }
 
-    /// 写入额度/订阅信息与 `info_fetched_at`。
     pub fn update_info(&self, email: &str, info: &AccountInfo) -> Result<(), GatewayError> {
         let now = unix_secs().to_string();
-        let conn = self.db.lock();
-        conn.execute(
-            "UPDATE accounts SET
-                has_pro_features = ?2, tier = ?3, sub_status = ?4, trial_days_left = ?5,
-                current_period_end = ?6, trial_requests_per_hour = ?7,
-                remaining_credits = ?8, total_credits = ?9,
-                remaining_usd = ?10, next_credits_at = ?11,
-                info_fetched_at = ?12, updated_at = ?12
-             WHERE email = ?1",
-            rusqlite::params![
-                email,
-                info.has_pro_features.map(|b| b as i64),
-                info.tier,
-                info.sub_status,
-                info.trial_days_left,
-                info.current_period_end,
-                info.trial_requests_per_hour,
-                info.remaining_credits,
-                info.total_credits,
-                info.remaining_usd,
-                info.next_credits_at,
-                now,
-            ],
-        )
-        .map_err(sql_err)?;
+        let mut conn = self.db.lock();
+        diesel::update(accounts::table.filter(accounts::email.eq(email)))
+            .set((
+                accounts::has_pro_features.eq(info.has_pro_features.map(i32::from)),
+                accounts::tier.eq(info.tier.as_deref()),
+                accounts::sub_status.eq(info.sub_status.as_deref()),
+                accounts::trial_days_left.eq(info.trial_days_left),
+                accounts::current_period_end.eq(info.current_period_end),
+                accounts::trial_requests_per_hour.eq(info.trial_requests_per_hour),
+                accounts::remaining_credits.eq(info.remaining_credits),
+                accounts::total_credits.eq(info.total_credits),
+                accounts::remaining_usd.eq(info.remaining_usd),
+                accounts::next_credits_at.eq(info.next_credits_at.as_deref()),
+                accounts::info_fetched_at.eq(&now),
+                accounts::updated_at.eq(&now),
+            ))
+            .execute(&mut *conn)
+            .map_err(sql_err)?;
         Ok(())
     }
 }
 
-/// 行映射(列顺序与 `ROW_COLUMNS` 一致;首列是行 `id`,供轮询游标用)。
-fn row_to_account(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, AccountRow)> {
-    Ok((
-        r.get(0)?,
-        AccountRow {
-            email: r.get(1)?,
-            tag: r.get(2)?,
-            access_token: r.get(3)?,
-            refresh_token: r.get(4)?,
-            obtained_at: r.get(5)?,
-            available: r.get::<_, i64>(6)? != 0,
-            unavailable_reason: r.get(7)?,
-            has_pro_features: r.get::<_, Option<i64>>(8)?.map(|n| n != 0),
-            tier: r.get(9)?,
-            sub_status: r.get(10)?,
-            trial_days_left: r.get(11)?,
-            current_period_end: r.get(12)?,
-            trial_requests_per_hour: r.get(13)?,
-            remaining_credits: r.get(14)?,
-            total_credits: r.get(15)?,
-            remaining_usd: r.get(16)?,
-            next_credits_at: r.get(17)?,
-            info_fetched_at: r.get(18)?,
-            cooldown_until: r.get(19)?,
-            created_at: r.get(20)?,
-            updated_at: r.get(21)?,
-        },
-    ))
-}
-
-/// SQL 错误统一进 `GatewayError::Internal`。
-fn sql_err(e: rusqlite::Error) -> GatewayError {
+fn sql_err(e: diesel::result::Error) -> GatewayError {
     GatewayError::Internal(format!("account store: {e}"))
 }
 
@@ -509,6 +605,13 @@ mod tests {
         AccountStore::new(Db::open(":memory:").unwrap())
     }
 
+    fn all(store: &AccountStore) -> Vec<AccountRow> {
+        match store.list(None, None, None).unwrap() {
+            AccountList::All(rows) => rows,
+            AccountList::Page(_) => unreachable!("unpaged list returns all rows"),
+        }
+    }
+
     #[test]
     fn upsert_three_states() {
         let s = store();
@@ -524,7 +627,7 @@ mod tests {
         );
         // token 变化 → 更新
         assert_eq!(s.upsert(&rec("a@x", "t2")).unwrap(), UpsertOutcome::Updated);
-        assert_eq!(s.list().unwrap()[0].access_token, "t2");
+        assert_eq!(all(&s)[0].access_token, "t2");
     }
 
     #[test]
@@ -532,10 +635,10 @@ mod tests {
         let s = store();
         s.upsert(&rec("a@x", "t1")).unwrap();
         s.mark_unavailable("a@x", "token 失效 (401)");
-        assert!(!s.list().unwrap()[0].available);
+        assert!(!all(&s)[0].available);
         // 带 token 更新 → 恢复
         s.upsert(&rec("a@x", "t9")).unwrap();
-        let row = s.list().unwrap()[0].clone();
+        let row = all(&s)[0].clone();
         assert!(row.available);
         assert_eq!(row.unavailable_reason, None);
     }
@@ -596,7 +699,7 @@ mod tests {
         s.mark_cooldown("a@x", unix_secs() as i64 + 600, "限额 25/h");
         assert_eq!(s.next_available().unwrap().email, "b@x");
         assert_eq!(s.next_available().unwrap().email, "b@x");
-        let a = &s.list().unwrap()[0];
+        let a = &all(&s)[0];
         assert!(a.available, "冷却不摘号");
         assert!(a.cooldown_until.is_some());
 
@@ -626,7 +729,7 @@ mod tests {
         s.upsert(&rec("a@x", "ta")).unwrap();
         assert!(s.delete("a@x").unwrap());
         assert!(!s.delete("a@x").unwrap());
-        assert!(s.list().unwrap().is_empty());
+        assert!(all(&s).is_empty());
     }
 
     #[test]
@@ -642,15 +745,15 @@ mod tests {
             ..AccountInfo::default()
         };
         s.update_info("a@x", &info).unwrap();
-        let row = s.list().unwrap()[0].clone();
+        let row = all(&s)[0].clone();
         assert_eq!(row.tier.as_deref(), Some("pro"));
         assert_eq!(row.remaining_credits, Some(5.5));
         assert!(row.info_fetched_at.is_some());
 
         // set_available 独立操作
         s.set_available("a@x", false, Some("额度耗尽"));
-        assert!(!s.list().unwrap()[0].available);
+        assert!(!all(&s)[0].available);
         s.set_available("a@x", true, None);
-        assert!(s.list().unwrap()[0].available);
+        assert!(all(&s)[0].available);
     }
 }

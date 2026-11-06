@@ -5,12 +5,12 @@
 //! token 换新(renewal,oauth token 轮换)在 [`crate::account::token_renewal`]。
 //!
 //! 由 `main` 装配调用(避免 raycast ↔ account 循环依赖):启动立即一遍,
-//! 之后每 [`REFRESH_INTERVAL`] 一遍;`POST /v1/accounts/refresh` 也可手动触发。
+//! 之后每 [`REFRESH_INTERVAL`] 一遍;`POST /v1/accounts/refresh` 可手动刷新单个账号。
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::account::store::AccountStore;
+use crate::account::store::{AccountRow, AccountStore};
 use crate::account::wire::AccountInfo;
 use crate::error::GatewayError;
 use crate::raycast::client::RaycastClient;
@@ -47,7 +47,7 @@ pub fn trial_expired(info: &AccountInfo) -> bool {
 /// 刷新所有账号(含不可用的 —— 它们的 token 可能已恢复)。单个账号
 /// 失败只记日志,不影响其余。
 pub async fn refresh_all(store: &Arc<AccountStore>, client: &RaycastClient) {
-    let accounts = match store.list() {
+    let accounts = match store.list(None, None, None) {
         Ok(accounts) => accounts,
         Err(err) => {
             tracing::error!("account refresh: list failed: {err}");
@@ -55,60 +55,80 @@ pub async fn refresh_all(store: &Arc<AccountStore>, client: &RaycastClient) {
         }
     };
 
+    let accounts = match accounts {
+        crate::account::store::AccountList::All(accounts) => accounts,
+        crate::account::store::AccountList::Page(_) => unreachable!("refresh query is unpaged"),
+    };
     for account in &accounts {
-        match fetch_info(client, &account.access_token).await {
-            Ok(Some(info)) => {
-                if let Err(err) = store.update_info(&account.email, &info) {
-                    tracing::warn!("account refresh: {} update failed: {err}", account.email);
-                    continue;
-                }
-                apply_decision(store, &account.email, &info);
-            }
-            // 401:token 失效 —— 有 refresh_token 就自动换新重试一次,
-            // 换新失败(invalid_grant/网络)才摘号。
-            Ok(None) => {
-                match crate::account::token_renewal::auto_renew(store, client.http(), account).await
-                {
-                    Ok(true) => {
-                        // 新 token 生效:重查一次额度信息,走同一套决策。
-                        let token = store
-                            .get(&account.email)
-                            .ok()
-                            .flatten()
-                            .map(|r| r.access_token)
-                            .unwrap_or_else(|| account.access_token.clone());
-                        match fetch_info(client, &token).await {
-                            Ok(Some(info)) => {
-                                let _ = store.update_info(&account.email, &info);
-                                apply_decision(store, &account.email, &info);
-                                tracing::info!(
-                                    "account refresh: {} auto-renewed (available={})",
-                                    account.email,
-                                    store
-                                        .get(&account.email)
-                                        .ok()
-                                        .flatten()
-                                        .map(|r| r.available)
-                                        .unwrap_or(false)
-                                );
-                            }
-                            _ => {
-                                store.mark_unavailable(&account.email, "token 自动刷新后查询失败");
-                            }
-                        }
-                    }
-                    Ok(false) => {}
-                    // 刷新失败:摘号,原因已记日志。
-                    Err(()) => {
-                        store.mark_unavailable(&account.email, "token 失效 (401),自动刷新失败");
-                    }
-                }
-            }
-            // 其他错误:不动状态,已记日志。
-            Err(()) => {}
-        }
+        refresh_account(store, client, account).await;
     }
     tracing::info!("account refresh: {} accounts processed", accounts.len());
+}
+
+/// 刷新指定账号,供管理接口调用。
+pub async fn refresh_one(
+    store: &Arc<AccountStore>,
+    client: &RaycastClient,
+    email: &str,
+) -> Result<(), GatewayError> {
+    let account = store
+        .get(email)?
+        .ok_or_else(|| GatewayError::NotFound(format!("no account with email {email}")))?;
+    refresh_account(store, client, &account).await;
+    Ok(())
+}
+
+async fn refresh_account(store: &Arc<AccountStore>, client: &RaycastClient, account: &AccountRow) {
+    match fetch_info(client, &account.access_token).await {
+        Ok(Some(info)) => {
+            if let Err(err) = store.update_info(&account.email, &info) {
+                tracing::warn!("account refresh: {} update failed: {err}", account.email);
+                return;
+            }
+            apply_decision(store, &account.email, &info);
+        }
+        // 401:token 失效 —— 有 refresh_token 就自动换新重试一次,
+        // 换新失败(invalid_grant/网络)才摘号。
+        Ok(None) => {
+            match crate::account::token_renewal::auto_renew(store, client.http(), account).await {
+                Ok(true) => {
+                    // 新 token 生效:重查一次额度信息,走同一套决策。
+                    let token = store
+                        .get(&account.email)
+                        .ok()
+                        .flatten()
+                        .map(|r| r.access_token)
+                        .unwrap_or_else(|| account.access_token.clone());
+                    match fetch_info(client, &token).await {
+                        Ok(Some(info)) => {
+                            let _ = store.update_info(&account.email, &info);
+                            apply_decision(store, &account.email, &info);
+                            tracing::info!(
+                                "account refresh: {} auto-renewed (available={})",
+                                account.email,
+                                store
+                                    .get(&account.email)
+                                    .ok()
+                                    .flatten()
+                                    .map(|r| r.available)
+                                    .unwrap_or(false)
+                            );
+                        }
+                        _ => {
+                            store.mark_unavailable(&account.email, "token 自动刷新后查询失败");
+                        }
+                    }
+                }
+                Ok(false) => {}
+                // 刷新失败:摘号,原因已记日志。
+                Err(()) => {
+                    store.mark_unavailable(&account.email, "token 失效 (401),自动刷新失败");
+                }
+            }
+        }
+        // 其他错误:不动状态,已记日志。
+        Err(()) => {}
+    }
 }
 
 /// 把一次刷新的决策落库(所有刷新路径共用,保证判定规则唯一)。

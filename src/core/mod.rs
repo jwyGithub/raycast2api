@@ -11,6 +11,7 @@
 
 pub mod event;
 pub mod message;
+pub mod page;
 pub mod protocol;
 pub mod request;
 pub mod response;

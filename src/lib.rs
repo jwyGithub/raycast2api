@@ -26,6 +26,7 @@ pub mod error;
 pub mod log;
 pub mod protocol;
 pub mod raycast;
+pub mod schema;
 pub mod server;
 pub mod signature;
 pub mod util;

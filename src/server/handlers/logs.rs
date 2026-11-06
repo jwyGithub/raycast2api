@@ -1,43 +1,61 @@
 //! `/v1/logs` — 请求日志查询(列表 + 详情)。
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
+use axum::response::IntoResponse;
 use serde::Deserialize;
 
 use crate::error::GatewayError;
-use crate::log::wire::{LogDetail, LogEntry};
+use crate::log::wire::LogDetail;
 use crate::server::state::SharedState;
 
-/// 列表查询参数。
+/// `POST /v1/logs/list` 请求体。
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListParams {
-    pub limit: Option<u32>,
-    /// 翻页:取 id 小于该值的更旧记录。
-    pub before_id: Option<i64>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub created_at: Option<i64>,
+    pub request_id: Option<String>,
 }
 
-/// `GET /v1/logs` — 列表(降序,不含 body)。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetailParams {
+    pub request_id: String,
+}
+
+/// `POST /v1/logs/list` — 分页查询日志(降序,不含 body)。
 pub async fn list(
     State(state): State<SharedState>,
-    Query(params): Query<ListParams>,
-) -> Result<Json<Vec<LogEntry>>, GatewayError> {
-    let limit = params.limit.unwrap_or(50);
-    if !(1..=200).contains(&limit) {
-        return Err(GatewayError::BadRequest(format!(
-            "limit must be in 1..=200, got {limit}"
-        )));
+    Json(params): Json<ListParams>,
+) -> Result<axum::response::Response, GatewayError> {
+    let page = params.page.unwrap_or(1);
+    let page_size = params.page_size.unwrap_or(10);
+    if page == 0 || !(1..=100).contains(&page_size) {
+        return Err(GatewayError::BadRequest(
+            "page must be positive and page_size must be in 1..=100".into(),
+        ));
     }
-    Ok(Json(state.log.list(limit, params.before_id)))
+    let result = state
+        .log
+        .list(
+            (page, page_size),
+            params.created_at,
+            params.request_id.as_deref(),
+        )
+        .map_err(GatewayError::Internal)?;
+    Ok(Json(result).into_response())
 }
 
-/// `GET /v1/logs/{request_id}` — 详情(三体全文);不存在 404。
+/// `POST /v1/logs/detail` — 详情(三体全文);不存在 404。
 pub async fn detail(
     State(state): State<SharedState>,
-    Path(request_id): Path<String>,
+    Json(params): Json<DetailParams>,
 ) -> Result<Json<LogDetail>, GatewayError> {
     state
         .log
-        .detail(&request_id)
+        .detail(&params.request_id)
         .map(Json)
-        .ok_or_else(|| GatewayError::NotFound(format!("no request log {request_id}")))
+        .ok_or_else(|| GatewayError::NotFound(format!("no request log {}", params.request_id)))
 }

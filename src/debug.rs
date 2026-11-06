@@ -1,6 +1,6 @@
 //! Request-correlation support for the request-log store.
 //!
-//! [`REQUEST_ID`] is a task-local correlation id set by the `debug_capture`
+//! [`REQUEST_ID`] is a task-local correlation id set by the `log_request`
 //! middleware; the upstream client and the SSE bridge use it to attribute
 //! their log writes to the originating inbound request — without threading an
 //! id through every handler and pipeline signature.
@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock};
 
 tokio::task_local! {
     /// Correlation id for the request currently being handled. Set by the
-    /// `debug_capture` middleware so the Raycast client can name its upstream
+    /// `log_request` middleware so the Raycast client can name its upstream
     /// dump after the originating inbound one — without threading an id through
     /// every handler and pipeline signature.
     pub static REQUEST_ID: String;

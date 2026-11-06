@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 
-/// `GET /v1/logs` 的一条列表项 —— 不含 body,只有元信息与各体大小。
+/// `POST /v1/logs/list` 的一条列表项 —— 不含 body,只有元信息与各体大小。
 #[derive(Debug, Serialize)]
 pub struct LogEntry {
     pub id: i64,
@@ -16,7 +16,7 @@ pub struct LogEntry {
     pub response_bytes: Option<i64>,
 }
 
-/// `GET /v1/logs/{request_id}` 的详情 —— 三体全文。
+/// `POST /v1/logs/detail` 的详情 —— 三体全文。
 #[derive(Debug, Serialize)]
 pub struct LogDetail {
     pub request_id: String,

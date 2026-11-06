@@ -170,8 +170,24 @@ impl RaycastClient {
                                 account = %account.email,
                                 "→ account flagged by upstream, removing from pool: {message}"
                             );
-                            self.accounts
-                                .mark_unavailable(&account.email, &format!("账号被风控 ({message})"));
+                            self.accounts.mark_unavailable(
+                                &account.email,
+                                &format!("账号被风控 ({message})"),
+                            );
+                            last_error = Some(GatewayError::Upstream { status, message });
+                            continue;
+                        }
+                        if err.parsed.is_subscription_required() {
+                            // 订阅缺失(402):账号没有/已失去 Pro,token 有效
+                            // 但 AI 用不了 —— 同风控语义,摘号换下一个。
+                            tracing::warn!(
+                                account = %account.email,
+                                "→ subscription required, removing account and rotating: {message}"
+                            );
+                            self.accounts.mark_unavailable(
+                                &account.email,
+                                &format!("订阅缺失/已失效 ({message})"),
+                            );
                             last_error = Some(GatewayError::Upstream { status, message });
                             continue;
                         }
@@ -259,10 +275,8 @@ impl RaycastClient {
                             account = %account.email,
                             "→ account unusable upstream (HTTP error), removing from pool: {err}"
                         );
-                        self.accounts.mark_unavailable(
-                            &account.email,
-                            &format!("账号不可用 ({err})"),
-                        );
+                        self.accounts
+                            .mark_unavailable(&account.email, &format!("账号被风控 ({err})"));
                         last_error = Some(err);
                         continue;
                     }
@@ -278,7 +292,7 @@ impl RaycastClient {
             "all available accounts failed; surfacing last error to client"
         );
         Err(last_error.unwrap_or(GatewayError::NoAccount(
-            "no available Raycast account; add or refresh one via POST /v1/accounts".into(),
+            "no available Raycast account; add or refresh one via POST /v1/accounts/create".into(),
         )))
     }
 
@@ -314,8 +328,8 @@ impl RaycastClient {
     ///   (连接不上/超时,即 `GatewayError::Internal`)换下一个;全部网络
     ///   失败才回退直连。
     /// - `proxies_enabled = false`:直连优先,网络失败后按顺序换代理。
-    /// HTTP 4xx/5xx 两种模式下都不触发换通道(那是上游的业务响应,换通道
-    /// 没用),直接返回。未配置代理 = 纯直连。
+    ///   HTTP 4xx/5xx 两种模式下都不触发换通道(那是上游的业务响应,换通道
+    ///   没用),直接返回。未配置代理 = 纯直连。
     async fn try_chat_with_fallback(
         &self,
         account: &AccountRow,
@@ -412,7 +426,7 @@ impl RaycastClient {
 
         // Record the outgoing upstream body in the request-log store,
         // correlated to the inbound request via the task-local id set by
-        // `debug_capture`. Fire-and-forget.
+        // `log_request`. Fire-and-forget.
         self.log.update_upstream(
             &debug::current_request_id(),
             &debug::body_to_value(body.as_bytes()),

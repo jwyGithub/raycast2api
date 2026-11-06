@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::raycast::wire::{RaycastCredits, RaycastMe};
 
-/// `POST /v1/accounts` 的账号请求体。
+/// `POST /v1/accounts/create` 的账号请求体。
 /// `user` 保留完整原始对象(存 `user_json` 列),email 从中提取。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AccountRecord {
@@ -63,7 +63,7 @@ impl From<(RaycastMe, RaycastCredits)> for AccountInfo {
     }
 }
 
-/// `GET /v1/accounts` 的一条响应:token 掩码,含额度与可用状态。
+/// `POST /v1/accounts/list` 返回的一条账号视图:token 掩码,含额度与可用状态。
 #[derive(Debug, Serialize)]
 pub struct AccountView {
     pub email: String,

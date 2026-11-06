@@ -11,6 +11,7 @@ use axum::Router;
 use axum::http::Method;
 use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use self::state::SharedState;
@@ -19,49 +20,62 @@ use self::state::SharedState;
 pub fn build_router(state: SharedState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS, Method::DELETE])
+        .allow_methods([Method::GET, Method::POST])
         .allow_headers(Any)
         .max_age(std::time::Duration::from_secs(86_400));
 
-    // The authenticated API surface: account-pool management plus inference
-    // and the read-only endpoints. The debug-capture layer sits inside (after)
-    // the auth layer, so unauthenticated requests are never captured.
+    let management = Router::new()
+        .route("/accounts/list", post(handlers::accounts::list))
+        .route("/accounts/detail", post(handlers::accounts::detail))
+        .route("/accounts/create", post(handlers::accounts::create))
+        .route("/accounts/delete", post(handlers::accounts::delete))
+        .route("/accounts/restore", post(handlers::accounts::restore))
+        .route("/accounts/export", get(handlers::accounts::export))
+        .route("/accounts/refresh", post(handlers::accounts::refresh))
+        .route("/logs/list", post(handlers::logs::list))
+        .route("/logs/detail", post(handlers::logs::detail))
+        .route("/models", get(handlers::models::list_models));
+
+    // The authenticated API surface: shared management routes plus inference
+    // and health endpoints. The debug-capture layer sits inside the auth layer.
     let api = Router::new()
-        .route(
-            "/v1/accounts",
-            get(handlers::accounts::list).post(handlers::accounts::upsert),
-        )
-        .route("/v1/accounts/export", get(handlers::accounts::export))
-        .route("/v1/accounts/refresh", post(handlers::accounts::refresh))
-        .route(
-            "/v1/accounts/{email}/restore",
-            post(handlers::accounts::restore),
-        )
-        .route(
-            "/v1/accounts/{email}",
-            get(handlers::accounts::get_one).delete(handlers::accounts::delete),
-        )
-        .route("/v1/logs", get(handlers::logs::list))
-        .route("/v1/logs/{request_id}", get(handlers::logs::detail))
+        .nest("/v1", management.clone())
         .route(
             "/v1/chat/completions",
-            post(handlers::chat::chat_completions),
+            post(handlers::chat::chat_completions)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
         )
-        .route("/v1/messages", post(handlers::messages::messages))
-        .route("/v1/responses", post(handlers::responses::responses))
-        .route("/v1/models", get(handlers::models::list_models))
+        .route(
+            "/v1/messages",
+            post(handlers::messages::messages).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/v1/responses",
+            post(handlers::responses::responses).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route("/health", get(handlers::health::health))
         .route("/ready", get(handlers::health::ready))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            middleware::debug_capture,
+            middleware::request_logging,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            middleware::require_api_key,
+            middleware::auth,
         ));
 
-    api.fallback(handlers::not_found)
+    let console_api = Router::new()
+        .nest("/console/api", management)
+        .route("/console/api/overview", get(handlers::health::overview))
+        .with_state(state.clone());
+
+    let dashboard_dir =
+        std::env::var("DASHBOARD_DIST_DIR").unwrap_or_else(|_| "src/dashboard/dist".to_string());
+    let dashboard_shell = std::path::Path::new(&dashboard_dir).join("index.html");
+    api.merge(console_api)
+        .route("/v1/{*path}", get(handlers::not_found))
+        .fallback_service(ServeDir::new(dashboard_dir).fallback(ServeFile::new(dashboard_shell)))
+        .layer(axum::middleware::from_fn(middleware::response_format))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

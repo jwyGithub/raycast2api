@@ -1,19 +1,18 @@
 //! `/v1/accounts` — 账号池的查看、新增/更新、删除与手动额度刷新。
 
-use std::sync::Arc;
-
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::account::store::{AccountStore, UpsertOutcome};
-use crate::account::wire::{AccountRecord, AccountView};
+use crate::account::store::{AccountList, AccountRow, AccountStore, UpsertOutcome};
+use crate::account::wire::{AccountRecord, AccountView, mask_token};
+use crate::core::page::Page;
 use crate::error::GatewayError;
 use crate::server::state::SharedState;
 
-/// `POST /v1/accounts` 的结果回执。
+/// `POST /v1/accounts/create` 的请求体,支持单账号或账号数组。
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum UpsertRequest {
@@ -28,17 +27,70 @@ pub enum UpsertResponse {
     Many { results: Vec<&'static str> },
 }
 
-/// `GET /v1/accounts` — 全部账号(token 掩码)。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountListParams {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailRequest {
+    pub email: String,
+}
+
+/// `POST /v1/accounts/list` — 默认返回第一页,每页 10 个账号。
 pub async fn list(
     State(state): State<SharedState>,
-) -> Result<Json<Vec<AccountView>>, GatewayError> {
-    let views = state
+    Json(params): Json<AccountListParams>,
+) -> Result<axum::response::Response, GatewayError> {
+    let page = params.page.unwrap_or(1);
+    let page_size = params.page_size.unwrap_or(10);
+    if page == 0 || !(1..=100).contains(&page_size) {
+        return Err(GatewayError::BadRequest(
+            "page must be positive and page_size must be in 1..=100".into(),
+        ));
+    }
+    let result = state
         .accounts
-        .list()?
-        .iter()
-        .map(|row| row.to_view())
-        .collect();
-    Ok(Json(views))
+        .list(Some(page), Some(page_size), params.status.as_deref())?;
+    Ok(match result {
+        AccountList::All(_) => unreachable!("paged account query returns page"),
+        AccountList::Page(page) => Json(Page::new(
+            page.items.into_iter().map(account_view).collect(),
+            page.total,
+            page.page,
+            page.page_size,
+        ))
+        .into_response(),
+    })
+}
+
+fn account_view(row: AccountRow) -> AccountView {
+    AccountView {
+        email: row.email,
+        tag: row.tag,
+        access_token: mask_token(&row.access_token),
+        available: row.available,
+        unavailable_reason: row.unavailable_reason,
+        obtained_at: row.obtained_at,
+        has_pro_features: row.has_pro_features,
+        tier: row.tier,
+        sub_status: row.sub_status,
+        trial_days_left: row.trial_days_left,
+        current_period_end: row.current_period_end,
+        trial_requests_per_hour: row.trial_requests_per_hour,
+        remaining_credits: row.remaining_credits,
+        total_credits: row.total_credits,
+        remaining_usd: row.remaining_usd,
+        next_credits_at: row.next_credits_at,
+        info_fetched_at: row.info_fetched_at,
+        cooldown_until: row.cooldown_until,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
 }
 
 /// GET /v1/accounts/export — 导出可直接导入的账号凭据。
@@ -53,94 +105,19 @@ pub async fn export(
     Ok(Json(state.accounts.export_records()?))
 }
 
-/// `GET /v1/accounts/{email}` — 单个账号。默认读库(零上游开销);
-/// `?live=1` 实时调上游 /me + /ai/credits 拉最新并把结果写回库。
-pub async fn get_one(
+/// `POST /v1/accounts/detail` — 查询单个账号详情。
+pub async fn detail(
     State(state): State<SharedState>,
-    Path(email): Path<String>,
-    raw_query: axum::extract::RawQuery,
+    Json(request): Json<EmailRequest>,
 ) -> Result<Json<AccountView>, GatewayError> {
-    let live = raw_query
-        .0
-        .as_deref()
-        .map(|q| q.split('&').any(|kv| kv == "live=1" || kv == "live=true"))
-        .unwrap_or(false);
-
-    if !live {
-        let row = state
-            .accounts
-            .get(&email)?
-            .ok_or_else(|| GatewayError::NotFound(format!("no account with email {email}")))?;
-        return Ok(Json(row.to_view()));
-    }
-
-    // live: 取该账号的 token 实时查询;401 时先尝试自动刷新再重查一次。
-    let row = state
-        .accounts
-        .get(&email)?
-        .ok_or_else(|| GatewayError::NotFound(format!("no account with email {email}")))?;
-    let token = row.access_token.clone();
-    let (info_result, renewed) =
-        match crate::account::quota_refresh::fetch_info(&state.client, &token).await {
-            Ok(Some(info)) => (Ok(Some(info)), false),
-            Ok(None) => {
-                // token 死了:能自动续命就续,续不上按 401 摘号处理。
-                match crate::account::token_renewal::auto_renew(
-                    &state.accounts,
-                    state.client.http(),
-                    &row,
-                )
-                .await
-                {
-                    Ok(true) => {
-                        let new_token = state
-                            .accounts
-                            .get(&email)?
-                            .map(|r| r.access_token)
-                            .unwrap_or_else(|| token.clone());
-                        (
-                            crate::account::quota_refresh::fetch_info(&state.client, &new_token)
-                                .await,
-                            true,
-                        )
-                    }
-                    Ok(false) => (Ok(None), false),
-                    Err(()) => (Ok(None), false),
-                }
-            }
-            Err(()) => (Err(()), false),
-        };
-
-    match info_result {
-        Ok(Some(info)) => {
-            state.accounts.update_info(&email, &info)?;
-            let row = state.accounts.get(&email)?.unwrap_or(row);
-            Ok(Json(row.to_view()))
-        }
-        Ok(None) => {
-            state.accounts.mark_unavailable(
-                &email,
-                if renewed {
-                    "token 自动刷新后仍失效 (401)"
-                } else {
-                    "token 失效 (401)"
-                },
-            );
-            Err(GatewayError::TokenInvalid {
-                message: format!(
-                    "token for {email} is no longer valid{}; re-authorize this account",
-                    if renewed { " after auto-refresh" } else { "" }
-                ),
-            })
-        }
-        Err(()) => Err(GatewayError::Internal(format!(
-            "upstream query failed for {email}; check logs"
-        ))),
-    }
+    let row = state.accounts.get(&request.email)?.ok_or_else(|| {
+        GatewayError::NotFound(format!("no account with email {}", request.email))
+    })?;
+    Ok(Json(account_view(row)))
 }
 
-/// `POST /v1/accounts` — 新增或更新一个账号(按 email upsert)。
-pub async fn upsert(
+/// `POST /v1/accounts/create` — 新增或更新账号(按 email upsert)。
+pub async fn create(
     State(state): State<SharedState>,
     Json(request): Json<UpsertRequest>,
 ) -> Result<Json<UpsertResponse>, GatewayError> {
@@ -174,21 +151,22 @@ fn upsert_result(
     })
 }
 
-/// `DELETE /v1/accounts/{email}` — 删除;不存在 404。
+/// `POST /v1/accounts/delete` — 删除;不存在 404。
 pub async fn delete(
     State(state): State<SharedState>,
-    Path(email): Path<String>,
+    Json(request): Json<EmailRequest>,
 ) -> Result<StatusCode, GatewayError> {
-    if state.accounts.delete(&email)? {
-        Ok(StatusCode::NO_CONTENT)
+    if state.accounts.delete(&request.email)? {
+        Ok(StatusCode::OK)
     } else {
         Err(GatewayError::NotFound(format!(
-            "no account with email {email}"
+            "no account with email {}",
+            request.email
         )))
     }
 }
 
-/// `POST /v1/accounts/{email}/restore` — 手动恢复账号:清冷却 + 置可用,
+/// `POST /v1/accounts/restore` — 手动恢复账号:清冷却 + 置可用,
 /// 并实时查一次上游验证。适用于已处理完封禁原因(如确认邮箱)的账号,
 /// 不用等冷却自然到期。
 ///
@@ -196,24 +174,27 @@ pub async fn delete(
 /// 周期会更新状态),只把错误附在响应里。
 pub async fn restore(
     State(state): State<SharedState>,
-    Path(email): Path<String>,
+    Json(request): Json<EmailRequest>,
 ) -> Result<Response, GatewayError> {
-    if !state.accounts.reinstate(&email)? {
+    if !state.accounts.reinstate(&request.email)? {
         return Err(GatewayError::NotFound(format!(
-            "no account with email {email}"
+            "no account with email {}",
+            request.email
         )));
     }
 
     // 实时验证:能查通则顺手更新额度信息;查不通不影响"已恢复"这个事实。
     let mut upstream_note: Option<String> = None;
-    if let Some(row) = state.accounts.get(&email)? {
+    if let Some(row) = state.accounts.get(&request.email)? {
         match crate::account::quota_refresh::fetch_info(&state.client, &row.access_token).await {
             Ok(Some(info)) => {
-                state.accounts.update_info(&email, &info)?;
+                state.accounts.update_info(&request.email, &info)?;
             }
             Ok(None) => {
                 // token 已死:恢复没意义,摘回去并明确告知。
-                state.accounts.mark_unavailable(&email, "token 失效 (401)");
+                state
+                    .accounts
+                    .mark_unavailable(&request.email, "token 失效 (401)");
                 upstream_note = Some("token 已失效 (401),恢复后仍不可用;需重新授权".into());
             }
             // Ok(None) 分支已覆盖 token 失效;此 match 穷尽性占位由编译器保证。
@@ -224,22 +205,24 @@ pub async fn restore(
         }
     }
 
-    let row = state
-        .accounts
-        .get(&email)?
-        .ok_or_else(|| GatewayError::NotFound(format!("no account with email {email}")))?;
-    let mut view = row.to_view();
+    let row = state.accounts.get(&request.email)?.ok_or_else(|| {
+        GatewayError::NotFound(format!("no account with email {}", request.email))
+    })?;
+    let mut view = account_view(row);
     view.unavailable_reason = upstream_note.clone();
     // note 不该污染 available 语义:查询成功时 reason 已是 None。
     Ok(Json(view).into_response())
 }
 
-/// `POST /v1/accounts/refresh` — 手动触发一次全量额度刷新(后台执行)。
-pub async fn refresh(State(state): State<SharedState>) -> Response {
-    let accounts: Arc<AccountStore> = state.accounts.clone();
-    let client = state.client.clone();
-    tokio::spawn(async move {
-        crate::account::quota_refresh::refresh_all(&accounts, &client).await;
-    });
-    StatusCode::ACCEPTED.into_response()
+/// `POST /v1/accounts/refresh` — 刷新指定账号额度。
+pub async fn refresh(
+    State(state): State<SharedState>,
+    Json(request): Json<EmailRequest>,
+) -> Result<Json<AccountView>, GatewayError> {
+    crate::account::quota_refresh::refresh_one(&state.accounts, &state.client, &request.email)
+        .await?;
+    let row = state.accounts.get(&request.email)?.ok_or_else(|| {
+        GatewayError::NotFound(format!("no account with email {}", request.email))
+    })?;
+    Ok(Json(account_view(row)))
 }
