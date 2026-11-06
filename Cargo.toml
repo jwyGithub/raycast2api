@@ -27,7 +27,8 @@ serde_json = "1"
 
 # Structured logging.
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+time = { version = "0.3", features = ["formatting"] }
 
 # Shared SQLite storage for the account store (and future modules).
 diesel = { version = "2.2", features = ["sqlite"] }
