@@ -210,6 +210,67 @@ async fn account_routes_follow_api_contract_paths_and_methods() {
 }
 
 #[tokio::test]
+async fn delete_supports_status_and_requires_email_status_match() {
+    let (app, store) = app();
+    for (email, token) in [
+        ("available@x", "rca_available"),
+        ("cooldown@x", "rca_cooldown"),
+        ("unavailable@x", "rca_unavailable"),
+    ] {
+        store
+            .upsert(&serde_json::from_value(account_body(email, token)).unwrap())
+            .unwrap();
+    }
+    store.mark_cooldown(
+        "cooldown@x",
+        raycast2api::util::unix_secs() as i64 + 600,
+        "test",
+    );
+    store.mark_unavailable("unavailable@x", "test");
+
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/v1/accounts/delete",
+        Some(serde_json::json!({"status": "cooldown"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(store.get("cooldown@x").unwrap().is_none());
+    assert!(store.get("available@x").unwrap().is_some());
+    assert!(store.get("unavailable@x").unwrap().is_some());
+
+    let (status, mismatch) = call(
+        &app,
+        Method::POST,
+        "/v1/accounts/delete",
+        Some(serde_json::json!({"email": "unavailable@x", "status": "available"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        mismatch["message"],
+        "no account with email unavailable@x and status available"
+    );
+    assert!(store.get("unavailable@x").unwrap().is_some());
+
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/v1/accounts/delete",
+        Some(serde_json::json!({"email": "unavailable@x", "status": "unavailable"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(store.get("unavailable@x").unwrap().is_none());
+
+    for body in [serde_json::json!({}), serde_json::json!({"status": "all"})] {
+        let (status, _) = call(&app, Method::POST, "/v1/accounts/delete", Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
 async fn list_uses_default_paging_and_snake_case_page_size() {
     let (app, store) = app();
     store

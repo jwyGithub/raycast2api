@@ -32,8 +32,6 @@ services:
       # ---- 可选（留空即为未设置）----
       API_KEY: ${API_KEY:-}                                    # 网关自身 API key；留空 = 不鉴权
       RAYCAST_SIGNATURE_SECRET: ${RAYCAST_SIGNATURE_SECRET:-}  # 留空 = 使用内置默认密钥
-      ADVANCED: ${ADVANCED:-true}                              # /v1/models 是否包含高级（premium）模型
-      INCLUDE_DEPRECATED: ${INCLUDE_DEPRECATED:-true}          # /v1/models 是否包含已弃用模型
       RUST_LOG: ${RUST_LOG:-info}                              # 日志级别（tracing env-filter）
       # HOST/PORT 沿用镜像默认 0.0.0.0:8787，通常无需覆盖。
     # 配置与数据：注意容器内路径都在 /app 下（Dockerfile 的 WORKDIR）——

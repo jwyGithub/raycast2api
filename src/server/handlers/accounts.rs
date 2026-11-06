@@ -41,6 +41,13 @@ pub struct EmailRequest {
     pub email: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteParams {
+    pub email: Option<String>,
+    pub status: Option<String>,
+}
+
 /// `POST /v1/accounts/list` — 默认返回第一页,每页 10 个账号。
 pub async fn list(
     State(state): State<SharedState>,
@@ -151,18 +158,28 @@ fn upsert_result(
     })
 }
 
-/// `POST /v1/accounts/delete` — 删除;不存在 404。
+/// `POST /v1/accounts/delete` — 按邮箱或状态删除;邮箱与状态同时传入时须同时匹配。
 pub async fn delete(
     State(state): State<SharedState>,
-    Json(request): Json<EmailRequest>,
+    Json(request): Json<DeleteParams>,
 ) -> Result<StatusCode, GatewayError> {
-    if state.accounts.delete(&request.email)? {
+    let deleted = state
+        .accounts
+        .delete(request.email.as_deref(), request.status.as_deref())?;
+    if request.email.is_none() || deleted > 0 {
         Ok(StatusCode::OK)
     } else {
-        Err(GatewayError::NotFound(format!(
-            "no account with email {}",
-            request.email
-        )))
+        let message = match request.status {
+            Some(status) => format!(
+                "no account with email {} and status {status}",
+                request.email.as_deref().unwrap_or_default()
+            ),
+            None => format!(
+                "no account with email {}",
+                request.email.as_deref().unwrap_or_default()
+            ),
+        };
+        Err(GatewayError::NotFound(message))
     }
 }
 

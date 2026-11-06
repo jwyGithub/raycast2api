@@ -439,13 +439,33 @@ impl AccountStore {
             .unwrap_or(0)
     }
 
-    /// 删除;返回是否存在。
-    pub fn delete(&self, email: &str) -> Result<bool, GatewayError> {
+    /// 按邮箱和/或状态删除;返回删除行数。
+    pub fn delete(&self, email: Option<&str>, status: Option<&str>) -> Result<usize, GatewayError> {
+        if email.is_none() && status.is_none() {
+            return Err(GatewayError::BadRequest(
+                "email or status is required".into(),
+            ));
+        }
+        if status.is_some_and(|value| !matches!(value, "available" | "cooldown" | "unavailable")) {
+            return Err(GatewayError::BadRequest(
+                "status must be one of available, cooldown, unavailable".into(),
+            ));
+        }
+
         let mut conn = self.db.lock();
-        let n = diesel::delete(accounts::table.filter(accounts::email.eq(email)))
-            .execute(&mut *conn)
-            .map_err(sql_err)?;
-        Ok(n > 0)
+        let now = unix_secs() as i64;
+        let n = diesel::sql_query(
+            "DELETE FROM accounts WHERE (? = 0 OR email = ?) AND (? = 0 OR CASE ? WHEN 'available' THEN available = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?) WHEN 'cooldown' THEN available = 1 AND cooldown_until > ? WHEN 'unavailable' THEN available = 0 ELSE 0 END)",
+        )
+        .bind::<diesel::sql_types::Bool, _>(email.is_some())
+        .bind::<Text, _>(email.unwrap_or_default())
+        .bind::<diesel::sql_types::Bool, _>(status.is_some())
+        .bind::<Text, _>(status.unwrap_or_default())
+        .bind::<diesel::sql_types::BigInt, _>(now)
+        .bind::<diesel::sql_types::BigInt, _>(now)
+        .execute(&mut *conn)
+        .map_err(sql_err)?;
+        Ok(n)
     }
 
     /// 轮询取下一个可用账号(未摘除且不在限额冷却期);全不可用报
@@ -727,8 +747,8 @@ mod tests {
     fn delete_reports_existence() {
         let s = store();
         s.upsert(&rec("a@x", "ta")).unwrap();
-        assert!(s.delete("a@x").unwrap());
-        assert!(!s.delete("a@x").unwrap());
+        assert_eq!(s.delete(Some("a@x"), None).unwrap(), 1);
+        assert_eq!(s.delete(Some("a@x"), None).unwrap(), 0);
         assert!(all(&s).is_empty());
     }
 

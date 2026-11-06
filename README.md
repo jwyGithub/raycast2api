@@ -54,7 +54,7 @@
 | `POST /v1/accounts/list` | 账号列表（body: `page`、`page_size`、`status`，默认每页 10 个） | — |
 | `POST /v1/accounts/detail` | 单账号信息（body: `email`） | — |
 | `POST /v1/accounts/create` | 新增/更新账号（按 email upsert；支持单个对象或账号数组） | — |
-| `POST /v1/accounts/delete` | 删除账号（body: `email`） | — |
+| `POST /v1/accounts/delete` | 按 `email` 删除单个账号，或按 `status` 批量删除（`available`、`cooldown`、`unavailable`）；同时传入时需邮箱和状态都匹配 | — |
 | `POST /v1/accounts/restore` | 手动恢复账号（body: `email`） | — |
 | `POST /v1/accounts/refresh` | 刷新指定账号额度（body: `email`） | — |
 | `GET /v1/accounts/export` | 导出可直接提交给 `POST /v1/accounts/create` 的账号 JSON 数组（含明文 token；需配置 `API_KEY`） | — |
@@ -95,9 +95,7 @@ cp config.example.json config.json
   "api_key": "your-api-key-here",
   "raycast_device_id": "your-raycast-device-id",
   "raycast_signature_secret": null,
-  "accounts_db": "store/store.db",
-  "show_advanced": true,
-  "include_deprecated": true
+  "accounts_db": "store/store.db"
 }
 ```
 
@@ -111,8 +109,6 @@ cp config.example.json config.json
 | `accounts_db` | `ACCOUNTS_DB` | 否 | `store/store.db` | SQLite 存储库文件路径（账号表及后续模块共用） |
 | `host` | `HOST` | 否 | `0.0.0.0` | 监听地址（须为 IP） |
 | `port` | `PORT` | 否 | `8787` | 监听端口 |
-| `show_advanced` | `ADVANCED` | 否 | `true` | `/v1/models` 是否包含高级（premium）模型 |
-| `include_deprecated` | `INCLUDE_DEPRECATED` | 否 | `true` | `/v1/models` 是否包含已弃用模型 |
 | `proxies` | `PROXIES` | 否 | `[]` | 上游代理链（http/https/socks5 URL 数组；环境变量用逗号分隔）。上游直连发生网络错误时按顺序逐个换代理重试，全失败才报错；缺省纯直连 |
 
 日志级别通过 `RUST_LOG` 控制（基于 `tracing-subscriber` 的 env-filter）。
