@@ -210,6 +210,30 @@ async fn account_routes_follow_api_contract_paths_and_methods() {
 }
 
 #[tokio::test]
+async fn root_serves_account_console_without_api_authentication() {
+    let (app, _) = app();
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("Raycast 账号管理"));
+    assert!(html.contains("request('create'"));
+}
+
+#[tokio::test]
 async fn delete_supports_status_and_requires_email_status_match() {
     let (app, store) = app();
     for (email, token) in [
