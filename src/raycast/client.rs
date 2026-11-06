@@ -191,20 +191,6 @@ impl RaycastClient {
                             last_error = Some(GatewayError::Upstream { status, message });
                             continue;
                         }
-                        if err.parsed.is_subscription_required() {
-                            // 订阅缺失(402):账号没有/已失去 Pro,token 有效
-                            // 但 AI 用不了 —— 同风控语义,摘号换下一个。
-                            tracing::warn!(
-                                account = %account.email,
-                                "→ subscription required, removing account and rotating: {message}"
-                            );
-                            self.accounts.mark_unavailable(
-                                &account.email,
-                                &format!("订阅缺失/已失效 ({message})"),
-                            );
-                            last_error = Some(GatewayError::Upstream { status, message });
-                            continue;
-                        }
                         if err.parsed.is_unconfirmed() {
                             // 邮箱未确认:不摘号(token 有效),但冷却 24h ——
                             // 用户去确认邮箱后,下次手动/定时刷新会恢复可用。
@@ -276,7 +262,7 @@ impl RaycastClient {
                             "→ account unusable upstream (HTTP error), removing from pool: {err}"
                         );
                         self.accounts
-                            .mark_unavailable(&account.email, &format!("账号被风控 ({err})"));
+                            .mark_unavailable(&account.email, &format!("账号不可用 ({err})"));
                         last_error = Some(err);
                         continue;
                     }
