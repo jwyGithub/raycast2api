@@ -132,7 +132,7 @@ fn is_rest_api_path(path: &str) -> bool {
             | "/health"
             | "/ready"
     );
-    !excluded && (path.starts_with("/v1/") || path.starts_with("/console/api/"))
+    !excluded && path.starts_with("/v1/")
 }
 
 #[cfg(test)]
@@ -155,13 +155,7 @@ mod tests {
             );
         }
 
-        for path in [
-            "/v1/accounts",
-            "/v1/logs/list",
-            "/v1/logs/detail",
-            "/console/api/overview",
-            "/console/api/accounts",
-        ] {
+        for path in ["/v1/accounts", "/v1/logs/list", "/v1/logs/detail"] {
             assert!(is_rest_api_path(path), "{path} must use the REST envelope");
         }
     }

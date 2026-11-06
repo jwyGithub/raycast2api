@@ -181,7 +181,7 @@ async fn list_filters_by_created_at_and_request_id() {
 }
 
 #[tokio::test]
-async fn list_supports_paging_and_uses_envelope_for_both_shapes() {
+async fn list_supports_paging_and_rejects_console_route() {
     let (app, log) = app();
     for index in 0..55 {
         log.insert_request(
@@ -204,7 +204,7 @@ async fn list_supports_paging_and_uses_envelope_for_both_shapes() {
     assert_eq!(all["data"]["items"].as_array().unwrap().len(), 10);
     assert_eq!(all["data"]["total"], 55);
 
-    let (status, page) = request(
+    let (status, _) = request(
         &app,
         Method::POST,
         "/console/api/logs/list",
@@ -212,9 +212,7 @@ async fn list_supports_paging_and_uses_envelope_for_both_shapes() {
         Some("test-key"),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(page["data"]["total"], 55);
-    assert_eq!(page["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

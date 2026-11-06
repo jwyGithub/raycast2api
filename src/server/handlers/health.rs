@@ -46,23 +46,3 @@ pub async fn ready(State(state): State<SharedState>) -> Response {
         }
     }
 }
-
-pub async fn overview(State(state): State<SharedState>) -> Response {
-    let (total, available, cooldown, unavailable) = match state.accounts.counts() {
-        Ok(counts) => counts,
-        Err(err) => return err.into_response(),
-    };
-    let requests_retained = match state.log.count() {
-        Ok(count) => count,
-        Err(err) => {
-            return crate::error::GatewayError::Internal(format!("request log store: {err}"))
-                .into_response();
-        }
-    };
-    Json(json!({
-        "backend_ready": state.health.is_working(),
-        "accounts": { "total": total, "available": available, "cooldown": cooldown, "unavailable": unavailable },
-        "requests_retained": requests_retained,
-    }))
-    .into_response()
-}

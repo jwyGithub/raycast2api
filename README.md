@@ -47,7 +47,7 @@
 
 ### 账号管理接口
 
-账号、日志和模型管理接口（`/v1/*` 与 `/console/api/*`）统一返回 `{ code, message, data }`。列表与分页对象都放在 `data` 中；删除成功返回 HTTP 200 和 `data: null`。错误响应也使用此包络，错误原因位于 `message`，`data` 为 `null`。三种推理接口以及 `/health`、`/ready` 保持原有协议。
+账号和日志管理接口（`/v1/*`）统一返回 `{ code, message, data }`。列表与分页对象都放在 `data` 中；删除成功返回 HTTP 200 和 `data: null`。错误响应也使用此包络，错误原因位于 `message`，`data` 为 `null`。模型列表、三种推理接口以及 `/health`、`/ready` 保持各自协议。
 
 | 路径 | 说明 | 典型客户端 |
 | --- | --- | --- |

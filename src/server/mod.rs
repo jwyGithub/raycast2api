@@ -11,7 +11,6 @@ use axum::Router;
 use axum::http::Method;
 use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use self::state::SharedState;
@@ -33,13 +32,12 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/accounts/export", get(handlers::accounts::export))
         .route("/accounts/refresh", post(handlers::accounts::refresh))
         .route("/logs/list", post(handlers::logs::list))
-        .route("/logs/detail", post(handlers::logs::detail))
-        .route("/models", get(handlers::models::list_models));
+        .route("/logs/detail", post(handlers::logs::detail));
 
     // The authenticated API surface: shared management routes plus inference
     // and health endpoints. The debug-capture layer sits inside the auth layer.
     let api = Router::new()
-        .nest("/v1", management.clone())
+        .nest("/v1", management)
         .route(
             "/v1/chat/completions",
             post(handlers::chat::chat_completions)
@@ -53,6 +51,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/v1/responses",
             post(handlers::responses::responses).layer(axum::extract::DefaultBodyLimit::disable()),
         )
+        .route("/v1/models", get(handlers::models::list_models))
         .route("/health", get(handlers::health::health))
         .route("/ready", get(handlers::health::ready))
         .layer(axum::middleware::from_fn_with_state(
@@ -64,17 +63,7 @@ pub fn build_router(state: SharedState) -> Router {
             middleware::auth,
         ));
 
-    let console_api = Router::new()
-        .nest("/console/api", management)
-        .route("/console/api/overview", get(handlers::health::overview))
-        .with_state(state.clone());
-
-    let dashboard_dir =
-        std::env::var("DASHBOARD_DIST_DIR").unwrap_or_else(|_| "src/dashboard/dist".to_string());
-    let dashboard_shell = std::path::Path::new(&dashboard_dir).join("index.html");
-    api.merge(console_api)
-        .route("/v1/{*path}", get(handlers::not_found))
-        .fallback_service(ServeDir::new(dashboard_dir).fallback(ServeFile::new(dashboard_shell)))
+    api.route("/v1/{*path}", get(handlers::not_found))
         .layer(axum::middleware::from_fn(middleware::response_format))
         .layer(TraceLayer::new_for_http())
         .layer(cors)

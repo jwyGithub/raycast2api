@@ -19,7 +19,7 @@ pub async fn auth(
     next: Next,
 ) -> Result<Response, GatewayError> {
     let path = request.uri().path();
-    if path == "/health" || path == "/ready" || path.starts_with("/console/api/") {
+    if path == "/health" || path == "/ready" {
         return Ok(next.run(request).await);
     }
 
