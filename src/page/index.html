@@ -118,6 +118,24 @@
                 credits(value) {
                     return value == null ? '暂无数据' : Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
                 }
+                cooldownLeft(until) {
+                    if (!until) return '';
+                    const mins = Math.ceil((until * 1000 - Date.now()) / 60000);
+                    if (mins <= 0) return '';
+                    if (mins < 60) return mins + ' 分钟';
+                    const hours = Math.floor(mins / 60);
+                    const rem = mins % 60;
+                    return hours + ' 小时' + (rem ? ' ' + rem + ' 分' : '');
+                }
+                connectedCallback() {
+                    super.connectedCallback();
+                    // 冷却倒计时自走:每 30s 重渲染一次。
+                    this.timer = setInterval(() => this.requestUpdate(), 30000);
+                }
+                disconnectedCallback() {
+                    super.disconnectedCallback();
+                    clearInterval(this.timer);
+                }
                 render() {
                     const a = this.account || {};
                     const cooling = a.cooldown_until && a.cooldown_until * 1000 > Date.now();
@@ -164,6 +182,12 @@
                             </div>
                         </div>
                         <div class="mt-4 grid grid-cols-1 gap-1.5 border-t border-slate-100 pt-3 text-[11px] text-muted">
+                            ${cooling
+                                ? html`<p class="truncate" title=${'预计恢复：' + this.date(a.cooldown_until)}>
+                                      预计恢复：<span class="font-medium text-amber-700">${this.date(a.cooldown_until)}</span
+                                      ><span class="ml-1 text-slate-400">（${this.cooldownLeft(a.cooldown_until)}后）</span>
+                                  </p>`
+                                : ''}
                             <p class="truncate" title=${'错误：' + (error || '无')}>
                                 错误：<span class=${error ? 'text-rose-600' : 'text-slate-400'}>${error || '无'}</span>
                             </p>
@@ -234,6 +258,19 @@
                 createRenderRoot() {
                     return this;
                 }
+                connectedCallback() {
+                    super.connectedCallback();
+                    // 列表 60s 静默轮询:跟进冷却倒计时与账号状态变化,
+                    // 操作中/弹窗打开时跳过,避免覆盖用户正在看的内容。
+                    this.pollTimer = setInterval(() => {
+                        if (this.workingEmail || this.dialog || this.keyPrompt) return;
+                        this.load(true);
+                    }, 60000);
+                }
+                disconnectedCallback() {
+                    super.disconnectedCallback();
+                    clearInterval(this.pollTimer);
+                }
                 async request(path, body) {
                     const response = await fetch('/v1/accounts/' + path, {
                         method: 'POST',
@@ -249,9 +286,11 @@
                     if (!response.ok || result.code >= 400) throw new Error(result.message || '请求失败 (' + response.status + ')');
                     return result.data;
                 }
-                async load() {
-                    this.loading = true;
-                    this.error = '';
+                async load(silent = false) {
+                    if (!silent) {
+                        this.loading = true;
+                        this.error = '';
+                    }
                     try {
                         const data = await this.request('list', { page: this.page, page_size: 12, status: this.status });
                         this.accounts = data.items || [];
@@ -262,7 +301,9 @@
                             await this.load();
                         }
                     } catch (e) {
-                        this.error = e.message || '加载账号失败';
+                        // 静默轮询失败不打扰当前视图,只记 console。
+                        if (silent) console.warn('后台刷新失败:', e);
+                        else this.error = e.message || '加载账号失败';
                     } finally {
                         this.loading = false;
                     }
