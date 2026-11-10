@@ -30,7 +30,15 @@ pub enum AvailabilityDecision {
 }
 
 /// 纯决策:剩余额度 <= 0 摘除;> 0 恢复;未知保持。
+///
+/// 例外:非 Pro 号(`has_pro_features == false`)的 `/ai/credits` 恒为
+/// `0.0`(试用额度按请求次数计,不走 credits),credits=0 是常态而非
+/// 耗尽 —— 不能据此摘号,保持 `Keep` 交给冷却/试用到期逻辑处理。
+/// `has_pro_features` 未知(`None`)时维持旧行为,按 credits 判定。
 pub fn decide(info: &AccountInfo) -> AvailabilityDecision {
+    if info.has_pro_features == Some(false) {
+        return AvailabilityDecision::Keep;
+    }
     match info.remaining_credits {
         Some(remaining) if remaining <= 0.0 => AvailabilityDecision::MarkUnavailable("额度耗尽"),
         Some(_) => AvailabilityDecision::MarkAvailable,
@@ -247,6 +255,41 @@ mod tests {
     #[test]
     fn unknown_credits_keep_state() {
         assert_eq!(decide(&info(None)), AvailabilityDecision::Keep);
+    }
+
+    #[test]
+    fn non_pro_zero_credits_keep_state() {
+        // 试用号 credits 恒为 0:不摘、不恢复,交给冷却/试用到期逻辑。
+        let mut i = info(Some(0.0));
+        i.has_pro_features = Some(false);
+        assert_eq!(decide(&i), AvailabilityDecision::Keep);
+
+        // 正余额的试用号同样不触发 MarkAvailable(credits 对其无意义)。
+        let mut j = info(Some(5.0));
+        j.has_pro_features = Some(false);
+        assert_eq!(decide(&j), AvailabilityDecision::Keep);
+    }
+
+    #[test]
+    fn unknown_pro_flag_keeps_credit_decision() {
+        // has_pro_features = None:维持旧行为,credits 判定生效。
+        assert!(matches!(
+            decide(&info(Some(0.0))),
+            AvailabilityDecision::MarkUnavailable(_)
+        ));
+
+        // 显式 Pro 号 credits=0 照旧摘除。
+        let mut i = info(Some(0.0));
+        i.has_pro_features = Some(true);
+        assert!(matches!(
+            decide(&i),
+            AvailabilityDecision::MarkUnavailable(_)
+        ));
+
+        // Pro 号有余额照旧恢复。
+        let mut j = info(Some(1.0));
+        j.has_pro_features = Some(true);
+        assert_eq!(decide(&j), AvailabilityDecision::MarkAvailable);
     }
 
     #[test]
