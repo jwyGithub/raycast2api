@@ -40,13 +40,38 @@ pub fn canonical_events(
         let mut decoder = SseDecoder::new();
         let mut text_log = DeltaLogBuffer::default();
         let mut notifications = Vec::new();
+        // 流是否以 Finish/Error 事件正常终结;断流时用来发合成错误。
+        let mut stream_terminated = false;
+        // 已打印过的通知数:每次增量打印新通知,避免重复刷屏。
+        let mut seen_notifications = 0;
 
         while let Some(chunk) = bytes.next().await {
-            let Ok(chunk) = chunk else { break };
+            let Ok(chunk) = chunk else {
+                // 上游传输层断连(连接重置/代理掐断):流没有 error payload、
+                // 没有 finish 就直接没了。必须留痕,否则排查时终端日志
+                // 看起来像"正常结束但没内容"。
+                let err = chunk.unwrap_err();
+                tracing::error!(
+                    "⇈ upstream transport error [{id}]: {err} — stream ended \
+                     prematurely after {} payloads (no finish_reason seen)",
+                    payloads.len()
+                );
+                break;
+            };
             for payload in decoder.push_bytes(&chunk) {
                 payloads.push(payload.clone());
                 // ponytail: 打印原始 SSE 数据用于调试
                 tracing::debug!("upstream SSE payload: {}", payload);
+
+                // 上游通知(降级/限额提示等)挂在 notifications 里,只在
+                // 出错时才被拼进错误消息。这里把新增的捞出来打到终端,
+                // 否则"账号被降级到 luna"这种关键信息终端上完全不可见。
+                if notifications.len() > seen_notifications {
+                    for n in &notifications[seen_notifications..] {
+                        tracing::warn!("⇈ upstream notification [{id}]: {n}");
+                    }
+                    seen_notifications = notifications.len();
+                }
 
                 for event in parse_events(&payload, &mut notifications) {
                     // The outbound adapters stop polling the stream at `Finish`,
@@ -57,6 +82,7 @@ pub fn canonical_events(
                         event,
                         CanonicalEvent::Finish { .. } | CanonicalEvent::Error { .. }
                     ) {
+                        stream_terminated = true;
                         log.update_response(&id, &payloads.join("\n"));
                     }
                     // 打印解析后的规范事件:碎片 delta 攒行,其余逐条。
@@ -90,6 +116,26 @@ pub fn canonical_events(
 
         // 流结束:刷出残留的缓冲。
         text_log.flush(&id);
+
+        // 断流检测:整个流里既没有 Finish 也没有 Error 事件,就是上游
+        // 静默掐断(连接被代理/上游重置)。发一个合成 Error 事件,让
+        // 下游适配器能如实把失败传给客户端(Responses 会发
+        // `response.failed` 而不是谎报 completed)。
+        if !stream_terminated {
+            tracing::error!(
+                "⇈ upstream stream ended without finish [{id}] — synthesizing \
+                 error event (payloads={})",
+                payloads.len()
+            );
+            log.update_response(&id, &payloads.join("\n"));
+            yield CanonicalEvent::Error {
+                status: 502,
+                message: "upstream stream ended prematurely (connection closed \
+                          without finish_reason; likely dropped by proxy or \
+                          upstream)"
+                    .to_string(),
+            };
+        }
 
         // One raw `data:` payload per line, exactly as the upstream sent it
         // (non-streaming aggregation path polls the stream to completion).
