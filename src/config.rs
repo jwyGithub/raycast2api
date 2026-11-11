@@ -34,17 +34,20 @@ pub const OAUTH_TOKEN_URL: &str = "https://backend.raycast.com/oauth/token";
 /// 与 scripts/ 下的注册/刷新脚本硬编码值一致 —— 上游变更时同改)。
 pub const OAUTH_CLIENT_ID: &str = "FRsHICIAlyPB_v2m4tfVqHtVUS40Ieco_da0Y6zBwgA";
 
-/// User-Agent string sent with every upstream request (matches the captured client).
-pub const USER_AGENT: &str = "Raycast/1.94.2 (macOS Version 15.3.2 (Build 24D81))";
+/// User-Agent string sent with every upstream request (matches the captured
+/// client). 必须是近期真实客户端版本:上游按客户端版本判定 Better AI 资格,
+/// 过老的 UA(如 1.94.2)会让所有 Advanced AI 档模型被降级(见
+/// doc/model-degradation.md 的隔离测试)。
+pub const USER_AGENT: &str = "Raycast/2.11.0.0 (x-Windows-amd64 10.0.26100.9711)";
 
 /// Default OpenAI-facing model id used when a request omits `model`.
-pub const DEFAULT_MODEL_ID: &str = "openai-gpt-4o-mini";
+pub const DEFAULT_MODEL_ID: &str = "openai-gpt-6.1-sol";
 
 /// Fallback provider when a requested model id can't be resolved.
 pub const DEFAULT_PROVIDER: &str = "openai";
 
 /// Fallback upstream model when a requested model id can't be resolved.
-pub const DEFAULT_INTERNAL_MODEL: &str = "gpt-4o-mini";
+pub const DEFAULT_INTERNAL_MODEL: &str = "gpt-6.1-sol";
 
 /// 限额账号冷却缺省时长(秒):上游未给 `retry_after` 时使用。
 pub const DEFAULT_COOLDOWN_SECS: u64 = 600;
