@@ -1,6 +1,7 @@
 //! The HTTP gateway layer: shared state, health tracking, middleware, route
 //! handlers, and router assembly.
 
+pub mod compact;
 pub mod handlers;
 pub mod health;
 pub mod middleware;

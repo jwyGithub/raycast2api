@@ -17,6 +17,18 @@ pub enum Role {
     Tool,
 }
 
+impl Role {
+    /// Stable wire-ish name (used for cache-key hashing in compact).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        }
+    }
+}
+
 /// One assistant tool call (canonical, flat form).
 ///
 /// `arguments` is the raw JSON **string** the model emitted, kept verbatim so

@@ -13,6 +13,7 @@ use crate::raycast::client::RaycastClient;
 use crate::raycast::wire::RaycastRawModel;
 
 use super::health::BackendHealth;
+use super::compact::SummaryCache;
 
 /// How long a fetched model list stays fresh before it is re-fetched.
 const MODELS_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -28,6 +29,8 @@ pub struct AppState {
     pub accounts: Arc<AccountStore>,
     /// 请求日志存储(推理请求三体采集写入)。
     pub log: Arc<RequestLogStore>,
+    /// auto-compact 摘要缓存(按模型 + 被压缩前缀 hash)。
+    pub summary_cache: SummaryCache,
     models_cache: RwLock<Option<ModelsCache>>,
 }
 
@@ -49,6 +52,7 @@ impl AppState {
             health: BackendHealth::default(),
             accounts,
             log,
+            summary_cache: SummaryCache::default(),
             models_cache: RwLock::new(None),
         }
     }
