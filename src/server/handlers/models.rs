@@ -61,14 +61,13 @@ fn add_sub2api_metadata(extra: &mut Map<String, Value>, model_id: &str) {
         extra.insert("reasoning".into(), supported.clone());
     }
 
-    if !extra.contains_key("supported_reasoning_levels") {
-        if let Some(options) = extra
+    if !extra.contains_key("supported_reasoning_levels")
+        && let Some(options) = extra
             .get("abilities")
             .and_then(|abilities| abilities.get("reasoning_effort"))
             .and_then(|ability| ability.get("options"))
-        {
-            extra.insert("supported_reasoning_levels".into(), options.clone());
-        }
+    {
+        extra.insert("supported_reasoning_levels".into(), options.clone());
     }
 
     if !extra.contains_key("input_modalities") {

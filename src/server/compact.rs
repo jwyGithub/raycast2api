@@ -155,7 +155,10 @@ fn hash_messages(messages: &[Message], upto: usize) -> u64 {
             feed(&mut hash, call.name.as_bytes());
             feed(&mut hash, call.arguments.as_bytes());
         }
-        feed(&mut hash, message.thinking.as_ref().map_or("", |t| &t.text).as_bytes());
+        feed(
+            &mut hash,
+            message.thinking.as_ref().map_or("", |t| &t.text).as_bytes(),
+        );
     }
     hash
 }
@@ -174,7 +177,12 @@ enum Compaction {
 pub async fn maybe_compact(
     state: &SharedState,
     request: CanonicalRequest,
-    send: impl FnOnce(CanonicalRequest) -> futures_util::future::BoxFuture<'static, Result<String, crate::error::GatewayError>>,
+    send: impl FnOnce(
+        CanonicalRequest,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<String, crate::error::GatewayError>,
+    >,
 ) -> Result<CanonicalRequest, crate::error::GatewayError> {
     match plan(state, &request).await {
         Compaction::NotNeeded => Ok(request),
@@ -196,10 +204,7 @@ pub async fn maybe_compact(
                         SUMMARIZATION_PROMPT,
                     )))
                     .collect(),
-                ..CanonicalRequest::new(
-                    request.protocol,
-                    request.model.clone(),
-                )
+                ..CanonicalRequest::new(request.protocol, request.model.clone())
             };
             let summary = send(summary_request).await.map_err(|error| {
                 tracing::error!(
@@ -246,7 +251,11 @@ async fn plan(state: &SharedState, request: &CanonicalRequest) -> Compaction {
         return Compaction::NotNeeded;
     };
     // `context` is in K tokens (models.json); lives in the passthrough `extra`.
-    let Some(context_k) = entry.extra.get("context").and_then(serde_json::Value::as_u64) else {
+    let Some(context_k) = entry
+        .extra
+        .get("context")
+        .and_then(serde_json::Value::as_u64)
+    else {
         return Compaction::NotNeeded;
     };
     let window = context_k * 1_000;
@@ -330,7 +339,9 @@ async fn plan(state: &SharedState, request: &CanonicalRequest) -> Compaction {
     summarize.messages = to_summarize;
     // Carry the previous summary in as context for the incremental pass.
     if !previous_summary.is_empty() {
-        summarize.messages.insert(0, Message::text(Role::User, previous_summary));
+        summarize
+            .messages
+            .insert(0, Message::text(Role::User, previous_summary));
     }
     Compaction::Rewritten(Box::new(summarize))
 }
@@ -387,7 +398,7 @@ fn estimate_request_tokens(request: &CanonicalRequest) -> usize {
         // and an approximate footprint is all the estimator needs.
         chars += format!("{tool:?}").len();
     }
-    (chars / 4) as usize
+    chars / 4
 }
 
 /// Hash identifying the droppable prefix of a request (cache key basis).
