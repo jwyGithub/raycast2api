@@ -12,8 +12,8 @@ use crate::log::store::RequestLogStore;
 use crate::raycast::client::RaycastClient;
 use crate::raycast::wire::RaycastRawModel;
 
-use super::health::BackendHealth;
 use super::compact::SummaryCache;
+use super::health::BackendHealth;
 
 /// How long a fetched model list stays fresh before it is re-fetched.
 const MODELS_CACHE_TTL: Duration = Duration::from_secs(300);
