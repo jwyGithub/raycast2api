@@ -61,6 +61,7 @@ pub(crate) async fn events(
         upstream = %format!("{provider}/{model}"),
         stream = request.stream,
         messages = request.messages.len(),
+        effort = ?request.reasoning_effort.map(|e| e.as_str()),
         "inference request"
     );
     let raycast_request = build_chat_request(request, &provider, &model);
