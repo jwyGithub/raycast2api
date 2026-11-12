@@ -214,7 +214,14 @@ pub async fn restore(
                     .mark_unavailable(&request.email, "token 失效 (401)");
                 upstream_note = Some("token 已失效 (401),恢复后仍不可用;需重新授权".into());
             }
-            // Ok(None) 分支已覆盖 token 失效;此 match 穷尽性占位由编译器保证。
+            Err(err) if crate::raycast::client::is_account_dead_upstream(&err) => {
+                let err = crate::account::quota_refresh::record_refresh_error(
+                    &state.accounts,
+                    &request.email,
+                    err,
+                );
+                upstream_note = Some(err.to_string());
+            }
             Err(_) => {
                 upstream_note =
                     Some("上游查询失败(网络/其他),账号已恢复可用但额度信息未更新".into());

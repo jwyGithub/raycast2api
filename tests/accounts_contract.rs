@@ -229,9 +229,11 @@ async fn root_serves_account_console_without_api_authentication() {
     );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("Raycast 账号管理"));
-    assert!(html.contains("async request(path, body)"));
-    assert!(html.contains("'/v1/accounts/' + path"));
+    assert!(html.contains("<title>Raycast 管理控制台</title>"));
+    assert!(html.contains("<account-console"));
+    assert!(html.contains("<logs-panel"));
+    assert!(html.contains("async request(path, body, resource = 'accounts')"));
+    assert!(html.contains("'/v1/' + resource + '/' + path"));
 }
 
 #[tokio::test]

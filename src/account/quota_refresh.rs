@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::account::store::{AccountRow, AccountStore};
 use crate::account::wire::AccountInfo;
 use crate::error::GatewayError;
-use crate::raycast::client::RaycastClient;
+use crate::raycast::client::{RaycastClient, is_account_dead_upstream};
 
 /// 定时刷新间隔(6 小时)。
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -134,7 +134,7 @@ async fn refresh_account(
                         }
                         Err(err) => {
                             store.mark_unavailable(&account.email, "token 自动刷新后查询失败");
-                            Err(err)
+                            Err(record_refresh_error(store, &account.email, err))
                         }
                     }
                 }
@@ -153,9 +153,20 @@ async fn refresh_account(
                 }
             }
         }
-        // 网络或其他上游错误不改变账号可用状态,交给调用方处理。
-        Err(err) => Err(err),
+        Err(err) => Err(record_refresh_error(store, &account.email, err)),
     }
+}
+
+/// 明确的风控/订阅拒绝必须摘号;网络和其他上游错误保留原状态。
+pub(crate) fn record_refresh_error(
+    store: &AccountStore,
+    email: &str,
+    err: GatewayError,
+) -> GatewayError {
+    if is_account_dead_upstream(&err) {
+        store.mark_unavailable(email, &format!("账号不可用 ({err})"));
+    }
+    err
 }
 
 /// 把一次刷新的决策落库(所有刷新路径共用,保证判定规则唯一)。
@@ -207,6 +218,7 @@ pub async fn fetch_info(
                     status.trial_limits.and_then(|l| l.ai_requests_per_hour);
             }
             Err(GatewayError::TokenInvalid { .. }) => return Ok(None),
+            Err(err) if is_account_dead_upstream(&err) => return Err(err),
             Err(GatewayError::Upstream { status, .. }) => {
                 tracing::debug!(
                     "account refresh: /me/trial_status returned {status} (非试用号属正常)"
@@ -230,6 +242,64 @@ mod tests {
             remaining_credits: remaining,
             ..AccountInfo::default()
         }
+    }
+
+    #[test]
+    fn refresh_errors_only_remove_explicitly_rejected_accounts() {
+        let store = AccountStore::new(crate::db::Db::open(":memory:").unwrap());
+        let record = serde_json::from_value(serde_json::json!({
+            "user": { "email": "refresh@x" },
+            "access_token": "test-token"
+        }))
+        .unwrap();
+        store.upsert(&record).unwrap();
+
+        for (status, message, unavailable) in [
+            (
+                403,
+                r#"{"error":"Account flagged for suspicious activity, please contact support."}"#,
+                true,
+            ),
+            (403, r#"{"subcode":"account_unavailable"}"#, true),
+            (402, "A Raycast Pro subscription is required", true),
+            (403, "<html>Forbidden</html>", false),
+            (429, "Too many requests", false),
+            (503, "Service unavailable", false),
+        ] {
+            store.set_available("refresh@x", true, None);
+            let err = record_refresh_error(
+                &store,
+                "refresh@x",
+                GatewayError::Upstream {
+                    status,
+                    message: message.into(),
+                },
+            );
+            assert!(matches!(err, GatewayError::Upstream { status: s, .. } if s == status));
+            let row = store.get("refresh@x").unwrap().unwrap();
+            assert_eq!(row.available, !unavailable, "{status}: {message}");
+            if unavailable {
+                assert!(row.unavailable_reason.unwrap().contains(message));
+                assert!(matches!(
+                    store.next_available(),
+                    Err(GatewayError::NoAccount(_))
+                ));
+            }
+        }
+
+        record_refresh_error(
+            &store,
+            "refresh@x",
+            GatewayError::Internal("network error".into()),
+        );
+        assert!(store.get("refresh@x").unwrap().unwrap().available);
+        store.mark_unavailable("refresh@x", "existing reason");
+        record_refresh_error(
+            &store,
+            "refresh@x",
+            GatewayError::Internal("network error".into()),
+        );
+        assert!(!store.get("refresh@x").unwrap().unwrap().available);
     }
 
     #[test]

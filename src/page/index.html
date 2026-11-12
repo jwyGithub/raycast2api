@@ -1,64 +1,330 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="h-full w-full overflow-hidden">
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="color-scheme" content="light" />
-        <title>Raycast 账号管理</title>
+        <title>Raycast 管理控制台</title>
         <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+        <script defer src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
         <style type="text/tailwindcss">
             @theme {
-                --color-brand: #2563eb;
-                --color-ink: #182033;
-                --color-muted: #778198;
-                --color-line: #e8ebf1;
-            }
-            * {
-                box-sizing: border-box;
-            }
-            html,
-            body {
-                width: 100%;
-                height: 100%;
-                overflow: hidden;
-            }
-            body {
-                margin: 0;
-                color: #182033;
-                background: #f7f8fb;
-                font-family:
-                    Inter,
-                    ui-sans-serif,
-                    system-ui,
-                    -apple-system,
-                    BlinkMacSystemFont,
-                    'Segoe UI',
-                    sans-serif;
-            }
-            account-console {
-                display: block;
-                height: 100dvh;
-                overflow: hidden;
-            }
-            .thin-scrollbar {
-                scrollbar-width: thin;
-                scrollbar-color: #d9dce5 transparent;
-            }
-            .thin-scrollbar::-webkit-scrollbar {
-                width: 7px;
-            }
-            .thin-scrollbar::-webkit-scrollbar-thumb {
-                background: #d9dce5;
-                border-radius: 99px;
+                --color-brand: #262b33;
+                --color-ink: #242933;
+                --color-muted: #667080;
+                --color-line: #e4e7ec;
             }
         </style>
     </head>
-    <body>
-        <account-console></account-console>
+    <body
+        class="m-0 h-full w-full overflow-hidden bg-[#f7f8fa] font-sans text-ink [&_button]:cursor-pointer [&_select]:cursor-pointer [&_button]:transition-colors [&_button]:duration-150 [&_button:disabled]:cursor-not-allowed [&_button:focus-visible]:outline-3 [&_input:focus-visible]:outline-3 [&_select:focus-visible]:outline-3 [&_textarea:focus-visible]:outline-3 [&_:focus-visible]:outline-offset-3 [&_:focus-visible]:outline-blue-500/35 motion-reduce:[&_*]:animate-none motion-reduce:[&_*]:transition-none"
+    >
+        <account-console class="block h-dvh overflow-hidden"></account-console>
         <script type="module">
-            import { LitElement, html } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
+            import { LitElement, html, css } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
+            import { repeat } from 'https://cdn.jsdelivr.net/npm/lit-html@3.3.1/directives/repeat.js';
+            const motionEnabled = () => window.gsap && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+            class UiTooltip extends LitElement {
+                static properties = { content: { type: String } };
+                static styles = css`
+                    :host {
+                        display: block;
+                        min-width: 0;
+                    }
+                    .trigger {
+                        display: block;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        white-space: nowrap;
+                        outline-offset: 3px;
+                    }
+                    .trigger:focus-visible {
+                        outline: 2px solid #3b82f6;
+                    }
+                    .tip {
+                        position: fixed;
+                        inset: auto;
+                        margin: 0;
+                        box-sizing: border-box;
+                        width: max-content;
+                        max-width: min(420px, calc(100vw - 24px));
+                        max-height: min(360px, calc(100dvh - 24px));
+                        overflow: auto;
+                        border: 0;
+                        border-radius: 8px;
+                        padding: 9px 12px;
+                        background: #242933;
+                        color: white;
+                        font:
+                            12px/1.6 system-ui,
+                            sans-serif;
+                        white-space: pre-wrap;
+                        overflow-wrap: anywhere;
+                        box-shadow: 0 6px 24px #10182826;
+                    }
+                `;
+                async show() {
+                    clearTimeout(this.hideTimer);
+                    if (!this.content) return;
+                    await this.updateComplete;
+                    const tip = this.shadowRoot.querySelector('.tip');
+                    if (!tip.isConnected) return;
+                    const opening = !tip.matches(':popover-open');
+                    window.gsap?.killTweensOf(tip);
+                    if (opening) tip.showPopover();
+                    if (window.gsap) window.gsap.set(tip, { y: 0 });
+                    const anchor = this.getBoundingClientRect();
+                    const bounds = tip.getBoundingClientRect();
+                    tip.style.left = Math.max(12, Math.min(anchor.left, innerWidth - bounds.width - 12)) + 'px';
+                    tip.style.top =
+                        Math.max(
+                            12,
+                            anchor.bottom + bounds.height + 8 <= innerHeight - 12 ? anchor.bottom + 8 : anchor.top - bounds.height - 8
+                        ) + 'px';
+                    if (motionEnabled()) {
+                        if (opening) window.gsap.set(tip, { opacity: 0, y: 4 });
+                        window.gsap.to(tip, { opacity: 1, y: 0, duration: 0.16, ease: 'power2.out', overwrite: true });
+                    } else if (window.gsap) window.gsap.set(tip, { opacity: 1, y: 0 });
+                }
+                hide() {
+                    clearTimeout(this.hideTimer);
+                    const tip = this.shadowRoot?.querySelector('.tip');
+                    if (!tip?.matches(':popover-open')) return;
+                    window.gsap?.killTweensOf(tip);
+                    if (this.isConnected && motionEnabled())
+                        window.gsap.to(tip, { opacity: 0, y: 4, duration: 0.12, ease: 'power1.out', onComplete: () => tip.hidePopover() });
+                    else tip.hidePopover();
+                }
+                scheduleHide() {
+                    this.hideTimer = setTimeout(() => this.hide(), 120);
+                }
+                disconnectedCallback() {
+                    this.hide();
+                    super.disconnectedCallback();
+                }
+                render() {
+                    return html`<span
+                            class="trigger"
+                            tabindex="0"
+                            aria-describedby="tooltip"
+                            @mouseenter=${this.show}
+                            @mouseleave=${this.scheduleHide}
+                            @focus=${this.show}
+                            @blur=${this.scheduleHide}
+                            @keydown=${e => {
+                                if (e.key === 'Escape') this.hide();
+                            }}
+                            ><slot>${this.content}</slot></span
+                        >
+                        <div
+                            id="tooltip"
+                            class="tip"
+                            role="tooltip"
+                            popover="manual"
+                            @mouseenter=${() => clearTimeout(this.hideTimer)}
+                            @mouseleave=${this.scheduleHide}
+                            @keydown=${e => {
+                                if (e.key === 'Escape') this.hide();
+                            }}
+                        >
+                            ${this.content}
+                        </div>`;
+                }
+            }
+            customElements.define('ui-tooltip', UiTooltip);
+            class UiMessage extends LitElement {
+                static properties = { items: { state: true } };
+                static styles = css`
+                    :host {
+                        position: fixed;
+                        inset: 20px 20px auto auto;
+                        margin: 0;
+                        padding: 0;
+                        border: 0;
+                        width: min(440px, calc(100vw - 32px));
+                        overflow: visible;
+                        background: transparent;
+                        color: #242933;
+                        font:
+                            13px/20px system-ui,
+                            sans-serif;
+                    }
+                    .message {
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                        margin-bottom: 10px;
+                        padding: 10px 12px;
+                        border: 1px solid #e4e7ec;
+                        border-radius: 10px;
+                        background: white;
+                        box-shadow: 0 6px 24px #1018281a;
+                    }
+                    .icon {
+                        flex: none;
+                        display: grid;
+                        place-items: center;
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 50%;
+                        font-size: 12px;
+                        font-weight: 600;
+                        background: #fef2f2;
+                        color: #b91c1c;
+                    }
+                    .success .icon {
+                        background: #ecfdf5;
+                        color: #047857;
+                    }
+                    ui-tooltip {
+                        flex: 1;
+                        min-width: 0;
+                    }
+                    button {
+                        flex: none;
+                        width: 28px;
+                        height: 28px;
+                        border: 0;
+                        border-radius: 5px;
+                        background: transparent;
+                        color: #667080;
+                        font: inherit;
+                        font-size: 18px;
+                        cursor: pointer;
+                    }
+                    button:hover {
+                        background: #f1f5f9;
+                    }
+                    button:focus-visible {
+                        outline: 2px solid #3b82f6;
+                    }
+                `;
+                constructor() {
+                    super();
+                    this.items = [];
+                    this.timers = new Map();
+                    this.nextId = 0;
+                }
+                connectedCallback() {
+                    super.connectedCallback();
+                    this.setAttribute('popover', 'manual');
+                }
+                show(text, type = 'error') {
+                    const item = { id: ++this.nextId, text: String(text), type };
+                    this.items = [...this.items, item];
+                    this.resume(item);
+                }
+                pause(item) {
+                    clearTimeout(this.timers.get(item.id));
+                }
+                resume(item) {
+                    this.pause(item);
+                    if (!item.closing)
+                        this.timers.set(
+                            item.id,
+                            setTimeout(() => this.close(item.id), item.type === 'error' ? 8000 : 4000)
+                        );
+                }
+                close(id) {
+                    const item = this.items.find(item => item.id === id);
+                    if (!item || item.closing) return;
+                    item.closing = true;
+                    this.pause(item);
+                    this.timers.delete(id);
+                    const node = this.shadowRoot.querySelector('[data-id="' + id + '"]');
+                    const remove = () => {
+                        const positions = new Map(
+                            [...this.shadowRoot.querySelectorAll('.message')].map(element => [element, element.getBoundingClientRect().top])
+                        );
+                        this.items = this.items.filter(item => item.id !== id);
+                        this.updateComplete.then(() => {
+                            if (!this.isConnected || !motionEnabled()) return;
+                            for (const element of this.shadowRoot.querySelectorAll('.message')) {
+                                const y = positions.get(element) - element.getBoundingClientRect().top;
+                                if (y && !this.items.find(item => item.id === Number(element.dataset.id))?.closing)
+                                    window.gsap.fromTo(element, { y }, { y: 0, duration: 0.2, ease: 'power2.out', overwrite: 'auto' });
+                            }
+                        });
+                    };
+                    if (node && motionEnabled())
+                        window.gsap.to(node, {
+                            opacity: 0,
+                            x: 20,
+                            duration: 0.18,
+                            ease: 'power1.out',
+                            overwrite: true,
+                            onComplete: remove
+                        });
+                    else remove();
+                }
+                updated() {
+                    if (this.items.length) {
+                        if (this.matches(':popover-open')) this.hidePopover();
+                        this.showPopover();
+                    } else if (!this.items.length && this.matches(':popover-open')) this.hidePopover();
+                    for (const node of this.shadowRoot.querySelectorAll('.message')) {
+                        if (node.dataset.entered) continue;
+                        node.dataset.entered = 'true';
+                        if (motionEnabled())
+                            window.gsap.fromTo(
+                                node,
+                                { opacity: 0, x: 24 },
+                                { opacity: 1, x: 0, duration: 0.24, ease: 'power2.out', overwrite: true }
+                            );
+                    }
+                }
+                disconnectedCallback() {
+                    for (const timer of this.timers.values()) clearTimeout(timer);
+                    window.gsap?.killTweensOf(this.shadowRoot.querySelectorAll('.message'));
+                    super.disconnectedCallback();
+                }
+                render() {
+                    return html`${repeat(
+                        this.items,
+                        item => item.id,
+                        item =>
+                            html`<div
+                                data-id=${item.id}
+                                class=${'message ' + item.type}
+                                role=${item.type === 'error' ? 'alert' : 'status'}
+                                @mouseenter=${() => this.pause(item)}
+                                @mouseleave=${() => this.resume(item)}
+                                @focusin=${() => this.pause(item)}
+                                @focusout=${() => this.resume(item)}
+                            >
+                                <span class="icon" aria-hidden="true">${item.type === 'success' ? '✓' : '!'}</span
+                                ><ui-tooltip .content=${item.text}></ui-tooltip
+                                ><button type="button" aria-label="关闭提示" @click=${() => this.close(item.id)}>×</button>
+                            </div>`
+                    )}`;
+                }
+            }
+            customElements.define('ui-message', UiMessage);
+            const messageHost = document.createElement('ui-message');
+            document.body.append(messageHost);
+            const message = (text, type = 'error') => messageHost.show(text, type);
+            function formatDate(value) {
+                if (!value) return '—';
+                const timestamp = typeof value === 'number' || /^\d+$/.test(value);
+                const date = timestamp ? new Date(Number(value) * 1000) : new Date(value);
+                if (Number.isNaN(date.getTime())) return String(value);
+                const pad = part => String(part).padStart(2, '0');
+                return (
+                    date.getFullYear() +
+                    '-' +
+                    pad(date.getMonth() + 1) +
+                    '-' +
+                    pad(date.getDate()) +
+                    ' ' +
+                    pad(date.getHours()) +
+                    ':' +
+                    pad(date.getMinutes()) +
+                    ':' +
+                    pad(date.getSeconds())
+                );
+            }
             const filters = [
-                ['all', '全部账号'],
+                ['all', '全部状态'],
                 ['available', '可用'],
                 ['cooldown', '冷却中'],
                 ['unavailable', '不可用']
@@ -70,12 +336,13 @@
                 }
                 render() {
                     return html`<button
-                        class="inline-flex h-8 items-center justify-center rounded-lg border px-2.5 text-xs font-medium transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 ${this
+                        type="button"
+                        class="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border px-3 py-2 text-[13px] leading-[18px] font-medium disabled:cursor-not-allowed disabled:opacity-40 ${this
                             .variant === 'danger'
-                            ? 'border-rose-200 text-rose-600 hover:bg-rose-50'
+                            ? 'border-red-200 text-red-600 hover:bg-red-50'
                             : this.variant === 'primary'
-                              ? 'border-brand bg-brand text-white hover:bg-blue-700'
-                              : 'border-line text-ink'}"
+                              ? 'border-brand bg-brand text-white hover:border-[#3d4450] hover:bg-[#3d4450]'
+                              : 'border-line text-ink hover:bg-slate-50'}"
                         ?disabled=${this.disabled}
                         @click=${() => this.dispatchEvent(new CustomEvent('button-click', { bubbles: true, composed: true }))}
                     >
@@ -93,7 +360,7 @@
                     return html`<label class="sr-only" for="status">筛选账号状态</label
                         ><select
                             id="status"
-                            class="h-10 min-w-0 flex-1 rounded-lg border border-line bg-white px-3 text-sm outline-none focus:border-brand sm:flex-none"
+                            class="h-9 min-w-0 flex-1 rounded-lg border border-line bg-white px-3 text-[13px] outline-none focus:border-brand sm:flex-none"
                             .value=${this.value}
                             @change=${e =>
                                 this.dispatchEvent(
@@ -111,9 +378,7 @@
                     return this;
                 }
                 date(value) {
-                    if (!value) return '—';
-                    const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
-                    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+                    return formatDate(value);
                 }
                 credits(value) {
                     return value == null ? '暂无数据' : Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
@@ -140,84 +405,446 @@
                     const a = this.account || {};
                     const cooling = a.cooldown_until && a.cooldown_until * 1000 > Date.now();
                     const state = !a.available ? '不可用' : cooling ? '冷却中' : '可用';
-                    const badge =
-                        state === '可用'
-                            ? 'bg-emerald-50 text-emerald-700'
-                            : state === '冷却中'
-                              ? 'bg-amber-50 text-amber-700'
-                              : 'bg-rose-50 text-rose-700';
+                    const status = !a.available ? 'unavailable' : cooling ? 'cooldown' : 'available';
                     const error = a.unavailable_reason || a.error || '';
                     const action = name =>
                         this.dispatchEvent(
                             new CustomEvent('account-action', { detail: { action: name, email: a.email }, bubbles: true, composed: true })
                         );
                     return html`<article
-                        class="flex h-full flex-col rounded-2xl border border-line bg-white p-5 shadow-[0_2px_12px_rgba(23,32,51,0.025)] transition hover:-translate-y-0.5 hover:shadow-lg"
+                        class="h-full overflow-hidden rounded-xl border border-line bg-white p-0 hover:border-[#c9ced7] flex flex-col"
+                        aria-label=${(a.email || '未知账号') + '，' + state}
                     >
-                        <div class="flex items-start justify-between gap-3">
-                            <div class="flex min-w-0 items-center gap-3">
-                                <div class="grid size-10 shrink-0 place-items-center rounded-xl bg-blue-50 font-semibold text-brand">
-                                    ${(a.email || '?').slice(0, 1).toUpperCase()}
+                        <div class="flex-1 p-3">
+                            <div class="flex items-start justify-between gap-3">
+                                <div class="flex min-w-0 items-center gap-3">
+                                    <div class="min-w-0">
+                                        <h3 class="truncate text-[13px] font-semibold text-ink" title=${a.email || ''}>
+                                            ${a.email || '未知账号'}
+                                        </h3>
+                                        ${a.tag ? html`<p class="truncate text-xs text-muted" title=${a.tag}>${a.tag}</p>` : ''}
+                                    </div>
                                 </div>
-                                <div class="min-w-0">
-                                    <h3 class="truncate text-sm font-semibold text-ink" title=${a.email || ''}>${a.email || '未知账号'}</h3>
-                                    <p class="mt-1 truncate text-xs text-muted" title=${a.tag || '未设置标签'}>${a.tag || '未设置标签'}</p>
+                                <div class="flex shrink-0 items-center gap-1.5">
+                                    ${a.trial_days_left != null
+                                        ? html`<span
+                                              class="whitespace-nowrap text-xs text-muted"
+                                              aria-label=${'试用剩余 ' + a.trial_days_left + ' 天'}
+                                              >${a.trial_days_left} 天</span
+                                          >`
+                                        : ''}
+                                    <span
+                                        class="inline-flex shrink-0 items-center gap-[5px] rounded-md px-[7px] py-[3px] text-xs font-medium before:size-[5px] before:rounded-full before:bg-current data-[state=available]:bg-emerald-50 data-[state=available]:text-emerald-700 data-[state=cooldown]:bg-amber-50 data-[state=cooldown]:text-amber-700 data-[state=unavailable]:bg-red-50 data-[state=unavailable]:text-red-700"
+                                        data-state=${status}
+                                        >${state}</span
+                                    >
                                 </div>
                             </div>
-                            <span class="shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${badge}">${state}</span>
-                        </div>
-                        <div class="my-4 h-px bg-slate-100"></div>
-                        <div class="grid grid-cols-2 gap-4">
-                            <div>
-                                <p class="text-[11px] text-muted">剩余额度</p>
-                                <p class="mt-1 truncate text-sm font-semibold text-ink" title=${this.credits(a.remaining_credits)}>
-                                    ${this.credits(a.remaining_credits)}<span class="ml-1 text-[11px] font-normal text-muted">credits</span>
-                                </p>
-                            </div>
-                            <div>
-                                <p class="text-[11px] text-muted">订阅等级</p>
-                                <p class="mt-1 truncate text-sm font-semibold text-ink" title=${a.tier || ''}>
+                            <div
+                                class="my-2 flex items-center justify-between gap-2 [&>div]:flex [&>div]:min-w-0 [&>div]:items-baseline [&>div]:gap-1.5"
+                            >
+                                <div>
+                                    <p class="text-xs text-muted shrink-0">额度</p>
+                                    <p
+                                        class="text-lg leading-[1.3] font-semibold tracking-[-.4px] tabular-nums truncate"
+                                        title=${this.credits(a.remaining_credits)}
+                                    >
+                                        ${this.credits(a.remaining_credits)}
+                                    </p>
+                                </div>
+                                <p
+                                    class="max-w-[40%] text-xs text-[#596373] truncate"
+                                    title=${'订阅等级：' + (a.tier || (a.has_pro_features ? 'Pro' : '—'))}
+                                >
                                     ${a.tier || (a.has_pro_features ? 'Pro' : '—')}
                                 </p>
                             </div>
+                            <div class="grid gap-0.5 border-t border-[#eff0f2] pt-1.5 text-xs leading-[18px]">
+                                <dl
+                                    class="grid grid-cols-2 gap-x-2 [&>div]:flex [&>div]:min-w-0 [&>div]:items-baseline [&>div]:gap-1 [&_dd]:min-w-0 [&_dd]:text-[#596373] [&_dt]:shrink-0 [&_dt]:whitespace-nowrap [&_dt]:text-muted"
+                                >
+                                    <div class="min-w-0">
+                                        <dt>创建时间</dt>
+                                        <dd class="truncate" title=${this.date(a.created_at)}>${this.date(a.created_at)}</dd>
+                                    </div>
+                                    <div class="min-w-0">
+                                        <dt>额度同步</dt>
+                                        <dd class="truncate" title=${this.date(a.info_fetched_at)}>${this.date(a.info_fetched_at)}</dd>
+                                    </div>
+                                </dl>
+                            </div>
+                            <div
+                                class="mt-2 min-w-0 rounded-lg px-2 py-1.5 text-xs leading-[18px] data-[state=available]:bg-emerald-50 data-[state=available]:text-emerald-700 data-[state=cooldown]:bg-amber-50 data-[state=cooldown]:text-amber-700 data-[state=unavailable]:bg-red-50 data-[state=unavailable]:text-red-700"
+                                data-state=${status}
+                            >
+                                <ui-tooltip
+                                    .content=${error ||
+                                    (cooling
+                                        ? '预计恢复：' + this.date(a.cooldown_until) + '（' + this.cooldownLeft(a.cooldown_until) + '后）'
+                                        : '无')}
+                                ></ui-tooltip>
+                            </div>
                         </div>
-                        <div class="mt-4 grid grid-cols-1 gap-1.5 border-t border-slate-100 pt-3 text-[11px] text-muted">
-                            ${cooling
-                                ? html`<p class="truncate" title=${'预计恢复：' + this.date(a.cooldown_until)}>
-                                      预计恢复：<span class="font-medium text-amber-700">${this.date(a.cooldown_until)}</span
-                                      ><span class="ml-1 text-slate-400">（${this.cooldownLeft(a.cooldown_until)}后）</span>
-                                  </p>`
-                                : ''}
-                            <p class="truncate" title=${'错误：' + (error || '无')}>
-                                错误：<span class=${error ? 'text-rose-600' : 'text-slate-400'}>${error || '无'}</span>
-                            </p>
-                            <p class="truncate" title=${'创建：' + this.date(a.created_at)}>创建：${this.date(a.created_at)}</p>
-                            <p class="truncate" title=${'最近更新：' + this.date(a.updated_at)}>最近更新：${this.date(a.updated_at)}</p>
-                            <p class="truncate" title=${'额度同步：' + this.date(a.info_fetched_at)}>
-                                额度同步：${this.date(a.info_fetched_at)}
-                            </p>
-                            ${a.trial_days_left != null ? html`<p class="truncate">试用剩余：${a.trial_days_left} 天</p>` : ''}
-                        </div>
-                        <div class="mt-auto flex items-center gap-2 border-t border-slate-100 pt-3">
-                            <ui-button label="刷新" .disabled=${this.busy} @button-click=${() => action('refresh')}></ui-button
+                        <div
+                            class="px-3 pb-2 [&_button]:min-h-7 [&_button]:px-2 [&_button]:py-[3px] [&_button]:text-xs [&>ui-button:last-child]:ml-auto [&>ui-button:last-child>button]:border-transparent [&>ui-button:last-child>button]:bg-transparent [&>ui-button:last-child>button:hover]:bg-red-50 flex items-center gap-2"
+                        >
+                            <ui-button
+                                class="inline-flex"
+                                label="刷新额度"
+                                .disabled=${this.busy}
+                                @button-click=${() => action('refresh')}
+                            ></ui-button
                             ><ui-button
+                                class="inline-flex"
+                                label="恢复"
+                                .disabled=${this.busy || (!cooling && a.available)}
+                                @button-click=${() => action('restore')}
+                            ></ui-button>
+                            <ui-button
+                                class="inline-flex"
                                 label="删除"
                                 variant="danger"
                                 .disabled=${this.busy}
                                 @button-click=${() => action('delete')}
-                            ></ui-button
-                            ><ui-button
-                                label="恢复"
-                                .disabled=${this.busy || (!cooling && a.available)}
-                                @button-click=${() => action('restore')}
                             ></ui-button>
                         </div>
                     </article>`;
                 }
             }
             customElements.define('account-card', AccountCard);
+            class LogsPanel extends LitElement {
+                static properties = {
+                    request: { attribute: false },
+                    items: { state: true },
+                    page: { state: true },
+                    total: { state: true },
+                    pages: { state: true },
+                    pageSize: { state: true },
+                    requestId: { state: true },
+                    createdAt: { state: true },
+                    loading: { state: true },
+                    error: { state: true },
+                    detailId: { state: true },
+                    detail: { state: true },
+                    detailLoading: { state: true },
+                    detailError: { state: true },
+                    detailTab: { state: true }
+                };
+                constructor() {
+                    super();
+                    Object.assign(this, {
+                        items: [],
+                        page: 1,
+                        total: 0,
+                        pages: 0,
+                        pageSize: 20,
+                        requestId: '',
+                        createdAt: '',
+                        loading: false,
+                        error: '',
+                        filters: {},
+                        detailId: '',
+                        detail: null,
+                        detailLoading: false,
+                        detailError: '',
+                        detailTab: 'inbound_json',
+                        detailVersion: 0
+                    });
+                }
+                createRenderRoot() {
+                    return this;
+                }
+                updated() {
+                    const dialog = this.querySelector('dialog');
+                    if (this.detailId && !dialog.open) dialog.showModal();
+                    else if (!this.detailId && dialog.open) dialog.close();
+                }
+                async load() {
+                    if (this.loading) return;
+                    this.loading = true;
+                    this.error = '';
+                    try {
+                        let data = await this.request('list', { page: this.page, page_size: this.pageSize, ...this.filters });
+                        if (data.total_pages && this.page > data.total_pages) {
+                            this.page = data.total_pages;
+                            data = await this.request('list', { page: this.page, page_size: this.pageSize, ...this.filters });
+                        }
+                        this.items = data.items || [];
+                        this.total = data.total || 0;
+                        this.pages = data.total_pages || 0;
+                    } catch (error) {
+                        this.error = error.message || '加载日志失败';
+                        message(this.error);
+                    } finally {
+                        this.loading = false;
+                    }
+                }
+                search(event) {
+                    event.preventDefault();
+                    if (this.loading) return;
+                    const createdAt = this.createdAt ? new Date(this.createdAt).getTime() / 1000 : null;
+                    if (createdAt != null && !Number.isSafeInteger(createdAt)) {
+                        message('请输入有效的创建时间，精确到秒。');
+                        return;
+                    }
+                    this.filters = {
+                        ...(this.requestId.trim() ? { request_id: this.requestId.trim() } : {}),
+                        ...(createdAt != null ? { created_at: createdAt } : {})
+                    };
+                    this.page = 1;
+                    this.load();
+                }
+                reset() {
+                    if (this.loading) return;
+                    this.requestId = '';
+                    this.createdAt = '';
+                    this.filters = {};
+                    this.page = 1;
+                    this.load();
+                }
+                changePage(page) {
+                    if (this.loading || page < 1 || page > this.pages) return;
+                    this.page = page;
+                    this.load();
+                }
+                async openDetail(requestId) {
+                    const version = ++this.detailVersion;
+                    this.detailId = requestId;
+                    this.detail = null;
+                    this.detailError = '';
+                    this.detailLoading = true;
+                    this.detailTab = 'inbound_json';
+                    try {
+                        const detail = await this.request('detail', { request_id: requestId });
+                        if (version === this.detailVersion) this.detail = detail;
+                    } catch (error) {
+                        if (version === this.detailVersion) {
+                            this.detailError = error.message || '加载详情失败';
+                            message(this.detailError);
+                        }
+                    } finally {
+                        if (version === this.detailVersion) this.detailLoading = false;
+                    }
+                }
+                closeDetail() {
+                    this.detailId = '';
+                    this.detailVersion++;
+                }
+                formatBody(value) {
+                    if (value == null) return '暂无记录';
+                    if (value === '') return '（空内容）';
+                    try {
+                        return JSON.stringify(JSON.parse(value), null, 2);
+                    } catch {
+                        return value;
+                    }
+                }
+                bytes(value) {
+                    if (value == null) return '—';
+                    if (value < 1024) return value + ' B';
+                    if (value < 1048576) return (value / 1024).toFixed(1) + ' KB';
+                    return (value / 1048576).toFixed(1) + ' MB';
+                }
+                render() {
+                    return html`<div class="mx-auto w-full max-w-[1360px] px-8 py-4 max-[700px]:px-5">
+                        <form class="mb-4 flex flex-wrap items-end gap-3" @submit=${this.search}>
+                            <div class="min-w-48 flex-1">
+                                <label for="log-request-id" class="mb-1 block text-xs text-muted">请求 ID</label
+                                ><input
+                                    id="log-request-id"
+                                    class="h-9 w-full rounded-lg border border-line bg-white px-3 text-[13px]"
+                                    placeholder="输入完整请求 ID"
+                                    .value=${this.requestId}
+                                    @input=${e => (this.requestId = e.target.value)}
+                                />
+                            </div>
+                            <div>
+                                <label for="log-created-at" class="mb-1 block text-xs text-muted">创建时间（精确到秒）</label
+                                ><input
+                                    id="log-created-at"
+                                    type="datetime-local"
+                                    step="1"
+                                    class="h-9 max-w-full rounded-lg border border-line bg-white px-3 text-[13px]"
+                                    .value=${this.createdAt}
+                                    @input=${e => (this.createdAt = e.target.value)}
+                                />
+                            </div>
+                            <button
+                                class="h-9 rounded-lg bg-brand px-4 text-[13px] text-white disabled:opacity-40"
+                                ?disabled=${this.loading}
+                            >
+                                查询
+                            </button>
+                            <ui-button class="inline-flex" label="重置" .disabled=${this.loading} @button-click=${this.reset}></ui-button>
+                            <ui-button
+                                class="inline-flex"
+                                label=${this.loading ? '刷新中…' : '刷新列表'}
+                                .disabled=${this.loading}
+                                @button-click=${this.load}
+                            ></ui-button>
+                        </form>
+                        <div class="overflow-x-auto rounded-xl border border-line bg-white" aria-busy=${this.loading ? 'true' : 'false'}>
+                            <table class="w-full whitespace-nowrap text-left text-xs">
+                                <caption class="sr-only">
+                                    请求日志，按创建顺序倒序显示
+                                </caption>
+                                <thead class="border-b border-line bg-slate-50 text-muted">
+                                    <tr>
+                                        ${['请求 ID', '创建时间', '方法', '路径', '入站大小', '上游大小', '响应大小', '操作'].map(
+                                            label => html`<th scope="col" class="px-3 py-3 font-medium">${label}</th>`
+                                        )}
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-line">
+                                    ${this.items.length
+                                        ? this.items.map(
+                                              item =>
+                                                  html`<tr class="hover:bg-slate-50/70">
+                                                      <td class="px-3 py-2">
+                                                          <button
+                                                              class="max-w-64 truncate text-left font-mono hover:underline"
+                                                              title=${item.request_id}
+                                                              @click=${() => this.openDetail(item.request_id)}
+                                                          >
+                                                              ${item.request_id}
+                                                          </button>
+                                                      </td>
+                                                      <td class="px-3 py-2 tabular-nums">${formatDate(item.created_at)}</td>
+                                                      <td class="px-3 py-2">
+                                                          <span class="rounded bg-slate-100 px-1.5 py-0.5 font-mono"
+                                                              >${item.method || '—'}</span
+                                                          >
+                                                      </td>
+                                                      <td class="max-w-64 truncate px-3 py-2 font-mono" title=${item.path || ''}>
+                                                          ${item.path || '—'}
+                                                      </td>
+                                                      <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.inbound_bytes)}</td>
+                                                      <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.upstream_bytes)}</td>
+                                                      <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.response_bytes)}</td>
+                                                      <td class="px-3 py-2">
+                                                          <button
+                                                              class="rounded-md border border-line px-2 py-1 hover:bg-slate-100"
+                                                              @click=${() => this.openDetail(item.request_id)}
+                                                          >
+                                                              详情
+                                                          </button>
+                                                      </td>
+                                                  </tr>`
+                                          )
+                                        : html`<tr>
+                                              <td colspan="8" class="py-16 text-center text-muted" role="status">
+                                                  ${this.loading
+                                                      ? '正在加载日志…'
+                                                      : this.error
+                                                        ? '日志加载失败，请重试'
+                                                        : '暂无符合条件的日志'}
+                                              </td>
+                                          </tr>`}
+                                </tbody>
+                            </table>
+                        </div>
+                        <footer class="flex flex-wrap items-center justify-between gap-3 py-4 text-xs text-muted">
+                            <p>共 ${this.total} 条日志 · 日志保留 7 天</p>
+                            <div class="flex items-center gap-2">
+                                <label for="log-page-size" class="sr-only">每页条数</label
+                                ><select
+                                    id="log-page-size"
+                                    class="h-9 rounded-lg border border-line bg-white px-2"
+                                    .value=${String(this.pageSize)}
+                                    ?disabled=${this.loading}
+                                    @change=${e => {
+                                        this.pageSize = Number(e.target.value);
+                                        this.page = 1;
+                                        this.load();
+                                    }}
+                                >
+                                    ${[10, 20, 50, 100].map(size => html`<option value=${size}>每页 ${size} 条</option>`)}</select
+                                ><ui-button
+                                    class="inline-flex"
+                                    label="上一页"
+                                    .disabled=${this.loading || this.page <= 1}
+                                    @button-click=${() => this.changePage(this.page - 1)}
+                                ></ui-button
+                                ><span>${this.page} / ${this.pages || 1}</span
+                                ><ui-button
+                                    class="inline-flex"
+                                    label="下一页"
+                                    .disabled=${this.loading || this.page >= this.pages}
+                                    @button-click=${() => this.changePage(this.page + 1)}
+                                ></ui-button>
+                            </div>
+                        </footer>
+                        <dialog
+                            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-5xl overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
+                            aria-labelledby="log-detail-title"
+                            @close=${this.closeDetail}
+                        >
+                            <div class="flex max-h-[calc(100dvh-34px)] flex-col">
+                                <div class="flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3">
+                                    <h2 id="log-detail-title" class="text-sm font-semibold">日志详情</h2>
+                                    <button
+                                        class="size-8 rounded-lg text-lg text-muted hover:bg-slate-100"
+                                        aria-label="关闭日志详情"
+                                        @click=${this.closeDetail}
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                                <div class="shrink-0 space-y-1 px-5 py-3 text-xs text-muted">
+                                    <p class="break-all font-mono">${this.detailId}</p>
+                                    ${this.detail
+                                        ? html`<p>
+                                              ${formatDate(this.detail.created_at)} · ${this.detail.method || '—'} ·
+                                              ${this.detail.path || '—'}
+                                          </p>`
+                                        : ''}
+                                </div>
+                                <div class="flex shrink-0 gap-1 border-b border-line px-5 pb-2" aria-label="日志内容">
+                                    ${[
+                                        ['inbound_json', '入站请求'],
+                                        ['upstream_json', '上游请求'],
+                                        ['response_text', '上游响应']
+                                    ].map(
+                                        ([value, label]) =>
+                                            html`<button
+                                                class="rounded-lg px-3 py-1.5 text-xs ${this.detailTab === value
+                                                    ? 'bg-brand text-white'
+                                                    : 'text-muted hover:bg-slate-100'}"
+                                                aria-pressed=${this.detailTab === value ? 'true' : 'false'}
+                                                @click=${() => (this.detailTab = value)}
+                                            >
+                                                ${label}
+                                            </button>`
+                                    )}
+                                </div>
+                                ${this.detailLoading
+                                    ? html`<p class="p-5 text-xs text-muted" role="status">正在加载详情…</p>`
+                                    : this.detailError
+                                      ? html`<div role="alert" class="flex items-center justify-between gap-3 p-5 text-xs text-red-700">
+                                            <span>详情加载失败</span
+                                            ><ui-button
+                                                class="inline-flex"
+                                                label="重试"
+                                                @button-click=${() => this.openDetail(this.detailId)}
+                                            ></ui-button>
+                                        </div>`
+                                      : html`<pre
+                                            class="min-h-32 min-w-0 overflow-auto whitespace-pre-wrap break-words bg-slate-50 p-5 font-mono text-xs leading-5"
+                                            tabindex="0"
+                                            aria-label="日志正文"
+                                        >
+${this.formatBody(this.detail?.[this.detailTab])}</pre
+                                        >`}
+                            </div>
+                        </dialog>
+                    </div>`;
+                }
+            }
+            customElements.define('logs-panel', LogsPanel);
+
             class AccountConsole extends LitElement {
                 static properties = {
+                    panel: { state: true },
                     accounts: { state: true },
                     page: { state: true },
                     total: { state: true },
@@ -226,7 +853,6 @@
                     loading: { state: true },
                     workingEmail: { state: true },
                     error: { state: true },
-                    notice: { state: true },
                     dialog: { state: true },
                     source: { state: true },
                     importing: { state: true },
@@ -237,6 +863,7 @@
                 constructor() {
                     super();
                     Object.assign(this, {
+                        panel: 'accounts',
                         accounts: [],
                         page: 1,
                         total: 0,
@@ -245,7 +872,6 @@
                         loading: false,
                         workingEmail: '',
                         error: '',
-                        notice: '',
                         dialog: false,
                         source: '',
                         importing: false,
@@ -263,7 +889,7 @@
                     // 列表 60s 静默轮询:跟进冷却倒计时与账号状态变化,
                     // 操作中/弹窗打开时跳过,避免覆盖用户正在看的内容。
                     this.pollTimer = setInterval(() => {
-                        if (this.workingEmail || this.dialog || this.keyPrompt) return;
+                        if (this.panel !== 'accounts' || this.workingEmail || this.dialog || this.keyPrompt) return;
                         this.load(true);
                     }, 60000);
                 }
@@ -271,14 +897,15 @@
                     super.disconnectedCallback();
                     clearInterval(this.pollTimer);
                 }
-                async request(path, body) {
-                    const response = await fetch('/v1/accounts/' + path, {
+                async request(path, body, resource = 'accounts') {
+                    const response = await fetch('/v1/' + resource + '/' + path, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', ...(this.apiKey ? { Authorization: 'Bearer ' + this.apiKey } : {}) },
                         body: JSON.stringify(body)
                     });
                     const result = await response.json().catch(() => ({}));
                     if (response.status === 401) {
+                        if (resource === 'logs') this.querySelector('logs-panel').closeDetail();
                         this.keyDraft = this.apiKey;
                         this.keyPrompt = true;
                         throw new Error('请设置有效的 API Key 后再访问管理接口。');
@@ -303,7 +930,10 @@
                     } catch (e) {
                         // 静默轮询失败不打扰当前视图,只记 console。
                         if (silent) console.warn('后台刷新失败:', e);
-                        else this.error = e.message || '加载账号失败';
+                        else {
+                            this.error = e.message || '加载账号失败';
+                            message(this.error);
+                        }
                     } finally {
                         this.loading = false;
                     }
@@ -327,31 +957,32 @@
                         )
                             throw new Error('每个账号都需要包含 user.email 和 access_token。');
                     } catch (e) {
-                        this.notice = e instanceof SyntaxError ? 'JSON 格式无效，请检查后重试。' : e.message;
+                        message(e instanceof SyntaxError ? 'JSON 格式无效，请检查后重试。' : e.message);
                         return;
                     }
                     this.importing = true;
-                    this.notice = '';
                     try {
                         const data = await this.request(
                             'create',
                             records.length === 1 && !this.source.trim().startsWith('[') ? records[0] : records
                         );
                         const results = data.results || [data.result];
-                        this.notice =
+                        message(
                             '导入完成：新增 ' +
-                            results.filter(x => x === 'inserted').length +
-                            '，更新 ' +
-                            results.filter(x => x === 'updated').length +
-                            '，未变化 ' +
-                            results.filter(x => x === 'unchanged').length;
+                                results.filter(x => x === 'inserted').length +
+                                '，更新 ' +
+                                results.filter(x => x === 'updated').length +
+                                '，未变化 ' +
+                                results.filter(x => x === 'unchanged').length,
+                            'success'
+                        );
                         this.dialog = false;
                         this.source = '';
                         this.status = 'all';
                         this.page = 1;
                         await this.load();
                     } catch (e) {
-                        this.notice = e.message || '导入失败';
+                        message(e.message || '导入失败');
                     } finally {
                         this.importing = false;
                     }
@@ -362,7 +993,8 @@
                     if (this.apiKey) localStorage.setItem('raycast2api.apiKey', this.apiKey);
                     else localStorage.removeItem('raycast2api.apiKey');
                     this.keyPrompt = false;
-                    await this.load();
+                    if (this.panel === 'logs') await this.querySelector('logs-panel').load();
+                    else await this.load();
                 }
                 chooseStatus(e) {
                     this.status = e.detail.value;
@@ -374,135 +1006,192 @@
                     if (this.workingEmail) return;
                     if (action === 'delete' && !confirm('确定删除账号 ' + email + ' 吗？')) return;
                     this.workingEmail = email;
-                    this.notice = '';
                     try {
-                        await this.request(action, { email });
-                        this.notice = action === 'delete' ? '账号已删除' : action === 'restore' ? '账号已恢复并完成校验' : '账号额度已刷新';
+                        const account = await this.request(action, { email });
+                        const failed = action === 'restore' && !account.available;
+                        message(
+                            action === 'delete'
+                                ? '账号已删除'
+                                : action === 'restore'
+                                  ? failed
+                                      ? account.unavailable_reason || '账号校验失败，仍不可用'
+                                      : '账号已恢复并完成校验'
+                                  : '账号额度已刷新',
+                            failed ? 'error' : 'success'
+                        );
                         await this.load();
                     } catch (error) {
-                        this.notice = error.message || '操作失败';
+                        message(error.message || '操作失败');
+                        if (action === 'refresh' || action === 'restore') await this.load(true);
                     } finally {
                         this.workingEmail = '';
                     }
                 }
+                async switchPanel(panel) {
+                    this.panel = panel;
+                    await this.updateComplete;
+                    if (panel === 'logs') this.querySelector('logs-panel').load();
+                }
                 render() {
                     return html` <main class="flex h-full flex-col overflow-hidden">
-                        <header class="shrink-0 border-b border-line bg-white px-5 sm:px-8">
-                            <div class="mx-auto flex min-h-[82px] max-w-7xl flex-wrap items-center justify-between gap-3 py-4">
-                                <div class="flex items-center gap-3">
-                                    <div class="grid size-10 place-items-center rounded-xl bg-brand text-lg font-bold text-white">R</div>
-                                    <div>
-                                        <h1 class="text-base font-semibold tracking-tight text-ink sm:text-lg">Raycast 账号管理</h1>
-                                        <p class="mt-0.5 text-xs text-muted">账号池状态与额度一览</p>
-                                    </div>
+                        <header class="border-b border-line bg-white shrink-0">
+                            <div
+                                class="mx-auto w-full max-w-[1360px] px-8 max-[700px]:px-5 flex min-h-14 flex-wrap items-center justify-between gap-3 py-2"
+                            >
+                                <div class="flex items-center gap-3 text-[15px] font-[650] tracking-[-.3px]">
+                                    <span
+                                        class="grid size-8 place-items-center rounded-lg bg-blue-600 text-[19px] text-white"
+                                        aria-hidden="true"
+                                        >R</span
+                                    ><span>Raycast<span class="text-muted">2API</span></span>
                                 </div>
-                                <div class="flex w-full items-center justify-between gap-2 sm:w-auto">
-                                    <ui-select .options=${filters} .value=${this.status} @select-change=${this.chooseStatus}></ui-select>
-                                    <ui-button
-                                        label="导入账号"
-                                        variant="primary"
-                                        @button-click=${() => {
-                                            this.dialog = true;
-                                            this.notice = '';
-                                        }}
-                                    ></ui-button>
-                                </div>
+                                <nav class="flex gap-1 rounded-lg bg-slate-100 p-1" aria-label="面板切换">
+                                    ${[
+                                        ['accounts', '账号面板'],
+                                        ['logs', '日志面板']
+                                    ].map(
+                                        ([value, label]) =>
+                                            html`<button
+                                                class="rounded-md px-3 py-1.5 text-xs ${this.panel === value
+                                                    ? 'bg-white text-ink shadow-sm'
+                                                    : 'text-muted hover:bg-white/60'}"
+                                                aria-pressed=${this.panel === value ? 'true' : 'false'}
+                                                @click=${() => this.switchPanel(value)}
+                                            >
+                                                ${label}
+                                            </button>`
+                                    )}
+                                </nav>
+                                <button
+                                    class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-[13px] text-muted hover:bg-gray-100"
+                                    @click=${() => {
+                                        this.keyDraft = this.apiKey;
+                                        this.keyPrompt = true;
+                                    }}
+                                >
+                                    API Key 设置
+                                </button>
                             </div>
                         </header>
-                        <section class="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-8 sm:py-6" aria-label="账号列表">
-                            <div class="mx-auto max-w-7xl">
-                                <div class="mb-5 flex items-center justify-between gap-4">
-                                    <h2 class="text-sm font-semibold text-ink">账号列表</h2>
-                                    ${this.notice
-                                        ? html`<p
-                                              role="status"
-                                              class="max-w-[65%] truncate text-right text-xs text-brand"
-                                              title=${this.notice}
+                        <div
+                            class="min-h-0 flex-1 flex-col ${this.panel === 'accounts' ? 'flex' : 'hidden'}"
+                            ?inert=${this.panel !== 'accounts'}
+                        >
+                            <section
+                                class="[scrollbar-width:thin] [scrollbar-color:#d9dce5_transparent] [&::-webkit-scrollbar]:w-[7px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#d9dce5] min-h-0 flex-1 overflow-y-auto py-4"
+                                aria-label="账号列表"
+                            >
+                                <div class="mx-auto w-full max-w-[1360px] px-8 max-[700px]:px-5">
+                                    <div class="mb-4 flex items-center justify-between gap-3 max-[700px]:flex-wrap">
+                                        <ui-select
+                                            class="flex items-center gap-3"
+                                            .options=${filters}
+                                            .value=${this.status}
+                                            @select-change=${this.chooseStatus}
+                                        ></ui-select>
+                                        <div class="flex items-center gap-2">
+                                            <ui-button
+                                                class="inline-flex"
+                                                label=${this.loading ? '刷新中…' : '刷新列表'}
+                                                .disabled=${this.loading}
+                                                @button-click=${() => this.load()}
+                                            ></ui-button>
+                                            <ui-button
+                                                class="inline-flex"
+                                                label="＋ 导入账号"
+                                                variant="primary"
+                                                @button-click=${() => {
+                                                    this.dialog = true;
+                                                }}
+                                            ></ui-button>
+                                        </div>
+                                    </div>
+                                    ${this.loading && !this.accounts.length
+                                        ? html`<div
+                                              class="grid grid-cols-4 items-stretch gap-3 max-[1200px]:grid-cols-3 max-[900px]:grid-cols-2 max-[700px]:grid-cols-1"
                                           >
-                                              ${this.notice}
-                                          </p>`
-                                        : ''}
+                                              ${[1, 2, 3].map(
+                                                  () => html`<div class="h-52 animate-pulse rounded-xl border border-line bg-white"></div>`
+                                              )}
+                                          </div>`
+                                        : this.accounts.length
+                                          ? html`
+                                                <div
+                                                    class="grid grid-cols-4 items-stretch gap-3 max-[1200px]:grid-cols-3 max-[900px]:grid-cols-2 max-[700px]:grid-cols-1"
+                                                    @account-action=${this.accountAction}
+                                                >
+                                                    ${this.accounts.map(
+                                                        account =>
+                                                            html`<account-card
+                                                                class="block min-w-0"
+                                                                .account=${account}
+                                                                .busy=${this.workingEmail === account.email}
+                                                            ></account-card>`
+                                                    )}
+                                                </div>
+                                            `
+                                          : html`<div
+                                                class="min-h-[200px] border-0 bg-transparent flex flex-col items-center justify-center px-6 text-center"
+                                            >
+                                                <div
+                                                    class="size-14 rounded-xl border border-line bg-white text-[#7b8491] grid place-items-center text-xl"
+                                                >
+                                                    ＋
+                                                </div>
+                                                <h3 class="mt-4 text-sm font-semibold text-ink">
+                                                    ${this.status === 'all' ? '添加你的第一个账号' : '没有符合条件的账号'}
+                                                </h3>
+                                                <p class="mt-2 text-[13px] text-muted">导入账号 JSON，开始管理账号状态与额度。</p>
+                                                ${this.status === 'all'
+                                                    ? html`<button
+                                                          class="mt-4 rounded-lg bg-brand px-4 py-2 text-xs font-medium text-white"
+                                                          @click=${() => (this.dialog = true)}
+                                                      >
+                                                          导入账号
+                                                      </button>`
+                                                    : ''}
+                                            </div>`}
+                                    <footer>
+                                        <div
+                                            class="flex items-center justify-between gap-4 py-4 max-[700px]:flex-wrap max-[700px]:[&>div]:ml-auto"
+                                        >
+                                            <p class="truncate text-xs text-muted">
+                                                共 ${this.total} 个账号<span class="mx-2 text-slate-300">·</span>${this.total
+                                                    ? '第 ' + this.page + ' / ' + this.pages + ' 页'
+                                                    : '暂无账号'}
+                                            </p>
+                                            <div class="flex shrink-0 items-center gap-2">
+                                                <ui-button
+                                                    class="inline-flex"
+                                                    label="上一页"
+                                                    .disabled=${this.page <= 1 || this.loading}
+                                                    @button-click=${() => {
+                                                        this.page--;
+                                                        this.load();
+                                                    }}
+                                                ></ui-button
+                                                ><span class="min-w-16 text-center text-xs font-medium"
+                                                    >${this.page} / ${this.pages || 1}</span
+                                                ><ui-button
+                                                    class="inline-flex"
+                                                    label="下一页"
+                                                    .disabled=${this.page >= this.pages || this.loading}
+                                                    @button-click=${() => {
+                                                        this.page++;
+                                                        this.load();
+                                                    }}
+                                                ></ui-button>
+                                            </div>
+                                        </div>
+                                    </footer>
                                 </div>
-                                ${this.error
-                                    ? html`<div
-                                          class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm text-rose-700"
-                                      >
-                                          <span>${this.error}</span
-                                          ><button
-                                              class="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs"
-                                              @click=${() => {
-                                                  this.keyDraft = this.apiKey;
-                                                  this.keyPrompt = true;
-                                              }}
-                                          >
-                                              设置 API Key
-                                          </button>
-                                      </div>`
-                                    : this.loading && !this.accounts.length
-                                      ? html`<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                                            ${[1, 2, 3].map(() => html`<div class="h-48 animate-pulse rounded-2xl bg-white"></div>`)}
-                                        </div>`
-                                      : this.accounts.length
-                                        ? html`
-                                              <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3" @account-action=${this.accountAction}>
-                                                  ${this.accounts.map(
-                                                      account =>
-                                                          html`<account-card
-                                                              .account=${account}
-                                                              .busy=${this.workingEmail === account.email}
-                                                          ></account-card>`
-                                                  )}
-                                              </div>
-                                          `
-                                        : html`<div
-                                              class="flex min-h-64 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white/70 px-6 text-center"
-                                          >
-                                              <div class="grid size-12 place-items-center rounded-2xl bg-blue-50 text-xl text-brand">
-                                                  ＋
-                                              </div>
-                                              <h3 class="mt-4 text-sm font-semibold text-ink">
-                                                  ${this.status === 'all' ? '还没有账号' : '没有符合条件的账号'}
-                                              </h3>
-                                              <p class="mt-1 text-xs text-muted">导入账号 JSON 后会显示在这里</p>
-                                              ${this.status === 'all'
-                                                  ? html`<button
-                                                        class="mt-4 rounded-lg bg-brand px-4 py-2 text-xs font-medium text-white"
-                                                        @click=${() => (this.dialog = true)}
-                                                    >
-                                                        导入账号
-                                                    </button>`
-                                                  : ''}
-                                          </div>`}
-                            </div>
-                        </section>
-                        <footer class="shrink-0 border-t border-line bg-white px-5 sm:px-8">
-                            <div class="mx-auto flex min-h-[66px] max-w-7xl items-center justify-between gap-4">
-                                <p class="truncate text-xs text-muted">
-                                    共 ${this.total} 个账号<span class="mx-2 text-slate-300">·</span>${this.total
-                                        ? '第 ' + this.page + ' / ' + this.pages + ' 页'
-                                        : '暂无账号'}
-                                </p>
-                                <div class="flex shrink-0 items-center gap-2">
-                                    <ui-button
-                                        label="‹"
-                                        .disabled=${this.page <= 1 || this.loading}
-                                        @button-click=${() => {
-                                            this.page--;
-                                            this.load();
-                                        }}
-                                    ></ui-button
-                                    ><span class="min-w-16 text-center text-xs font-medium">${this.page} / ${this.pages || 1}</span
-                                    ><ui-button
-                                        label="›"
-                                        .disabled=${this.page >= this.pages || this.loading}
-                                        @button-click=${() => {
-                                            this.page++;
-                                            this.load();
-                                        }}
-                                    ></ui-button>
-                                </div>
-                            </div>
-                        </footer>
+                            </section>
+                        </div>
+                        <logs-panel
+                            class="min-h-0 flex-1 overflow-y-auto ${this.panel === 'logs' ? 'block' : 'hidden'}"
+                            ?inert=${this.panel !== 'logs'}
+                            .request=${(path, body) => this.request(path, body, 'logs')}
+                        ></logs-panel>
                         ${this.dialog
                             ? html`<div
                                   class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-[2px]"
@@ -514,27 +1203,39 @@
                                       role="dialog"
                                       aria-modal="true"
                                       aria-labelledby="import-title"
-                                      class="max-h-[calc(100dvh-32px)] w-full max-w-xl overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl sm:p-6"
+                                      class="max-h-[calc(100dvh-32px)] overflow-y-auto rounded-xl border border-line p-0 shadow-[0_24px_80px_#10182826] [&_input]:rounded-lg [&_textarea]:rounded-lg max-[700px]:[&_input]:text-base max-[700px]:[&_textarea]:text-base w-full max-w-xl bg-white"
                                   >
-                                      <h2 id="import-title" class="text-base font-semibold">导入账号</h2>
-                                      <p class="mt-1 text-xs leading-5 text-muted">
-                                          粘贴单个账号 JSON 或账号 JSON 数组，按 user.email 更新账号。
-                                      </p>
-                                      <textarea
-                                          class="mt-4 h-64 w-full resize-y rounded-xl border border-line bg-slate-50 p-4 font-mono text-xs leading-5 outline-none focus:border-brand focus:bg-white"
-                                          .value=${this.source}
-                                          @input=${e => (this.source = e.target.value)}
-                                          placeholder='[{"tag":"主账号","user":{"email":"name@example.com"},"access_token":"rca_...","refresh_token":"..."}]'
-                                      ></textarea
-                                      >${this.notice ? html`<p role="alert" class="mt-2 text-xs text-rose-600">${this.notice}</p>` : ''}
-                                      <div class="mt-4 flex justify-end gap-2">
+                                      <div class="flex items-center justify-between gap-4 border-b border-line px-6 py-5 max-[700px]:p-4">
+                                          <h2 id="import-title" class="text-base font-semibold">导入账号</h2>
                                           <button
-                                              class="h-10 rounded-lg border border-line px-4 text-sm"
+                                              class="grid size-8 place-items-center rounded-lg text-muted hover:bg-gray-100"
+                                              aria-label="关闭导入窗口"
+                                              @click=${() => (this.dialog = false)}
+                                          >
+                                              ×
+                                          </button>
+                                      </div>
+                                      <div class="p-6 max-[700px]:p-4">
+                                          <p class="mt-1 text-xs leading-5 text-muted">
+                                              粘贴单个账号 JSON 或账号 JSON 数组，按 user.email 更新账号。
+                                          </p>
+                                          <label for="account-json" class="mt-5 block text-xs font-medium">账号 JSON</label
+                                          ><textarea
+                                              id="account-json"
+                                              class="mt-2 h-64 w-full resize-y rounded-lg border border-line bg-slate-50 p-4 font-mono text-xs leading-5 outline-none focus:border-brand focus:bg-white"
+                                              .value=${this.source}
+                                              @input=${e => (this.source = e.target.value)}
+                                              placeholder='[{"tag":"主账号","user":{"email":"name@example.com"},"access_token":"rca_...","refresh_token":"..."}]'
+                                          ></textarea>
+                                      </div>
+                                      <div class="flex justify-end gap-2 border-t border-line bg-[#fafbfc] px-6 py-4 max-[700px]:p-4">
+                                          <button
+                                              class="inline-flex min-h-9 items-center justify-center rounded-lg border border-line px-3.5 py-2 text-[13px]"
                                               @click=${() => (this.dialog = false)}
                                           >
                                               取消</button
                                           ><button
-                                              class="h-10 rounded-lg bg-brand px-4 text-sm font-medium text-white disabled:opacity-50"
+                                              class="inline-flex min-h-9 items-center justify-center rounded-lg border border-line px-3.5 py-2 text-[13px] bg-brand text-white disabled:opacity-50"
                                               ?disabled=${this.importing}
                                               @click=${this.importAccounts}
                                           >
@@ -546,27 +1247,43 @@
                             : ''}
                         ${this.keyPrompt
                             ? html`<div class="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/40 p-4">
-                                  <form class="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl" @submit=${this.saveKey}>
-                                      <h2 class="text-base font-semibold">设置 API Key</h2>
-                                      <p class="mt-2 text-xs leading-5 text-muted">
-                                          网关配置了 API_KEY，请输入后访问管理接口。Key 保存在当前浏览器。
-                                      </p>
-                                      <input
-                                          type="password"
-                                          autocomplete="current-password"
-                                          class="mt-4 h-11 w-full rounded-lg border border-line px-3 text-sm outline-none focus:border-brand"
-                                          .value=${this.keyDraft}
-                                          @input=${e => (this.keyDraft = e.target.value)}
-                                          placeholder="API Key"
-                                      />
-                                      <div class="mt-4 flex justify-end gap-2">
+                                  <form
+                                      class="max-h-[calc(100dvh-32px)] overflow-y-auto rounded-xl border border-line p-0 shadow-[0_24px_80px_#10182826] [&_input]:rounded-lg [&_textarea]:rounded-lg max-[700px]:[&_input]:text-base max-[700px]:[&_textarea]:text-base w-full max-w-sm bg-white"
+                                      role="dialog"
+                                      aria-modal="true"
+                                      aria-labelledby="key-title"
+                                      @submit=${this.saveKey}
+                                  >
+                                      <div class="flex items-center justify-between gap-4 border-b border-line px-6 py-5 max-[700px]:p-4">
+                                          <h2 id="key-title" class="text-base font-semibold">设置 API Key</h2>
+                                      </div>
+                                      <div class="p-6 max-[700px]:p-4">
+                                          <p class="mt-2 text-xs leading-5 text-muted">
+                                              网关配置了 API_KEY，请输入后访问管理接口。Key 保存在当前浏览器。
+                                          </p>
+                                          <label for="api-key" class="mt-4 block text-xs font-medium">API Key</label
+                                          ><input
+                                              id="api-key"
+                                              type="password"
+                                              autocomplete="current-password"
+                                              class="mt-2 h-11 w-full rounded-lg border border-line px-3 text-sm outline-none focus:border-brand"
+                                              .value=${this.keyDraft}
+                                              @input=${e => (this.keyDraft = e.target.value)}
+                                              placeholder="API Key"
+                                          />
+                                      </div>
+                                      <div class="flex justify-end gap-2 border-t border-line bg-[#fafbfc] px-6 py-4 max-[700px]:p-4">
                                           <button
                                               type="button"
-                                              class="h-10 rounded-lg border border-line px-4 text-sm"
+                                              class="inline-flex min-h-9 items-center justify-center rounded-lg border border-line px-3.5 py-2 text-[13px]"
                                               @click=${() => (this.keyPrompt = false)}
                                           >
                                               取消</button
-                                          ><button class="h-10 rounded-lg bg-brand px-4 text-sm font-medium text-white">保存并重试</button>
+                                          ><button
+                                              class="inline-flex min-h-9 items-center justify-center rounded-lg border border-line px-3.5 py-2 text-[13px] bg-brand text-white"
+                                          >
+                                              保存并重试
+                                          </button>
                                       </div>
                                   </form>
                               </div>`

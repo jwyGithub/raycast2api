@@ -518,7 +518,7 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
 /// 只保留了原始响应文本,这里从文本里识别上游样本的特征串。特征来自真实
 /// 样本的 message/subcode—— message 内容可能变,但 subcode("account_unavailable")
 /// 是 Raycast 的结构化字段,双保险。
-fn is_account_dead_upstream(err: &GatewayError) -> bool {
+pub(crate) fn is_account_dead_upstream(err: &GatewayError) -> bool {
     let GatewayError::Upstream { status, message } = err else {
         return false;
     };
