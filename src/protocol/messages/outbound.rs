@@ -72,15 +72,12 @@ impl OutboundAdapter for MessagesOutbound {
 
             // On an in-stream error the encoder already emitted the terminal
             // `error` frame — skip `finalize` so no trailing message frames
-            // follow it.
+            // follow it. (`finalize` is idempotent, so the normal path can
+            // call it unconditionally here.)
             if !failed {
                 for frame in encoder.finalize() {
                     yield to_event(&frame);
                 }
-            }
-
-            for frame in encoder.finalize() {
-                yield to_event(&frame);
             }
         };
 

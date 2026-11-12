@@ -62,6 +62,10 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     /// For `Role::Tool` results: the tool's name.
     pub tool_name: Option<String>,
+    /// For `Role::Tool` results: whether the tool execution failed
+    /// (Anthropic `tool_result.is_error`). The Raycast wire has no error
+    /// flag, so the builder marks it textually (see `error_marker`).
+    pub tool_error: bool,
 }
 
 impl Message {
@@ -74,6 +78,18 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
+            tool_error: false,
+        }
+    }
+
+    /// The textual prefix marking a failed tool result. The upstream wire
+    /// carries no error flag on `role:"tool"` messages, so a failed result is
+    /// marked in-band; the model reads this and knows the output is an error.
+    pub fn error_marker(is_error: bool) -> &'static str {
+        if is_error {
+            "[tool error] "
+        } else {
+            ""
         }
     }
 }

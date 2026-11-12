@@ -145,6 +145,14 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
         let role = role_wire(message.role);
         let mut wire = RaycastMessage::text(role, message.text.clone());
 
+        // A failed tool result is marked in-band: the upstream wire carries no
+        // error flag on `role:"tool"` messages, so the failure rides in the
+        // text the model reads.
+        if message.role == Role::Tool && message.tool_error {
+            wire.content.text =
+                format!("{}{}", Message::error_marker(true), wire.content.text);
+        }
+
         if !message.tool_calls.is_empty() {
             wire.tool_calls = message
                 .tool_calls

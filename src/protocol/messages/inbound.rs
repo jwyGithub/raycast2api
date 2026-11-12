@@ -208,6 +208,7 @@ fn push_assistant(
         tool_calls,
         tool_call_id: None,
         tool_name: None,
+        tool_error: false,
     });
 }
 
@@ -236,6 +237,7 @@ fn push_user(
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
+                is_error,
             } => {
                 // Flush any user text accumulated before this result.
                 if !text.is_empty() {
@@ -248,6 +250,7 @@ fn push_user(
                     tool_calls: Vec::new(),
                     tool_name: tool_names.get(&tool_use_id).cloned(),
                     tool_call_id: Some(tool_use_id),
+                    tool_error: is_error,
                 });
             }
             // `thinking` / `tool_use` / unknown blocks don't belong on a user turn.

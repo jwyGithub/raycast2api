@@ -129,6 +129,7 @@ fn conversation(
                     }],
                     tool_call_id: None,
                     tool_name: None,
+                    tool_error: false,
                 })
             }
             Some("function_call_output") => {
@@ -143,6 +144,7 @@ fn conversation(
                     tool_calls: Vec::new(),
                     tool_call_id: item.call_id,
                     tool_name,
+                    tool_error: false,
                 })
             }
             // A replayed freeform call: the raw text becomes the JSON-string
@@ -164,6 +166,7 @@ fn conversation(
                     }],
                     tool_call_id: None,
                     tool_name: None,
+                    tool_error: false,
                 })
             }
             Some("custom_tool_call_output") => {
@@ -178,6 +181,7 @@ fn conversation(
                     tool_calls: Vec::new(),
                     tool_call_id: item.call_id,
                     tool_name,
+                    tool_error: false,
                 })
             }
             // Reasoning items are provider bookkeeping; they don't map to a turn.

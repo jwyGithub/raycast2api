@@ -551,3 +551,65 @@ fn disabled_thinking_sets_no_effort() {
     .unwrap();
     assert_eq!(canonical.reasoning_effort, None);
 }
+
+#[test]
+fn tool_result_is_error_is_kept_and_marked_upstream() {
+    // is_error=true is preserved on the canonical message…
+    let canonical = parse(json!({
+        "model": "claude-x",
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "tool_result", "tool_use_id": "call_1", "content": "boom", "is_error": true },
+                { "type": "tool_result", "tool_use_id": "call_2", "content": "ok", "is_error": false }
+            ]
+        }]
+    }))
+    .unwrap();
+    assert!(canonical.messages[0].tool_error);
+    assert_eq!(canonical.messages[0].text, "boom");
+    assert!(!canonical.messages[1].tool_error);
+
+    // …and rendered in-band for the upstream (which has no error flag).
+    let mut messages = canonical.messages;
+    messages.insert(
+        0,
+        raycast2api::core::message::Message {
+            role: raycast2api::core::message::Role::Assistant,
+            text: String::new(),
+            thinking: None,
+            tool_calls: vec![raycast2api::core::message::ToolCall {
+                id: "call_1".into(),
+                name: "Bash".into(),
+                arguments: "{}".into(),
+            }],
+            tool_call_id: None,
+            tool_name: None,
+            tool_error: false,
+        },
+    );
+    let mut canonical =
+        raycast2api::core::request::CanonicalRequest::new(
+            raycast2api::core::protocol::Protocol::Messages,
+            "claude-x",
+        );
+    canonical.messages = messages;
+    let built =
+        raycast2api::raycast::builder::build_chat_request(&canonical, "anthropic", "claude-x");
+    let err_msg = built
+        .messages
+        .iter()
+        .find(|m| m.role == "tool" && m.content.text.contains("boom"))
+        .expect("tool message with error present");
+    assert!(
+        err_msg.content.text.starts_with("[tool error] "),
+        "failed result must be marked in-band: {:?}",
+        err_msg.content.text
+    );
+    let ok_msg = built
+        .messages
+        .iter()
+        .find(|m| m.role == "tool" && m.content.text.contains("ok"))
+        .expect("tool message with success present");
+    assert!(!ok_msg.content.text.starts_with("[tool error] "));
+}

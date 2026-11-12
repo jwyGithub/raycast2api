@@ -114,6 +114,11 @@ pub enum ContentBlock {
         tool_use_id: String,
         #[serde(default)]
         content: ToolResultContent,
+        /// Whether the tool execution failed. The Raycast wire has no error
+        /// flag, so the inbound adapter keeps it on the canonical message and
+        /// the builder marks it textually.
+        #[serde(default)]
+        is_error: bool,
     },
     #[serde(other)]
     Other,
