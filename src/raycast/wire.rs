@@ -242,6 +242,23 @@ impl RaycastSseError {
                 .is_some_and(|m| m.to_lowercase().contains("subscription is required"))
     }
 
+    /// 是否为上游内容安全策略拦截(`content_policy_blocked`):请求内容本身
+    /// 触发了上游 AI 提供商的安全策略,换账号/重试都无效(上游标注
+    /// `retryable:false`)。真实样本:code="content_policy_blocked",
+    /// subcode="refusal_blocked", message="Your request was blocked by the AI
+    /// provider's safety policy. Please rephrase your message and try again."
+    ///
+    /// 网关用它给客户端错误附加排查提示:这不是账号或网关故障,是请求文本
+    /// 里有触发词,改写措辞才是正解。
+    pub fn is_content_policy_blocked(&self) -> bool {
+        self.code.as_deref() == Some("content_policy_blocked")
+            || self.subcode.as_deref() == Some("refusal_blocked")
+            || self
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("blocked by the AI provider's safety policy"))
+    }
+
     /// 是否为邮箱未确认类错误:账号 token 有效但 AI 不可用,需用户去邮箱
     /// 点确认链接。冷却 24h 而非摘号 —— 确认后刷新任务会恢复可用。
     /// 真实样本:http_status=403, message="Please confirm your email address
@@ -508,6 +525,34 @@ mod credits_tests {
         assert!(mk(403, "A Raycast Pro subscription is required.").is_subscription_required());
         assert!(!mk(403, "flagged for suspicious activity").is_subscription_required());
         assert!(!mk(200, "x").is_subscription_required());
+    }
+
+    #[test]
+    fn content_policy_block_recognized_by_code_subcode_and_message() {
+        // 真实样本:code/subcode 双字段齐全(2026-11 线上抓取)。
+        let mk = |code: Option<&str>, subcode: Option<&str>, message: Option<&str>| RaycastSseError {
+            message: message.map(Into::into),
+            code: code.map(Into::into),
+            category: None,
+            subcode: subcode.map(Into::into),
+            http_status: 400,
+            retry_after: None,
+        };
+        assert!(mk(
+            Some("content_policy_blocked"),
+            Some("refusal_blocked"),
+            Some("Your request was blocked by the AI provider's safety policy.")
+        )
+        .is_content_policy_blocked());
+        // 只有一个结构化字段也能识别(上游字段可能收敛)。
+        assert!(mk(Some("content_policy_blocked"), None, None).is_content_policy_blocked());
+        assert!(mk(None, Some("refusal_blocked"), None).is_content_policy_blocked());
+        // message 兜底:结构化字段缺失时按特征串识别。
+        assert!(mk(None, None, Some("blocked by the AI provider's safety policy."))
+            .is_content_policy_blocked());
+        // 其他错误不误报。
+        assert!(!mk(Some("usage_limit_reached"), None, Some("limit reached")).is_content_policy_blocked());
+        assert!(!mk(None, None, Some("confirm your email")).is_content_policy_blocked());
     }
 
     #[test]

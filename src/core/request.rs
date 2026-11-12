@@ -17,6 +17,10 @@ pub enum ReasoningEffort {
     Low,
     Medium,
     High,
+    /// Claude Code's "Extra" effort level (`xhigh`): the real Raycast client
+    /// sends this string too (captured with `reasoning_effort: "xhigh"`), so
+    /// it passes through as-is rather than being clamped to `high`.
+    XHigh,
 }
 
 impl ReasoningEffort {
@@ -26,6 +30,7 @@ impl ReasoningEffort {
             ReasoningEffort::Low => "low",
             ReasoningEffort::Medium => "medium",
             ReasoningEffort::High => "high",
+            ReasoningEffort::XHigh => "xhigh",
         }
     }
 }

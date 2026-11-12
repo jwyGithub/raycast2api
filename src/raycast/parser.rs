@@ -19,6 +19,16 @@ use super::wire::{RaycastSseData, RaycastUsage};
 /// The sentinel some SSE producers use to mark end-of-stream.
 pub const DONE_SENTINEL: &str = "[DONE]";
 
+/// 排查提示,附在 content_policy_blocked 错误后。上游这类拦截由请求文本触发,
+/// 换账号/重试都无效;根因通常是提示词里有"展示思考过程"之类的 CoT 提取指令。
+const CONTENT_POLICY_HINT: &str = "\n\n[gateway hint] This block was triggered by the request content, not by the account or the gateway — retrying or switching accounts will not help. Common cause: the prompt (or a system-reminder injected into it) asks the model to reveal its thinking process / chain of thought, which the upstream provider's safety policy refuses. Rephrase those instructions (e.g. ask for structured conclusions instead of \"show your thinking process\") and resend.";
+
+/// The content-policy troubleshooting hint, for error paths outside the SSE
+/// parser (e.g. the peeked-first-payload rotation loop in the client).
+pub fn content_policy_hint() -> &'static str {
+    CONTENT_POLICY_HINT
+}
+
 /// Parse one decoded `data:` payload into canonical events.
 ///
 /// Returns an empty vec for anything that isn't content: the `[DONE]`
@@ -46,9 +56,13 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
     // swallow it — previously this arm returned `Vec::new()` and the client
     // saw an empty completion.
     if let Some(err) = data.error {
+        let hint = err.is_content_policy_blocked();
         let mut message = err
             .message
             .unwrap_or_else(|| "upstream error (no message provided)".to_string());
+        if hint {
+            message.push_str(CONTENT_POLICY_HINT);
+        }
         if !notifications.is_empty() {
             message.push_str(" (upstream notification: ");
             message.push_str(&notifications.join("; "));
@@ -139,6 +153,35 @@ mod tests {
             CanonicalEvent::Error { status, message } => {
                 assert_eq!(*status, 429);
                 assert!(message.contains("free trial limit"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_policy_block_gets_gateway_hint() {
+        // Real capture: the provider's safety policy blocked the request
+        // content (CoT-extraction phrasing in a Claude Code system reminder).
+        let payload = r#"{"error":{"message":"Your request was blocked by the AI provider's safety policy. Please rephrase your message and try again.","type":"refusal_error","category":"provider","code":"content_policy_blocked","subcode":"refusal_blocked","retryable":false,"request_id":"415c5146","http_status":400}}"#;
+        let events = parse_events(payload, &mut Vec::new());
+        match &events[0] {
+            CanonicalEvent::Error { status, message } => {
+                assert_eq!(*status, 400);
+                assert!(message.contains("safety policy"));
+                assert!(message.contains("[gateway hint]"));
+                assert!(message.contains("thinking process"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_policy_hint_not_appended_for_other_errors() {
+        let payload = r#"{"error":{"message":"explicit error","http_status":502}}"#;
+        let events = parse_events(payload, &mut Vec::new());
+        match &events[0] {
+            CanonicalEvent::Error { message, .. } => {
+                assert!(!message.contains("[gateway hint]"));
             }
             other => panic!("expected Error, got {other:?}"),
         }

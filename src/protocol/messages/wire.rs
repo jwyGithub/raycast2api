@@ -38,6 +38,23 @@ pub struct MessagesRequest {
     pub stream: bool,
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
+    /// Claude Code (harness ≥2.x) sends the effort level as
+    /// `output_config: { "effort": "low" | "medium" | "high" | "xhigh" | "max" }`
+    /// (per-turn effort, beta `effort-2025-11-24`). This is the authoritative
+    /// depth signal for models like sonnet-5-5 — newer harnesses ship
+    /// `thinking: {type:"adaptive"}` *without* a budget and expect the
+    /// receiver to honor `output_config.effort` instead. Absent on older
+    /// clients; the inbound adapter then falls back to the thinking budget.
+    #[serde(default)]
+    pub output_config: Option<OutputConfig>,
+}
+
+/// The `output_config` object: currently only `effort` is meaningful to the
+/// gateway; unknown keys are ignored.
+#[derive(Debug, Deserialize)]
+pub struct OutputConfig {
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// `system` may be a bare string or an array of text blocks.

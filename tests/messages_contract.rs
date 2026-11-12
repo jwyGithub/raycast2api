@@ -138,11 +138,9 @@ fn system_blocks_join_and_thinking_enables_reasoning() {
     .unwrap();
 
     assert_eq!(canonical.system.as_deref(), Some("line one\nline two"));
-    // Anthropic expresses depth as a token budget; "on" maps to the middle effort.
-    assert!(matches!(
-        canonical.reasoning_effort,
-        Some(ReasoningEffort::Medium)
-    ));
+    // A small thinking budget buckets to `low` (see reasoning_effort mapping);
+    // the point here is that thinking on ⇒ some effort is set.
+    assert!(canonical.reasoning_effort.is_some());
 }
 
 #[test]
@@ -469,4 +467,87 @@ async fn error_envelope_shape() {
 /// The ordered list of SSE event names in a batch of frames.
 fn events(frames: &[raycast2api::protocol::messages::outbound::SseFrame]) -> Vec<&str> {
     frames.iter().map(|f| f.event).collect()
+}
+
+// --- Effort resolution (`output_config.effort` + thinking budget) ---------
+
+#[test]
+fn output_config_effort_maps_verbatim() {
+    for (sent, expected) in [
+        ("low", ReasoningEffort::Low),
+        ("minimal", ReasoningEffort::Low),
+        ("medium", ReasoningEffort::Medium),
+        ("high", ReasoningEffort::High),
+        ("xhigh", ReasoningEffort::XHigh),
+        // `max` has no Raycast wire value; clamps to the top known effort.
+        ("max", ReasoningEffort::XHigh),
+    ] {
+        let canonical = parse(json!({
+            "model": "claude-x",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "output_config": { "effort": sent }
+        }))
+        .unwrap();
+        assert_eq!(
+            canonical.reasoning_effort,
+            Some(expected),
+            "output_config.effort={sent}"
+        );
+    }
+}
+
+#[test]
+fn output_config_effort_wins_over_thinking_budget() {
+    let canonical = parse(json!({
+        "model": "claude-x",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "output_config": { "effort": "xhigh" },
+        "thinking": { "type": "enabled", "budget_tokens": 2048 }
+    }))
+    .unwrap();
+    assert_eq!(canonical.reasoning_effort, Some(ReasoningEffort::XHigh));
+}
+
+#[test]
+fn thinking_budget_buckets_to_effort() {
+    for (budget, expected) in [
+        (33_000, ReasoningEffort::XHigh),
+        (16_000, ReasoningEffort::High),
+        (8_192, ReasoningEffort::Medium),
+        (1_024, ReasoningEffort::Low),
+    ] {
+        let canonical = parse(json!({
+            "model": "claude-x",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "thinking": { "type": "enabled", "budget_tokens": budget }
+        }))
+        .unwrap();
+        assert_eq!(
+            canonical.reasoning_effort,
+            Some(expected),
+            "budget_tokens={budget}"
+        );
+    }
+}
+
+#[test]
+fn adaptive_thinking_without_budget_is_medium() {
+    let canonical = parse(json!({
+        "model": "claude-x",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "thinking": { "type": "adaptive" }
+    }))
+    .unwrap();
+    assert_eq!(canonical.reasoning_effort, Some(ReasoningEffort::Medium));
+}
+
+#[test]
+fn disabled_thinking_sets_no_effort() {
+    let canonical = parse(json!({
+        "model": "claude-x",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "thinking": { "type": "disabled" }
+    }))
+    .unwrap();
+    assert_eq!(canonical.reasoning_effort, None);
 }

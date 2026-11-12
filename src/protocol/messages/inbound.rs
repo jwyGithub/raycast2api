@@ -36,7 +36,7 @@ use crate::protocol::InboundAdapter;
 
 use super::wire::{
     ContentBlock, InboundMessage, InboundTool, InboundToolChoice, MessageContent, MessagesRequest,
-    SystemPrompt,
+    SystemPrompt, ThinkingConfig,
 };
 
 /// Zero-sized marker selecting the Anthropic Messages inbound mapping.
@@ -65,13 +65,50 @@ impl InboundAdapter for MessagesInbound {
         canonical.messages = conversation(request.messages);
         canonical.tools = tools(request.tools);
         canonical.tool_choice = request.tool_choice.map(tool_choice);
-        canonical.reasoning_effort = request
-            .thinking
-            .filter(|t| t.is_enabled())
-            .map(|_| ReasoningEffort::Medium);
+        canonical.reasoning_effort = reasoning_effort(
+            request.output_config.as_ref().and_then(|o| o.effort.as_deref()),
+            request.thinking.as_ref(),
+        );
 
         Ok(canonical)
     }
+}
+
+/// Resolve the reasoning depth, honoring every signal the harness may send.
+///
+/// Priority:
+/// 1. `output_config.effort` — the authoritative per-turn effort (Claude Code
+///    ≥2.x, beta `effort-2025-11-24`). Mapped verbatim: `low`/`medium`/`high`/
+///    `xhigh` are Raycast wire values (the real client sends `xhigh`); `max`
+///    has no Raycast equivalent, so it clamps to `xhigh`.
+/// 2. `thinking.budget_tokens` — the legacy budget form; bucketed to the
+///    nearest effort (32k → xhigh, 16k → high, 8k → medium, lower → low).
+/// 3. thinking on without a budget (`adaptive`) → `medium`, the same default
+///    the harness itself declares for sonnet-5-5.
+/// 4. Thinking off (or absent) → `None`.
+fn reasoning_effort(
+    output_effort: Option<&str>,
+    thinking: Option<&ThinkingConfig>,
+) -> Option<ReasoningEffort> {
+    if let Some(effort) = output_effort {
+        return Some(match effort {
+            "low" | "minimal" => ReasoningEffort::Low,
+            "high" => ReasoningEffort::High,
+            "xhigh" | "max" => ReasoningEffort::XHigh,
+            _ => ReasoningEffort::Medium,
+        });
+    }
+    let thinking = thinking?;
+    if !thinking.is_enabled() {
+        return None;
+    }
+    Some(match thinking.budget_tokens {
+        Some(budget) if budget >= 32_000 => ReasoningEffort::XHigh,
+        Some(budget) if budget >= 16_000 => ReasoningEffort::High,
+        Some(budget) if budget >= 4_000 => ReasoningEffort::Medium,
+        Some(_) => ReasoningEffort::Low,
+        None => ReasoningEffort::Medium,
+    })
 }
 
 /// Flatten `system` (string or text blocks) into a single prompt; an empty

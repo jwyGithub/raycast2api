@@ -20,10 +20,11 @@ use crate::log::store::RequestLogStore;
 use crate::signature::calculate_signature_v2;
 use crate::util::unix_secs;
 
+use super::parser::content_policy_hint;
 use super::peek::{peek_first_payload, restore_payload};
 use super::wire::{
     RaycastChatRequest, RaycastCredits, RaycastCreditsDetails, RaycastMe, RaycastModelsResponse,
-    RaycastRawModel, RaycastTrialStatus,
+    RaycastRawModel, RaycastSseError, RaycastTrialStatus,
 };
 
 /// Cheap-to-clone handle to the Raycast backend (wraps a shared `reqwest::Client`).
@@ -155,6 +156,18 @@ impl RaycastClient {
                         } else {
                             502
                         };
+                        if err.parsed.is_content_policy_blocked() {
+                            // 内容策略拦截:与账号无关,换号重试纯属浪费 ——
+                            // 立即终止,附排查提示后透传给客户端。
+                            tracing::warn!(
+                                account = %account.email,
+                                "→ upstream content-policy block (request content, not account): {message}"
+                            );
+                            return Err(GatewayError::Upstream {
+                                status,
+                                message: format!("{message}{}", crate::raycast::parser::content_policy_hint()),
+                            });
+                        }
                         if err.parsed.is_usage_limit() {
                             // 限额:冷却该账号(到期自动恢复进池)并换号重试。
                             let cooldown = err
@@ -371,7 +384,23 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
         return Ok(response);
     }
     let status = response.status().as_u16();
-    let message = response.text().await.unwrap_or_default();
+    let mut message = response.text().await.unwrap_or_default();
+    // 内容策略拦截可能以 HTTP 错误(而非流内 payload)形式出现:同样附上
+    // 排查提示,并识别为"非账号故障",让上层不摘号不轮换。
+    let hint = RaycastSseError {
+        message: Some(message.clone()),
+        code: None,
+        category: None,
+        subcode: None,
+        http_status: status,
+        retry_after: None,
+    };
+    if message.contains("content_policy_blocked")
+        || message.contains("refusal_blocked")
+        || hint.is_content_policy_blocked()
+    {
+        message.push_str(content_policy_hint());
+    }
     if status == 401 {
         return Err(GatewayError::TokenInvalid { message });
     }

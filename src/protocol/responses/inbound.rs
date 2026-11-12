@@ -282,6 +282,9 @@ fn reasoning_effort(reasoning: ReasoningConfig) -> ReasoningEffort {
     match reasoning.effort.as_deref() {
         Some("minimal") | Some("low") => ReasoningEffort::Low,
         Some("high") => ReasoningEffort::High,
+        // `xhigh` is a Raycast wire value (the real client sends it); Responses
+        // clients may also pass `max`, which clamps to the top known effort.
+        Some("xhigh" | "max") => ReasoningEffort::XHigh,
         _ => ReasoningEffort::Medium,
     }
 }

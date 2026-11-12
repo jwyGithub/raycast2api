@@ -119,17 +119,27 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
 
     for message in messages {
         // Assistant thinking is carried as a separate assistant message whose
-        // body is the thought wrapped in <think>...</think>, optionally
-        // replaying the provider's thought signature.
+        // body is the thought wrapped in <think>...</think>. The provider's
+        // thought signature is NOT attached here: upstream validates the
+        // signature against the message that ended the assistant turn —
+        // replaying it on the `<think>` text message makes the backend reject
+        // the whole request with a 500 ("Something went wrong"). Per the
+        // captured protocol (doc/raycast-backend-protocol.md §2.2), the
+        // signature rides on the terminal assistant message: the one with
+        // `tool_calls` when the turn ended in a tool call, else the text turn.
+        let signature_json = message.thinking.as_ref().and_then(|t| {
+            t.signature.as_ref().map(|s| {
+                json!({
+                    "anthropic": { "thought_signature": s }
+                })
+            })
+        });
+
         if let Some(thinking) = &message.thinking {
-            let mut think_msg =
-                RaycastMessage::text("assistant", format!("<think>{}</think>", thinking.text));
-            if let Some(signature) = &thinking.signature {
-                think_msg.extra_content = Some(json!({
-                    "anthropic": { "thought_signature": signature }
-                }));
-            }
-            out.push(think_msg);
+            out.push(RaycastMessage::text(
+                "assistant",
+                format!("<think>{}</think>", thinking.text),
+            ));
         }
 
         let role = role_wire(message.role);
@@ -147,6 +157,10 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
                     )
                 })
                 .collect();
+        }
+
+        if !wire.tool_calls.is_empty() || message.thinking.is_none() {
+            wire.extra_content = signature_json;
         }
 
         if message.role == Role::Tool {
