@@ -21,7 +21,7 @@ use crate::core::response::CanonicalResponse;
 use crate::error::GatewayError;
 use crate::protocol::OutboundAdapter;
 use crate::raycast::builder::build_chat_request;
-use crate::raycast::stream::canonical_events;
+use crate::raycast::stream::canonical_events_with_retry;
 
 use super::state::SharedState;
 
@@ -31,23 +31,8 @@ pub async fn run<O: OutboundAdapter>(
     state: &SharedState,
     request: CanonicalRequest,
 ) -> Result<Response, GatewayError> {
-    let (provider, model) = state.resolve_model(&request.model).await;
-    tracing::info!(
-        client_model = %request.model,
-        upstream = %format!("{provider}/{model}"),
-        stream = request.stream,
-        messages = request.messages.len(),
-        "inference request"
-    );
-    let raycast_request = build_chat_request(&request, &provider, &model);
-
-    let response = state.client.send_chat(&raycast_request).await?;
-    state.health.mark_working();
-
-    // The client-facing model id is echoed back verbatim — never the resolved
-    // upstream model.
+    let events = events(state, &request).await?;
     let client_model = request.model;
-    let events = canonical_events(response, state.log.clone());
 
     if request.stream {
         Ok(O::stream_with_tools(&client_model, &request.tools, events))
@@ -63,6 +48,32 @@ pub async fn run<O: OutboundAdapter>(
             Err(error) => Ok(O::render_error(error)),
         }
     }
+}
+
+/// Open the shared upstream path without choosing a client response renderer.
+pub(crate) async fn events(
+    state: &SharedState,
+    request: &CanonicalRequest,
+) -> Result<impl Stream<Item = CanonicalEvent> + Send + 'static, GatewayError> {
+    let (provider, model) = state.resolve_model(&request.model).await;
+    tracing::info!(
+        client_model = %request.model,
+        upstream = %format!("{provider}/{model}"),
+        stream = request.stream,
+        messages = request.messages.len(),
+        "inference request"
+    );
+    let raycast_request = build_chat_request(request, &provider, &model);
+
+    let response = state.client.send_chat(&raycast_request).await?;
+    state.health.mark_working();
+
+    Ok(canonical_events_with_retry(
+        response,
+        state.client.clone(),
+        raycast_request,
+        state.log.clone(),
+    ))
 }
 
 /// Consume the whole canonical event stream, folding it into a single

@@ -103,3 +103,38 @@ impl AppState {
         )
     }
 }
+
+#[cfg(test)]
+pub(crate) fn compact_test_state() -> SharedState {
+    let db = crate::db::Db::open(":memory:").unwrap();
+    let accounts = Arc::new(AccountStore::new(db.clone()));
+    let log = Arc::new(RequestLogStore::new(db));
+    let settings = Arc::new(Settings {
+        raycast_device_id: "device".into(),
+        raycast_signature_secret: None,
+        api_key: None,
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        bind_addr_dual: None,
+        model_overrides: Default::default(),
+        accounts_db: ":memory:".into(),
+        proxies: Vec::new(),
+        proxies_enabled: false,
+    });
+    let client = RaycastClient::new(
+        reqwest::Client::new(),
+        settings.clone(),
+        accounts.clone(),
+        log.clone(),
+    );
+    let mut state = AppState::new(settings, client, accounts, log);
+    state.models_cache = RwLock::new(Some(ModelsCache {
+        fetched_at: Instant::now(),
+        models: vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "test-model", "model": "test", "provider": "openai", "context": 32
+            }))
+            .unwrap(),
+        ],
+    }));
+    Arc::new(state)
+}

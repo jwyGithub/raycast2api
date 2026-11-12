@@ -12,7 +12,7 @@ use super::response::FinishReason;
 use super::usage::Usage;
 
 /// One increment of a completion, normalized across providers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalEvent {
     /// A chunk of reasoning/thinking text (think models only).
     ReasoningDelta(String),

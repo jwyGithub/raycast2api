@@ -475,7 +475,7 @@ impl StreamEncoder {
 
     /// Close the currently open item (if any), emitting its `*.done` part frames
     /// and `output_item.done`, and recording the finalized item for the response.
-    fn close_current(&mut self) -> Vec<SseFrame> {
+    pub(crate) fn close_current(&mut self) -> Vec<SseFrame> {
         let item = match self.open.take() {
             Some(item) => item,
             None => return Vec::new(),
@@ -706,7 +706,7 @@ impl StreamEncoder {
 }
 
 /// The names of the freeform (`custom`) tools among a request's definitions.
-fn custom_names(tools: &[ToolDef]) -> HashSet<String> {
+pub(crate) fn custom_names(tools: &[ToolDef]) -> HashSet<String> {
     tools
         .iter()
         .filter_map(|tool| match tool {
@@ -726,7 +726,7 @@ fn custom_input(arguments: &str) -> String {
 }
 
 /// Serialize a frame into a named SSE event.
-fn to_event(frame: &SseFrame) -> Result<Event, Infallible> {
+pub(crate) fn to_event(frame: &SseFrame) -> Result<Event, Infallible> {
     Ok(Event::default()
         .event(frame.event)
         .data(frame.data.to_string()))

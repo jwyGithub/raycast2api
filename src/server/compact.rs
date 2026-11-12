@@ -128,7 +128,7 @@ impl SummaryCache {
         list.iter()
             .filter(|c| {
                 now.duration_since(c.created_at) < SUMMARY_CACHE_TTL
-                    && c.covered_messages < total
+                    && c.covered_messages <= total
                     && c.prefix_hash == history_hash_at(c.covered_messages)
             })
             // Longest cover wins: the least leftover work for the delta pass.
@@ -164,11 +164,13 @@ fn hash_messages(messages: &[Message], upto: usize) -> u64 {
 }
 
 /// The outcome of a compaction attempt.
-enum Compaction {
+pub(crate) enum Compaction {
     /// Nothing needed (or possible) — run the request as-is.
     NotNeeded,
-    /// The history was rewritten; run this request instead.
-    Rewritten(Box<CanonicalRequest>),
+    /// History to summarize, excluding the current user turn.
+    Summarize(Vec<Message>),
+    /// The complete historical prefix already has a cached summary.
+    Cached(String),
 }
 
 /// Inspect an incoming request and, when the conversation has outgrown the
@@ -184,9 +186,28 @@ pub async fn maybe_compact(
         Result<String, crate::error::GatewayError>,
     >,
 ) -> Result<CanonicalRequest, crate::error::GatewayError> {
-    match plan(state, &request).await {
+    let plan = plan(state, &request).await;
+    apply(state, request, plan, send).await
+}
+
+pub(crate) async fn apply(
+    state: &SharedState,
+    mut request: CanonicalRequest,
+    plan: Compaction,
+    send: impl FnOnce(
+        CanonicalRequest,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<String, crate::error::GatewayError>,
+    >,
+) -> Result<CanonicalRequest, crate::error::GatewayError> {
+    match plan {
         Compaction::NotNeeded => Ok(request),
-        Compaction::Rewritten(mut rewritten) => {
+        Compaction::Cached(summary) => {
+            request.messages = rebuild(&request.messages, &summary);
+            Ok(request)
+        }
+        Compaction::Summarize(messages) => {
             // The summarization prompt replaces the client's system prompt and
             // tools; the summary call is a plain completion.
             let summary_request = CanonicalRequest {
@@ -195,10 +216,8 @@ pub async fn maybe_compact(
                 max_tokens: None,
                 tools: Vec::new(),
                 tool_choice: None,
-                messages: rewritten
-                    .messages
-                    .iter()
-                    .cloned()
+                messages: messages
+                    .into_iter()
                     .chain(std::iter::once(Message::text(
                         Role::User,
                         SUMMARIZATION_PROMPT,
@@ -215,17 +234,22 @@ pub async fn maybe_compact(
                 );
                 error
             })?;
+            if summary.trim().is_empty() {
+                return Err(crate::error::GatewayError::Upstream {
+                    status: 502,
+                    message: "Compaction returned an empty summary".into(),
+                });
+            }
             let summary_text = format!("{SUMMARY_PREFIX}\n{summary}");
+            let messages = rebuild(&request.messages, &summary_text);
             tracing::info!(
                 model = %request.model,
                 summary_chars = summary.len(),
                 original_messages = request.messages.len(),
-                compacted_messages = rewritten.messages.len(),
+                compacted_messages = messages.len(),
                 "compact: summary completed — history rewritten"
             );
 
-            // Codex rebuild: retained recent user messages + the summary last.
-            rewritten.messages = rebuild(&rewritten.messages, &summary_text);
             state
                 .summary_cache
                 .record(
@@ -235,14 +259,15 @@ pub async fn maybe_compact(
                     summary_text,
                 )
                 .await;
-            Ok(*rewritten)
+            request.messages = messages;
+            Ok(request)
         }
     }
 }
 
 /// Decide whether the request needs compaction, and compute the rewritten
 /// history when it does (without the summary yet).
-async fn plan(state: &SharedState, request: &CanonicalRequest) -> Compaction {
+pub(crate) async fn plan(state: &SharedState, request: &CanonicalRequest) -> Compaction {
     let models = match state.models().await {
         Ok(models) => models,
         Err(_) => return Compaction::NotNeeded,
@@ -310,40 +335,19 @@ async fn plan(state: &SharedState, request: &CanonicalRequest) -> Compaction {
         "compact: TRIGGERED — summarizing conversation prefix"
     );
 
-    // Keep the system prompt and tools — they describe how to *answer*;
-    // only the conversation body is summarized. The summarization call gets
-    // the droppable prefix (minus any prior summary message) plus the delta.
-    let body: Vec<Message> = request.messages[..droppable]
+    if covered == droppable && !previous_summary.is_empty() {
+        return Compaction::Cached(previous_summary);
+    }
+    // Cache offsets refer to the original history, before removing old summaries.
+    let mut messages: Vec<Message> = request.messages[covered..droppable]
         .iter()
         .filter(|m| !(m.role == Role::User && is_summary(m)))
         .cloned()
         .collect();
-    // When a previous summary exists, it already covers `covered` messages;
-    // drop the messages it covers from what we send (cheap approximation: the
-    // filter above already removed the old summary, and the delta beyond it is
-    // everything after the covered prefix).
-    let start = if previous_summary.is_empty() {
-        0
-    } else {
-        covered.min(body.len())
-    };
-    let to_summarize: Vec<Message> = body[start.min(body.len())..].to_vec();
-    if to_summarize.is_empty() {
-        // Everything is already summarized; just keep the summary + last turn.
-        let mut rewritten = request.clone();
-        rewritten.messages = rebuild(&request.messages, &previous_summary);
-        return Compaction::Rewritten(Box::new(rewritten));
-    }
-
-    let mut summarize = request.clone();
-    summarize.messages = to_summarize;
-    // Carry the previous summary in as context for the incremental pass.
     if !previous_summary.is_empty() {
-        summarize
-            .messages
-            .insert(0, Message::text(Role::User, previous_summary));
+        messages.insert(0, Message::text(Role::User, previous_summary));
     }
-    Compaction::Rewritten(Box::new(summarize))
+    Compaction::Summarize(messages)
 }
 
 /// Rebuild the conversation the way Codex's `build_compacted_history` does:
@@ -491,5 +495,125 @@ mod tests {
         });
         let tokens = estimate_request_tokens(&request);
         assert!(tokens > 4); // at least the two 2-token texts plus tool debug
+    }
+    #[tokio::test]
+    async fn compaction_preserves_current_task_and_reuses_exact_cache() {
+        let state = super::super::state::compact_test_state();
+        let mut original = CanonicalRequest::new(Protocol::Responses, "test-model");
+        original.messages = vec![
+            Message::text(Role::User, "old"),
+            Message::text(Role::Assistant, "x".repeat(90_000)),
+            Message::text(Role::User, "CURRENT_TASK"),
+        ];
+        original.system = Some("system".into());
+        original.stream = true;
+        original.max_tokens = Some(123);
+        original.temperature = Some(0.2);
+        original.reasoning_effort = Some(crate::core::request::ReasoningEffort::High);
+        original.tools.push(ToolDef::Remote {
+            name: "tool".into(),
+        });
+        original.tool_choice = Some(crate::core::tools::ToolChoice::Auto);
+        let rewritten = maybe_compact(&state, original.clone(), |summary| {
+            Box::pin(async move {
+                assert_eq!(summary.messages.len(), 3);
+                assert_eq!(summary.messages.last().unwrap().text, SUMMARIZATION_PROMPT);
+                assert!(!summary.messages.iter().any(|m| m.text == "CURRENT_TASK"));
+                assert!(summary.system.is_none());
+                assert!(summary.tools.is_empty());
+                Ok("summary".into())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(rewritten.messages.last().unwrap().text, "CURRENT_TASK");
+        assert_eq!(rewritten.messages.last().unwrap().role, Role::User);
+        assert!(is_summary(
+            &rewritten.messages[rewritten.messages.len() - 2]
+        ));
+        assert_eq!(rewritten.system, original.system);
+        assert_eq!(rewritten.stream, original.stream);
+        assert_eq!(rewritten.max_tokens, original.max_tokens);
+        assert_eq!(rewritten.temperature, original.temperature);
+        assert_eq!(rewritten.reasoning_effort, original.reasoning_effort);
+        assert_eq!(
+            format!("{:?}", rewritten.tools),
+            format!("{:?}", original.tools)
+        );
+        assert_eq!(rewritten.tool_choice, original.tool_choice);
+        let cached = maybe_compact(&state, original, |_| panic!("must reuse complete prefix"))
+            .await
+            .unwrap();
+        assert_eq!(cached.messages.last().unwrap().text, "CURRENT_TASK");
+    }
+
+    #[tokio::test]
+    async fn incremental_slice_uses_original_offsets_before_filtering() {
+        let state = super::super::state::compact_test_state();
+        let mut original = CanonicalRequest::new(Protocol::Responses, "test-model");
+        original.messages = vec![
+            Message::text(Role::User, format!("{SUMMARY_PREFIX}\nold summary")),
+            Message::text(Role::Assistant, "x".repeat(90_000)),
+            Message::text(Role::User, "DELTA_USER"),
+            Message::text(Role::Assistant, "DELTA_ANSWER"),
+            Message::text(Role::User, "CURRENT_TASK"),
+        ];
+        state
+            .summary_cache
+            .record(
+                &original.model,
+                hash_messages(&original.messages, 2),
+                2,
+                "cached summary".into(),
+            )
+            .await;
+        let rewritten = maybe_compact(&state, original, |summary| {
+            Box::pin(async move {
+                let texts: Vec<_> = summary.messages.iter().map(|m| m.text.as_str()).collect();
+                assert_eq!(
+                    texts,
+                    vec![
+                        "cached summary",
+                        "DELTA_USER",
+                        "DELTA_ANSWER",
+                        SUMMARIZATION_PROMPT
+                    ]
+                );
+                Ok("new summary".into())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(rewritten.messages.last().unwrap().text, "CURRENT_TASK");
+    }
+
+    #[tokio::test]
+    async fn failed_or_empty_summary_does_not_poison_cache() {
+        let state = super::super::state::compact_test_state();
+        let mut original = CanonicalRequest::new(Protocol::Responses, "test-model");
+        original.messages = vec![
+            Message::text(Role::Assistant, "x".repeat(90_000)),
+            Message::text(Role::User, "CURRENT_TASK"),
+        ];
+        for empty in [false, true] {
+            let result = maybe_compact(&state, original.clone(), move |_| {
+                Box::pin(async move {
+                    if empty {
+                        Ok("  ".into())
+                    } else {
+                        Err(crate::error::GatewayError::Internal("failed".into()))
+                    }
+                })
+            })
+            .await;
+            assert!(result.is_err());
+            assert!(
+                state
+                    .summary_cache
+                    .lookup(&original.model, |n| hash_messages(&original.messages, n), 1)
+                    .await
+                    .is_none()
+            );
+        }
     }
 }
