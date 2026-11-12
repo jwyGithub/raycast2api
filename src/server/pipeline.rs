@@ -55,7 +55,7 @@ pub(crate) async fn events(
     state: &SharedState,
     request: &CanonicalRequest,
 ) -> Result<impl Stream<Item = CanonicalEvent> + Send + 'static, GatewayError> {
-    let (provider, model) = state.resolve_model(&request.model).await;
+    let (provider, model) = state.resolve_model(&request.model).await?;
     tracing::info!(
         client_model = %request.model,
         upstream = %format!("{provider}/{model}"),
@@ -65,15 +65,29 @@ pub(crate) async fn events(
     );
     let raycast_request = build_chat_request(request, &provider, &model);
 
-    let response = state.client.send_chat(&raycast_request).await?;
-    state.health.mark_working();
+    let response = match state.client.send_chat(&raycast_request).await {
+        Ok(response) => response,
+        Err(error) => {
+            state.health.mark_failed();
+            return Err(error);
+        }
+    };
 
+    let health_state = state.clone();
     Ok(canonical_events_with_retry(
         response,
         state.client.clone(),
         raycast_request,
         state.log.clone(),
-    ))
+    )
+    .map(move |event| {
+        match &event {
+            CanonicalEvent::Finish { .. } => health_state.health.mark_working(),
+            CanonicalEvent::Error { .. } => health_state.health.mark_failed(),
+            _ => {}
+        }
+        event
+    }))
 }
 
 /// Consume the whole canonical event stream, folding it into a single

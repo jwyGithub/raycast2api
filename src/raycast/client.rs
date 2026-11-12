@@ -14,8 +14,8 @@ use crate::config::{
     RAYCAST_AI_CREDITS_URL, RAYCAST_API_URL, RAYCAST_ME_URL, RAYCAST_MODELS_URL,
     RAYCAST_TRIAL_STATUS_URL, Settings, USER_AGENT,
 };
-use crate::debug;
 use crate::error::GatewayError;
+use crate::log::context as debug;
 use crate::log::store::RequestLogStore;
 use crate::signature::calculate_signature_v2;
 use crate::util::unix_secs;
@@ -29,10 +29,10 @@ use super::wire::{
 /// Cheap-to-clone handle to the Raycast backend (wraps a shared `reqwest::Client`).
 #[derive(Clone)]
 pub struct RaycastClient {
-    http: Client,
+    pub(super) http: Client,
     /// 代理客户端链,与 `settings.proxies` 一一对应;直连失败时按顺序换用。
-    proxies: Vec<(String, Client)>,
-    settings: Arc<Settings>,
+    pub(super) proxies: Vec<(String, Client)>,
+    pub(super) settings: Arc<Settings>,
     /// 账号池:每次请求轮询取一个可用账号的 token。
     accounts: Arc<AccountStore>,
     /// 请求日志存储:补写发给上游的请求体。
@@ -55,6 +55,8 @@ impl RaycastClient {
                     .unwrap_or_else(|e| panic!("invalid proxy '{url}': {e}"));
                 let client = Client::builder()
                     .proxy(proxy)
+                    .connect_timeout(settings.upstream_timeout)
+                    .read_timeout(settings.upstream_timeout)
                     .build()
                     .unwrap_or_else(|e| panic!("failed to build proxy client '{url}': {e}"));
                 (url.clone(), client)
@@ -69,14 +71,8 @@ impl RaycastClient {
         }
     }
 
-    /// 账号池(刷新任务与测试使用)。
-    pub fn accounts(&self) -> &Arc<AccountStore> {
-        &self.accounts
-    }
-
-    /// 共享 HTTP 客户端(含代理配置):供 token 自动刷新等复用主链路通道。
-    pub fn http(&self) -> &Client {
-        &self.http
+    pub(crate) fn upstream_timeout(&self) -> std::time::Duration {
+        self.settings.upstream_timeout
     }
 
     /// Common headers shared by every request. When `signature` is `Some`, the
@@ -127,13 +123,31 @@ impl RaycastClient {
         let mut last_error: Option<GatewayError> = None;
 
         for _ in 0..attempts {
-            let account = self.accounts.next_available()?;
+            let mut account = match self.accounts.next_available() {
+                Ok(account) => account,
+                Err(error) => return Err(last_error.unwrap_or(error)),
+            };
             tracing::info!(account = %account.email, tag = ?account.tag, "→ using account");
-            match self.try_chat_with_fallback(&account, &body).await {
+            let result = self.try_chat(&account, &body).await;
+            let result = if matches!(result, Err(GatewayError::TokenInvalid { .. })) {
+                match crate::account::token_renewal::auto_renew(&self.accounts, self, &account)
+                    .await
+                {
+                    Ok(token) => {
+                        account.access_token = token;
+                        self.try_chat(&account, &body).await
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                result
+            };
+            match result {
                 Ok(response) => {
                     // 上游部分错误(限额)藏在 200 SSE 流内:偷看首 payload,
                     // 是限额错误则冷却该账号并换号重试,否则把流原样还给调用方。
-                    let (peeked, response) = peek_first_payload(response).await;
+                    let (peeked, response) =
+                        peek_first_payload(response, self.settings.upstream_timeout).await;
                     if let Some(err) = peeked {
                         let message = err.message();
                         let status = if err.parsed.http_status != 0 {
@@ -215,43 +229,10 @@ impl RaycastClient {
                     }
                     return Ok(response);
                 }
-                // token 失效:有 refresh_token 就自动刷新重试,
-                // 刷新失败(或没有 refresh_token)才摘号换下一个。
-                Err(GatewayError::TokenInvalid { .. }) => {
-                    match self.try_refresh_account(&account).await {
-                        Ok(new_token) => {
-                            // 刷新成功:DB 里 token 已更新,本账号立即用新 token 重试。
-                            let mut fresh = account.clone();
-                            fresh.access_token = new_token;
-                            tracing::info!(account = %account.email, "→ token refreshed, retrying with new token");
-                            match self.try_chat_with_fallback(&fresh, &body).await {
-                                Ok(response) => return Ok(response),
-                                Err(err @ GatewayError::TokenInvalid { .. }) => {
-                                    // 新 token 也失效:账号本身有问题,摘号。
-                                    tracing::warn!(account = %account.email, "→ refreshed token still invalid, removing account");
-                                    self.accounts.mark_unavailable(
-                                        &account.email,
-                                        "刷新后 token 仍失效 (401)",
-                                    );
-                                    last_error = Some(err);
-                                }
-                                Err(err) => {
-                                    tracing::error!(account = %account.email, "→ upstream request failed after refresh: {err}");
-                                    return Err(err);
-                                }
-                            }
-                        }
-                        Err(err @ GatewayError::TokenInvalid { .. }) => {
-                            tracing::warn!(account = %account.email, "→ token invalid, no refresh possible, removing account and rotating");
-                            self.accounts
-                                .mark_unavailable(&account.email, "token 失效 (401)");
-                            last_error = Some(err);
-                        }
-                        Err(err) => {
-                            tracing::error!(account = %account.email, "→ upstream request failed: {err}");
-                            return Err(err);
-                        }
-                    }
+                Err(err @ GatewayError::TokenInvalid { .. }) => {
+                    self.accounts
+                        .mark_unavailable(&account.email, "token 失效，无法续期");
+                    last_error = Some(err);
                 }
                 Err(err) => {
                     // HTTP 层错误(非流内):若为账号本身不可用(风控 403 /
@@ -282,120 +263,11 @@ impl RaycastClient {
         )))
     }
 
-    /// 401 自动恢复:用账号的 refresh_token 换新 token 并原子写回 DB。
-    /// 返回 `Ok(new_token)` 表示已刷新且入库,调用方可立即用新 token 重试;
-    /// `Err(GatewayError::TokenInvalid{..})` = 没有 refresh_token 或已作废
-    /// (`invalid_grant`,账号只能重新走注册授权);`Err(其他)` = 落盘/网络异常。
-    async fn try_refresh_account(&self, account: &AccountRow) -> Result<String, GatewayError> {
-        let Some(refresh_token) = crate::account::token_renewal::extract_refresh_token(account)
-        else {
-            return Err(GatewayError::TokenInvalid {
-                message: "no refresh_token stored for this account".into(),
-            });
-        };
-        crate::account::token_renewal::renew_and_persist(
-            &self.http,
-            &self.accounts,
-            &account.email,
-            &refresh_token,
-        )
-        .await
-        .map_err(|()| {
-            // 刷新失败的细分原因已由 renew_and_persist 记日志;这里统一按
-            // token 失效语义上报,让 send_chat 走摘号换号路径。
-            GatewayError::TokenInvalid {
-                message: "refresh_token is no longer valid (invalid_grant)".into(),
-            }
-        })
-    }
-
-    /// 上游通道选择:由 `proxies_enabled` 决定代理与直连的主次。
-    /// - `proxies_enabled = true`:代理优先,按顺序逐个试,网络层失败
-    ///   (连接不上/超时,即 `GatewayError::Internal`)换下一个;全部网络
-    ///   失败才回退直连。
-    /// - `proxies_enabled = false`:直连优先,网络失败后按顺序换代理。
-    ///   HTTP 4xx/5xx 两种模式下都不触发换通道(那是上游的业务响应,换通道
-    ///   没用),直接返回。未配置代理 = 纯直连。
-    async fn try_chat_with_fallback(
-        &self,
-        account: &AccountRow,
-        body: &str,
-    ) -> Result<reqwest::Response, GatewayError> {
-        if self.settings.proxies_enabled {
-            self.proxy_first(account, body).await
-        } else {
-            self.direct_first(account, body).await
-        }
-    }
-
-    /// 代理优先:逐个试代理,全挂回退直连。
-    async fn proxy_first(
-        &self,
-        account: &AccountRow,
-        body: &str,
-    ) -> Result<reqwest::Response, GatewayError> {
-        let mut last_err: Option<GatewayError> = None;
-        for (url, client) in &self.proxies {
-            match self.try_chat(client, account, body, url).await {
-                Ok(response) => return Ok(response),
-                Err(err @ GatewayError::Internal(_)) => {
-                    tracing::warn!(proxy = %url, account = %account.email, "→ proxy request failed, trying next channel: {err}");
-                    last_err = Some(err);
-                }
-                // 经代理拿到了上游响应(含 HTTP 错误状态):比网络错误更有价值,直接返回。
-                Err(err) => return Err(err),
-            }
-        }
-        if let Some(err) = &last_err {
-            tracing::warn!(
-                account = %account.email,
-                last_error = %err,
-                "→ all proxies failed at network level, falling back to direct"
-            );
-        }
-        self.try_chat(&self.http, account, body, "direct").await
-    }
-
-    /// 直连优先:直连网络失败后逐个换代理。
-    async fn direct_first(
-        &self,
-        account: &AccountRow,
-        body: &str,
-    ) -> Result<reqwest::Response, GatewayError> {
-        let mut last_err = match self.try_chat(&self.http, account, body, "direct").await {
-            Ok(response) => return Ok(response),
-            Err(err @ GatewayError::Internal(_)) if !self.proxies.is_empty() => err,
-            Err(err) => return Err(err),
-        };
-
-        for (url, client) in &self.proxies {
-            tracing::warn!(
-                proxy = %url,
-                account = %account.email,
-                "→ direct connection failed, retrying via proxy"
-            );
-            match self.try_chat(client, account, body, url).await {
-                Ok(response) => return Ok(response),
-                Err(err @ GatewayError::Internal(_)) => {
-                    tracing::warn!(proxy = %url, "→ proxy request failed: {err}");
-                    last_err = err;
-                }
-                // 经代理拿到了上游响应(含 HTTP 错误状态):比网络错误更有价值,直接返回。
-                Err(err) => return Err(err),
-            }
-        }
-        Err(last_err)
-    }
-
     /// 单次上游请求(签名 + 发送 + 状态校验),供 [`Self::send_chat`] 轮换调用。
-    /// `channel` 是本通道的标签("direct" 或代理 URL),成功后登记进
-    /// request-id 通道表,供中间件的完成 trace 打印走线信息。
     async fn try_chat(
         &self,
-        http: &Client,
         account: &AccountRow,
         body: &str,
-        channel: &str,
     ) -> Result<reqwest::Response, GatewayError> {
         let timestamp = unix_secs().to_string();
         let signature = calculate_signature_v2(
@@ -412,44 +284,30 @@ impl RaycastClient {
 
         // Record the outgoing upstream body in the request-log store,
         // correlated to the inbound request via the task-local id set by
-        // `log_request`. Fire-and-forget.
+        // `log_request`. Best-effort synchronous capture in a blocking section.
         self.log.update_upstream(
             &debug::current_request_id(),
             &debug::body_to_value(body.as_bytes()),
         );
 
-        let response = http
+        let request = self
+            .http
             .post(RAYCAST_API_URL)
             .headers(headers)
             .body(body.to_owned())
-            .send()
-            .await?;
+            .build()?;
+        let response = self.send(request).await?;
 
         let response = ensure_success(response).await?;
-        // 请求成功送达上游:登记所用通道,完成 trace 里打印("direct" 或代理
-        // URL)。配置了代理才有意义 —— "direct" 且无代理时不登记、不打印。
-        let request_id = debug::current_request_id();
-        if request_id != "-" && !(channel == "direct" && self.proxies.is_empty()) {
-            debug::record_channel(&request_id, channel);
-        }
         Ok(response)
     }
 
     /// Fetch the raw list of models available to the account.
     pub async fn fetch_models(&self) -> Result<Vec<RaycastRawModel>, GatewayError> {
         let account = self.accounts.next_available()?;
-        let mut headers = self.base_headers(&account.access_token, None, None);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self
-            .http
-            .get(RAYCAST_MODELS_URL)
-            .headers(headers)
-            .send()
+        let parsed: RaycastModelsResponse = self
+            .get_json(RAYCAST_MODELS_URL, &account.access_token)
             .await?;
-
-        let response = ensure_success(response).await?;
-        let parsed: RaycastModelsResponse = response.json().await?;
         Ok(parsed.models)
     }
 
@@ -494,7 +352,13 @@ impl RaycastClient {
     ) -> Result<T, GatewayError> {
         let mut headers = self.base_headers(token, None, None);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
-        let response = self.http.get(url).headers(headers).send().await?;
+        let request = self
+            .http
+            .get(url)
+            .headers(headers)
+            .timeout(self.settings.upstream_timeout)
+            .build()?;
+        let response = self.send(request).await?;
         let response = ensure_success(response).await?;
         Ok(response.json().await?)
     }

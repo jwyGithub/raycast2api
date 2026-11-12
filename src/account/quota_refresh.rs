@@ -36,6 +36,9 @@ pub enum AvailabilityDecision {
 /// 耗尽 —— 不能据此摘号,保持 `Keep` 交给冷却/试用到期逻辑处理。
 /// `has_pro_features` 未知(`None`)时维持旧行为,按 credits 判定。
 pub fn decide(info: &AccountInfo) -> AvailabilityDecision {
+    if trial_expired(info) {
+        return AvailabilityDecision::MarkUnavailable("试用已到期");
+    }
     if info.has_pro_features == Some(false) {
         return AvailabilityDecision::Keep;
     }
@@ -101,15 +104,9 @@ async fn refresh_account(
         // 401:token 失效 —— 有 refresh_token 就自动换新重试一次,
         // 换新失败(invalid_grant/网络)才摘号。
         Ok(None) => {
-            match crate::account::token_renewal::auto_renew(store, client.http(), account).await {
-                Ok(true) => {
+            match crate::account::token_renewal::auto_renew(store, client, account).await {
+                Ok(token) => {
                     // 新 token 生效:重查一次额度信息,走同一套决策。
-                    let token = store
-                        .get(&account.email)
-                        .ok()
-                        .flatten()
-                        .map(|r| r.access_token)
-                        .unwrap_or_else(|| account.access_token.clone());
                     match fetch_info(client, &token).await {
                         Ok(Some(info)) => {
                             store.update_info(&account.email, &info)?;
@@ -132,25 +129,14 @@ async fn refresh_account(
                                 message: "token 自动刷新后仍失效 (401)".into(),
                             })
                         }
-                        Err(err) => {
-                            store.mark_unavailable(&account.email, "token 自动刷新后查询失败");
-                            Err(record_refresh_error(store, &account.email, err))
-                        }
+                        Err(err) => Err(record_refresh_error(store, &account.email, err)),
                     }
                 }
-                Ok(false) => {
-                    store.mark_unavailable(&account.email, "token 失效 (401),没有 refresh_token");
-                    Err(GatewayError::TokenInvalid {
-                        message: "token 失效 (401),且账号没有 refresh_token".into(),
-                    })
+                Err(err @ GatewayError::TokenInvalid { .. }) => {
+                    store.mark_unavailable(&account.email, "token 失效，无法续期");
+                    Err(err)
                 }
-                // 刷新失败:摘号,原因已记日志。
-                Err(()) => {
-                    store.mark_unavailable(&account.email, "token 失效 (401),自动刷新失败");
-                    Err(GatewayError::TokenInvalid {
-                        message: "token 失效 (401),自动刷新失败".into(),
-                    })
-                }
+                Err(err) => Err(err),
             }
         }
         Err(err) => Err(record_refresh_error(store, &account.email, err)),
@@ -174,10 +160,6 @@ fn apply_decision(store: &Arc<AccountStore>, email: &str, info: &AccountInfo) {
     match decide(info) {
         AvailabilityDecision::MarkUnavailable(reason) => {
             store.mark_unavailable(email, reason);
-        }
-        // 试用天数用尽:额度即使有剩余也不再续,摘除。
-        AvailabilityDecision::MarkAvailable if trial_expired(info) => {
-            store.mark_unavailable(email, "试用已到期");
         }
         AvailabilityDecision::MarkAvailable => {
             store.set_available(email, true, None);
@@ -242,6 +224,24 @@ mod tests {
             remaining_credits: remaining,
             ..AccountInfo::default()
         }
+    }
+
+    #[test]
+    fn expired_trial_is_removed_even_without_pro_credits() {
+        let store = Arc::new(AccountStore::new(crate::db::Db::open(":memory:").unwrap()));
+        let record = serde_json::from_value(
+            serde_json::json!({"user":{"email":"trial@test"},"access_token":"rca_trial"}),
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        let info = AccountInfo {
+            has_pro_features: Some(false),
+            remaining_credits: Some(0.0),
+            trial_days_left: Some(0),
+            ..Default::default()
+        };
+        apply_decision(&store, "trial@test", &info);
+        assert!(!store.get("trial@test").unwrap().unwrap().available);
     }
 
     #[test]

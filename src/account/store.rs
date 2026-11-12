@@ -190,6 +190,9 @@ fn migrate(conn: &mut diesel::sqlite::SqliteConnection) {
 }
 
 pub struct AccountStore {
+    renewal_locks: std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+    >,
     db: Db,
     /// 轮询游标:最后选中的行 id。取 id 更大的下一个可用行(没有则回卷),
     /// 这样摘除某账号后轮询会自然落到它的后继,而不是跳回头部。
@@ -199,70 +202,86 @@ pub struct AccountStore {
 impl AccountStore {
     /// 构造并建表(幂等),并做既有库的增量迁移。
     pub fn new(db: Db) -> Self {
-        {
-            let mut conn = db.lock();
-            conn.batch_execute(SCHEMA).expect("create accounts schema");
-            migrate(&mut conn);
+        crate::db::blocking(|| {
+            {
+                let mut conn = db.lock();
+                conn.batch_execute(SCHEMA).expect("create accounts schema");
+                migrate(&mut conn);
+            }
+            Self {
+                db,
+                last_id: AtomicI64::new(0),
+                renewal_locks: Default::default(),
+            }
+        })
+    }
+
+    pub(crate) fn renewal_lock(&self, email: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.renewal_locks.lock().expect("renewal locks poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(email).and_then(std::sync::Weak::upgrade) {
+            return lock;
         }
-        Self {
-            db,
-            last_id: AtomicI64::new(0),
-        }
+        let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(email.to_owned(), std::sync::Arc::downgrade(&lock));
+        lock
     }
 
     /// 按 email upsert;三态语义见 [`UpsertOutcome`]。
     pub fn upsert(&self, record: &AccountRecord) -> Result<UpsertOutcome, GatewayError> {
-        let email = record
-            .email()
-            .ok_or_else(|| GatewayError::BadRequest("account entry has no user.email".into()))?;
-        let user_json = serde_json::to_string(&record.user).unwrap_or_default();
-        let now = unix_secs().to_string();
-        let mut conn = self.db.lock();
-        let existing = accounts::table
-            .filter(accounts::email.eq(&email))
-            .select((accounts::access_token, accounts::refresh_token))
-            .first::<(String, Option<String>)>(&mut *conn)
-            .optional()
-            .map_err(sql_err)?;
+        crate::db::blocking(|| {
+            let email = record.email().ok_or_else(|| {
+                GatewayError::BadRequest("account entry has no user.email".into())
+            })?;
+            let user_json = serde_json::to_string(&record.user).unwrap_or_default();
+            let now = unix_secs().to_string();
+            let mut conn = self.db.lock();
+            let existing = accounts::table
+                .filter(accounts::email.eq(&email))
+                .select((accounts::access_token, accounts::refresh_token))
+                .first::<(String, Option<String>)>(&mut *conn)
+                .optional()
+                .map_err(sql_err)?;
 
-        match existing {
-            None => {
-                diesel::insert_into(accounts::table)
-                    .values(&NewAccount {
-                        email: &email,
-                        tag: record.tag.as_deref(),
-                        access_token: &record.access_token,
-                        refresh_token: record.refresh_token.as_deref(),
-                        obtained_at: record.obtained_at.as_deref(),
-                        user_json: &user_json,
-                        created_at: &now,
-                        updated_at: &now,
-                    })
-                    .execute(&mut *conn)
-                    .map_err(sql_err)?;
-                Ok(UpsertOutcome::Inserted)
+            match existing {
+                None => {
+                    diesel::insert_into(accounts::table)
+                        .values(&NewAccount {
+                            email: &email,
+                            tag: record.tag.as_deref(),
+                            access_token: &record.access_token,
+                            refresh_token: record.refresh_token.as_deref(),
+                            obtained_at: record.obtained_at.as_deref(),
+                            user_json: &user_json,
+                            created_at: &now,
+                            updated_at: &now,
+                        })
+                        .execute(&mut *conn)
+                        .map_err(sql_err)?;
+                    Ok(UpsertOutcome::Inserted)
+                }
+                Some((access, refresh))
+                    if access != record.access_token || refresh != record.refresh_token =>
+                {
+                    // token 变了:更新全部业务字段并恢复可用(新 token 可能已复活)。
+                    diesel::update(accounts::table.filter(accounts::email.eq(&email)))
+                        .set((
+                            accounts::tag.eq(record.tag.as_deref()),
+                            accounts::access_token.eq(&record.access_token),
+                            accounts::refresh_token.eq(record.refresh_token.as_deref()),
+                            accounts::obtained_at.eq(record.obtained_at.as_deref()),
+                            accounts::user_json.eq(&user_json),
+                            accounts::available.eq(1),
+                            accounts::unavailable_reason.eq(None::<String>),
+                            accounts::updated_at.eq(&now),
+                        ))
+                        .execute(&mut *conn)
+                        .map_err(sql_err)?;
+                    Ok(UpsertOutcome::Updated)
+                }
+                Some(_) => Ok(UpsertOutcome::Unchanged),
             }
-            Some((access, refresh))
-                if access != record.access_token || refresh != record.refresh_token =>
-            {
-                // token 变了:更新全部业务字段并恢复可用(新 token 可能已复活)。
-                diesel::update(accounts::table.filter(accounts::email.eq(&email)))
-                    .set((
-                        accounts::tag.eq(record.tag.as_deref()),
-                        accounts::access_token.eq(&record.access_token),
-                        accounts::refresh_token.eq(record.refresh_token.as_deref()),
-                        accounts::obtained_at.eq(record.obtained_at.as_deref()),
-                        accounts::user_json.eq(&user_json),
-                        accounts::available.eq(1),
-                        accounts::unavailable_reason.eq(None::<String>),
-                        accounts::updated_at.eq(&now),
-                    ))
-                    .execute(&mut *conn)
-                    .map_err(sql_err)?;
-                Ok(UpsertOutcome::Updated)
-            }
-            Some(_) => Ok(UpsertOutcome::Unchanged),
-        }
+        })
     }
 
     /// 全部账号(含不可用的;refresh 需要它们的 token)。
@@ -272,189 +291,205 @@ impl AccountStore {
         page_size: Option<u32>,
         status: Option<&str>,
     ) -> Result<AccountList, GatewayError> {
-        let mut conn = self.db.lock();
-        let status = status.filter(|value| !value.is_empty() && *value != "all");
-        if status.is_some_and(|value| !matches!(value, "available" | "cooldown" | "unavailable")) {
-            return Err(GatewayError::BadRequest(
-                "status must be one of all, available, cooldown, unavailable".into(),
-            ));
-        }
-        let now = unix_secs() as i64;
-        let mut query = accounts::table.into_boxed::<Sqlite>();
-        let mut count_query = accounts::table.into_boxed::<Sqlite>();
-        match status {
-            Some("available") => {
-                let filter = accounts::available.eq(1).and(
-                    accounts::cooldown_until
-                        .is_null()
-                        .or(accounts::cooldown_until.le(now)),
-                );
-                query = query.filter(filter);
-                count_query = count_query.filter(filter);
+        crate::db::blocking(|| {
+            let mut conn = self.db.lock();
+            let status = status.filter(|value| !value.is_empty() && *value != "all");
+            if status
+                .is_some_and(|value| !matches!(value, "available" | "cooldown" | "unavailable"))
+            {
+                return Err(GatewayError::BadRequest(
+                    "status must be one of all, available, cooldown, unavailable".into(),
+                ));
             }
-            Some("cooldown") => {
-                let filter = accounts::available
-                    .eq(1)
-                    .and(accounts::cooldown_until.gt(now));
-                query = query.filter(filter);
-                count_query = count_query.filter(filter);
+            let now = unix_secs() as i64;
+            let mut query = accounts::table.into_boxed::<Sqlite>();
+            let mut count_query = accounts::table.into_boxed::<Sqlite>();
+            match status {
+                Some("available") => {
+                    let filter = accounts::available.eq(1).and(
+                        accounts::cooldown_until
+                            .is_null()
+                            .or(accounts::cooldown_until.le(now)),
+                    );
+                    query = query.filter(filter);
+                    count_query = count_query.filter(filter);
+                }
+                Some("cooldown") => {
+                    let filter = accounts::available
+                        .eq(1)
+                        .and(accounts::cooldown_until.gt(now));
+                    query = query.filter(filter);
+                    count_query = count_query.filter(filter);
+                }
+                Some("unavailable") => {
+                    query = query.filter(accounts::available.eq(0));
+                    count_query = count_query.filter(accounts::available.eq(0));
+                }
+                _ => {}
             }
-            Some("unavailable") => {
-                query = query.filter(accounts::available.eq(0));
-                count_query = count_query.filter(accounts::available.eq(0));
+            if let (Some(page), Some(page_size)) = (page, page_size) {
+                let total = count_query
+                    .count()
+                    .get_result::<i64>(&mut *conn)
+                    .map_err(sql_err)? as u64;
+                let rows = query
+                    .order(accounts::id.asc())
+                    .limit(i64::from(page_size))
+                    .offset(i64::from(page - 1) * i64::from(page_size))
+                    .select(StoredAccount::as_select())
+                    .load::<StoredAccount>(&mut *conn)
+                    .map_err(sql_err)?
+                    .into_iter()
+                    .map(AccountRow::from)
+                    .collect();
+                Ok(AccountList::Page(Page::new(rows, total, page, page_size)))
+            } else {
+                let rows = query
+                    .order(accounts::id.asc())
+                    .select(StoredAccount::as_select())
+                    .load::<StoredAccount>(&mut *conn)
+                    .map_err(sql_err)?
+                    .into_iter()
+                    .map(AccountRow::from)
+                    .collect();
+                Ok(AccountList::All(rows))
             }
-            _ => {}
-        }
-        if let (Some(page), Some(page_size)) = (page, page_size) {
-            let total = count_query
-                .count()
-                .get_result::<i64>(&mut *conn)
-                .map_err(sql_err)? as u64;
-            let rows = query
-                .order(accounts::id.asc())
-                .limit(i64::from(page_size))
-                .offset(i64::from(page - 1) * i64::from(page_size))
-                .select(StoredAccount::as_select())
-                .load::<StoredAccount>(&mut *conn)
-                .map_err(sql_err)?
-                .into_iter()
-                .map(AccountRow::from)
-                .collect();
-            Ok(AccountList::Page(Page::new(rows, total, page, page_size)))
-        } else {
-            let rows = query
-                .order(accounts::id.asc())
-                .select(StoredAccount::as_select())
-                .load::<StoredAccount>(&mut *conn)
-                .map_err(sql_err)?
-                .into_iter()
-                .map(AccountRow::from)
-                .collect();
-            Ok(AccountList::All(rows))
-        }
+        })
     }
 
     pub fn counts(&self) -> Result<(u64, u64, u64, u64), GatewayError> {
-        let now = unix_secs() as i64;
-        let mut conn = self.db.lock();
-        let total = accounts::table
-            .count()
-            .get_result::<i64>(&mut *conn)
-            .map_err(sql_err)? as u64;
-        let available = accounts::table
-            .filter(
-                accounts::available.eq(1).and(
-                    accounts::cooldown_until
-                        .is_null()
-                        .or(accounts::cooldown_until.le(now)),
-                ),
-            )
-            .count()
-            .get_result::<i64>(&mut *conn)
-            .map_err(sql_err)? as u64;
-        let cooldown = accounts::table
-            .filter(
-                accounts::available
-                    .eq(1)
-                    .and(accounts::cooldown_until.gt(now)),
-            )
-            .count()
-            .get_result::<i64>(&mut *conn)
-            .map_err(sql_err)? as u64;
-        let unavailable = accounts::table
-            .filter(accounts::available.eq(0))
-            .count()
-            .get_result::<i64>(&mut *conn)
-            .map_err(sql_err)? as u64;
-        Ok((total, available, cooldown, unavailable))
+        crate::db::blocking(|| {
+            let now = unix_secs() as i64;
+            let mut conn = self.db.lock();
+            let total = accounts::table
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .map_err(sql_err)? as u64;
+            let available = accounts::table
+                .filter(
+                    accounts::available.eq(1).and(
+                        accounts::cooldown_until
+                            .is_null()
+                            .or(accounts::cooldown_until.le(now)),
+                    ),
+                )
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .map_err(sql_err)? as u64;
+            let cooldown = accounts::table
+                .filter(
+                    accounts::available
+                        .eq(1)
+                        .and(accounts::cooldown_until.gt(now)),
+                )
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .map_err(sql_err)? as u64;
+            let unavailable = accounts::table
+                .filter(accounts::available.eq(0))
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .map_err(sql_err)? as u64;
+            Ok((total, available, cooldown, unavailable))
+        })
     }
 
     /// 导出可直接提交给 POST /v1/accounts/create 的原始账号凭据。
     pub fn export_records(&self) -> Result<Vec<AccountRecord>, GatewayError> {
-        let mut conn = self.db.lock();
-        accounts::table
-            .select((
-                accounts::user_json,
-                accounts::tag,
-                accounts::access_token,
-                accounts::refresh_token,
-                accounts::obtained_at,
-            ))
-            .order(accounts::id.asc())
-            .load::<(
-                Option<String>,
-                Option<String>,
-                String,
-                Option<String>,
-                Option<String>,
-            )>(&mut *conn)
-            .map_err(sql_err)?
-            .into_iter()
-            .map(
-                |(user_json, tag, access_token, refresh_token, obtained_at)| {
-                    let user = serde_json::from_str(user_json.as_deref().unwrap_or("{}")).map_err(
-                        |e| {
-                            GatewayError::Internal(format!("account store: invalid user_json: {e}"))
-                        },
-                    )?;
-                    Ok(AccountRecord {
-                        tag,
-                        user,
-                        access_token,
-                        refresh_token,
-                        obtained_at,
-                    })
-                },
-            )
-            .collect()
+        crate::db::blocking(|| {
+            let mut conn = self.db.lock();
+            accounts::table
+                .select((
+                    accounts::user_json,
+                    accounts::tag,
+                    accounts::access_token,
+                    accounts::refresh_token,
+                    accounts::obtained_at,
+                ))
+                .order(accounts::id.asc())
+                .load::<(
+                    Option<String>,
+                    Option<String>,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                )>(&mut *conn)
+                .map_err(sql_err)?
+                .into_iter()
+                .map(
+                    |(user_json, tag, access_token, refresh_token, obtained_at)| {
+                        let user = serde_json::from_str(user_json.as_deref().unwrap_or("{}"))
+                            .map_err(|e| {
+                                GatewayError::Internal(format!(
+                                    "account store: invalid user_json: {e}"
+                                ))
+                            })?;
+                        Ok(AccountRecord {
+                            tag,
+                            user,
+                            access_token,
+                            refresh_token,
+                            obtained_at,
+                        })
+                    },
+                )
+                .collect()
+        })
     }
 
     /// 按 email 取单个账号;不存在返回 `None`。
     pub fn get(&self, email: &str) -> Result<Option<AccountRow>, GatewayError> {
-        let mut conn = self.db.lock();
-        accounts::table
-            .filter(accounts::email.eq(email))
-            .select(StoredAccount::as_select())
-            .first::<StoredAccount>(&mut *conn)
-            .optional()
-            .map(|row| row.map(AccountRow::from))
-            .map_err(sql_err)
+        crate::db::blocking(|| {
+            let mut conn = self.db.lock();
+            accounts::table
+                .filter(accounts::email.eq(email))
+                .select(StoredAccount::as_select())
+                .first::<StoredAccount>(&mut *conn)
+                .optional()
+                .map(|row| row.map(AccountRow::from))
+                .map_err(sql_err)
+        })
     }
 
     /// 当前可选(未摘除、不在冷却)的账号数,作为 `send_chat` 换号重试的上限。
     pub fn count_available(&self) -> usize {
-        let now = unix_secs() as i64;
-        let mut conn = self.db.lock();
-        accounts::table
-            .filter(
-                accounts::available.eq(1).and(
-                    accounts::cooldown_until
-                        .is_null()
-                        .or(accounts::cooldown_until.le(now)),
-                ),
-            )
-            .count()
-            .get_result::<i64>(&mut *conn)
-            .map(|n| n as usize)
-            .unwrap_or(0)
+        crate::db::blocking(|| {
+            let now = unix_secs() as i64;
+            let mut conn = self.db.lock();
+            accounts::table
+                .filter(
+                    accounts::available.eq(1).and(
+                        accounts::cooldown_until
+                            .is_null()
+                            .or(accounts::cooldown_until.le(now)),
+                    ),
+                )
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .map(|n| n as usize)
+                .unwrap_or(0)
+        })
     }
 
     /// 按邮箱和/或状态删除;返回删除行数。
     pub fn delete(&self, email: Option<&str>, status: Option<&str>) -> Result<usize, GatewayError> {
-        if email.is_none() && status.is_none() {
-            return Err(GatewayError::BadRequest(
-                "email or status is required".into(),
-            ));
-        }
-        if status.is_some_and(|value| !matches!(value, "available" | "cooldown" | "unavailable")) {
-            return Err(GatewayError::BadRequest(
-                "status must be one of available, cooldown, unavailable".into(),
-            ));
-        }
+        crate::db::blocking(|| {
+            if email.is_none() && status.is_none() {
+                return Err(GatewayError::BadRequest(
+                    "email or status is required".into(),
+                ));
+            }
+            if status
+                .is_some_and(|value| !matches!(value, "available" | "cooldown" | "unavailable"))
+            {
+                return Err(GatewayError::BadRequest(
+                    "status must be one of available, cooldown, unavailable".into(),
+                ));
+            }
 
-        let mut conn = self.db.lock();
-        let now = unix_secs() as i64;
-        let n = diesel::sql_query(
+            let mut conn = self.db.lock();
+            let now = unix_secs() as i64;
+            let n = diesel::sql_query(
             "DELETE FROM accounts WHERE (? = 0 OR email = ?) AND (? = 0 OR CASE ? WHEN 'available' THEN available = 1 AND (cooldown_until IS NULL OR cooldown_until <= ?) WHEN 'cooldown' THEN available = 1 AND cooldown_until > ? WHEN 'unavailable' THEN available = 0 ELSE 0 END)",
         )
         .bind::<diesel::sql_types::Bool, _>(email.is_some())
@@ -465,46 +500,49 @@ impl AccountStore {
         .bind::<diesel::sql_types::BigInt, _>(now)
         .execute(&mut *conn)
         .map_err(sql_err)?;
-        Ok(n)
+            Ok(n)
+        })
     }
 
     /// 轮询取下一个可用账号(未摘除且不在限额冷却期);全不可用报
     /// [`GatewayError::NoAccount`]。
     pub fn next_available(&self) -> Result<AccountRow, GatewayError> {
-        let now = unix_secs() as i64;
-        let rows = {
+        crate::db::blocking(|| {
+            let now = unix_secs() as i64;
             let mut conn = self.db.lock();
-            accounts::table
-                .filter(
-                    accounts::available.eq(1).and(
-                        accounts::cooldown_until
-                            .is_null()
-                            .or(accounts::cooldown_until.le(now)),
-                    ),
-                )
-                .order(accounts::id.asc())
-                .select(StoredAccount::as_select())
-                .load::<StoredAccount>(&mut *conn)
-                .map_err(sql_err)?
-                .into_iter()
-                .map(|row| (row.id, AccountRow::from(row)))
-                .collect::<Vec<_>>()
-        };
-        if rows.is_empty() {
-            return Err(GatewayError::NoAccount(
-                "no available Raycast account; add or refresh one via POST /v1/accounts/create"
-                    .into(),
-            ));
-        }
-        let last = self.last_id.load(Ordering::Relaxed);
-        let (id, row) = rows.iter().find(|(id, _)| *id > last).unwrap_or(&rows[0]);
-        self.last_id.store(*id, Ordering::Relaxed);
-        Ok(row.clone())
+            let last = self.last_id.load(Ordering::Relaxed);
+            let mut selected = None;
+            for after in [last, 0] {
+                selected = accounts::table
+                    .filter(
+                        accounts::available.eq(1).and(
+                            accounts::cooldown_until
+                                .is_null()
+                                .or(accounts::cooldown_until.le(now)),
+                        ),
+                    )
+                    .filter(accounts::id.gt(after))
+                    .order(accounts::id.asc())
+                    .select(StoredAccount::as_select())
+                    .first::<StoredAccount>(&mut *conn)
+                    .optional()
+                    .map_err(sql_err)?;
+                if selected.is_some() {
+                    break;
+                }
+            }
+            let row = selected
+                .ok_or_else(|| GatewayError::NoAccount("no available Raycast account".into()))?;
+            self.last_id.store(row.id, Ordering::Relaxed);
+            Ok(AccountRow::from(row))
+        })
     }
 
     /// 摘除(401 / 额度耗尽)。
     pub fn mark_unavailable(&self, email: &str, reason: &str) {
-        self.set_available(email, false, Some(reason));
+        crate::db::blocking(|| {
+            self.set_available(email, false, Some(reason));
+        })
     }
 
     pub fn update_tokens(
@@ -513,91 +551,101 @@ impl AccountStore {
         access_token: &str,
         refresh_token: Option<&str>,
     ) -> Result<bool, GatewayError> {
-        let now = unix_secs().to_string();
-        let mut conn = self.db.lock();
-        let n = if let Some(refresh_token) = refresh_token {
-            diesel::update(accounts::table.filter(accounts::email.eq(email)))
-                .set((
-                    accounts::access_token.eq(access_token),
-                    accounts::refresh_token.eq(refresh_token),
-                    accounts::available.eq(1),
-                    accounts::unavailable_reason.eq(None::<String>),
-                    accounts::updated_at.eq(&now),
-                ))
-                .execute(&mut *conn)
-        } else {
-            diesel::update(accounts::table.filter(accounts::email.eq(email)))
-                .set((
-                    accounts::access_token.eq(access_token),
-                    accounts::available.eq(1),
-                    accounts::unavailable_reason.eq(None::<String>),
-                    accounts::updated_at.eq(&now),
-                ))
-                .execute(&mut *conn)
-        }
-        .map_err(sql_err)?;
-        Ok(n > 0)
+        crate::db::blocking(|| {
+            let now = unix_secs().to_string();
+            let mut conn = self.db.lock();
+            let n = if let Some(refresh_token) = refresh_token {
+                diesel::update(accounts::table.filter(accounts::email.eq(email)))
+                    .set((
+                        accounts::access_token.eq(access_token),
+                        accounts::refresh_token.eq(refresh_token),
+                        accounts::available.eq(1),
+                        accounts::unavailable_reason.eq(None::<String>),
+                        accounts::updated_at.eq(&now),
+                    ))
+                    .execute(&mut *conn)
+            } else {
+                diesel::update(accounts::table.filter(accounts::email.eq(email)))
+                    .set((
+                        accounts::access_token.eq(access_token),
+                        accounts::available.eq(1),
+                        accounts::unavailable_reason.eq(None::<String>),
+                        accounts::updated_at.eq(&now),
+                    ))
+                    .execute(&mut *conn)
+            }
+            .map_err(sql_err)?;
+            Ok(n > 0)
+        })
     }
 
     pub fn reinstate(&self, email: &str) -> Result<bool, GatewayError> {
-        let now = unix_secs().to_string();
-        let mut conn = self.db.lock();
-        let n = diesel::update(accounts::table.filter(accounts::email.eq(email)))
-            .set((
-                accounts::available.eq(1),
-                accounts::unavailable_reason.eq(None::<String>),
-                accounts::cooldown_until.eq(None::<i64>),
-                accounts::updated_at.eq(&now),
-            ))
-            .execute(&mut *conn)
-            .map_err(sql_err)?;
-        Ok(n > 0)
+        crate::db::blocking(|| {
+            let now = unix_secs().to_string();
+            let mut conn = self.db.lock();
+            let n = diesel::update(accounts::table.filter(accounts::email.eq(email)))
+                .set((
+                    accounts::available.eq(1),
+                    accounts::unavailable_reason.eq(None::<String>),
+                    accounts::cooldown_until.eq(None::<i64>),
+                    accounts::updated_at.eq(&now),
+                ))
+                .execute(&mut *conn)
+                .map_err(sql_err)?;
+            Ok(n > 0)
+        })
     }
 
     pub fn mark_cooldown(&self, email: &str, until_unix_secs: i64, reason: &str) {
-        let mut conn = self.db.lock();
-        let _ = diesel::update(accounts::table.filter(accounts::email.eq(email)))
-            .set((
-                accounts::cooldown_until.eq(Some(until_unix_secs)),
-                accounts::unavailable_reason.eq(Some(reason)),
-                accounts::updated_at.eq(unix_secs().to_string()),
-            ))
-            .execute(&mut *conn);
+        crate::db::blocking(|| {
+            let mut conn = self.db.lock();
+            let _ = diesel::update(accounts::table.filter(accounts::email.eq(email)))
+                .set((
+                    accounts::cooldown_until.eq(Some(until_unix_secs)),
+                    accounts::unavailable_reason.eq(Some(reason)),
+                    accounts::updated_at.eq(unix_secs().to_string()),
+                ))
+                .execute(&mut *conn);
+        })
     }
 
     pub fn set_available(&self, email: &str, available: bool, reason: Option<&str>) {
-        let now = unix_secs().to_string();
-        let mut conn = self.db.lock();
-        let _ = diesel::update(accounts::table.filter(accounts::email.eq(email)))
-            .set((
-                accounts::available.eq(i32::from(available)),
-                accounts::unavailable_reason.eq(reason),
-                accounts::updated_at.eq(now),
-            ))
-            .execute(&mut *conn);
+        crate::db::blocking(|| {
+            let now = unix_secs().to_string();
+            let mut conn = self.db.lock();
+            let _ = diesel::update(accounts::table.filter(accounts::email.eq(email)))
+                .set((
+                    accounts::available.eq(i32::from(available)),
+                    accounts::unavailable_reason.eq(reason),
+                    accounts::updated_at.eq(now),
+                ))
+                .execute(&mut *conn);
+        })
     }
 
     pub fn update_info(&self, email: &str, info: &AccountInfo) -> Result<(), GatewayError> {
-        let now = unix_secs().to_string();
-        let mut conn = self.db.lock();
-        diesel::update(accounts::table.filter(accounts::email.eq(email)))
-            .set((
-                accounts::has_pro_features.eq(info.has_pro_features.map(i32::from)),
-                accounts::tier.eq(info.tier.as_deref()),
-                accounts::sub_status.eq(info.sub_status.as_deref()),
-                accounts::trial_days_left.eq(info.trial_days_left),
-                accounts::current_period_end.eq(info.current_period_end),
-                accounts::trial_requests_per_hour.eq(info.trial_requests_per_hour),
-                accounts::remaining_credits.eq(info.remaining_credits),
-                accounts::total_credits.eq(info.total_credits),
-                accounts::remaining_usd.eq(info.remaining_usd),
-                accounts::next_credits_at.eq(info.next_credits_at.as_deref()),
-                accounts::info_fetched_at.eq(&now),
-                accounts::updated_at.eq(&now),
-            ))
-            .execute(&mut *conn)
-            .map_err(sql_err)?;
-        Ok(())
+        crate::db::blocking(|| {
+            let now = unix_secs().to_string();
+            let mut conn = self.db.lock();
+            diesel::update(accounts::table.filter(accounts::email.eq(email)))
+                .set((
+                    accounts::has_pro_features.eq(info.has_pro_features.map(i32::from)),
+                    accounts::tier.eq(info.tier.as_deref()),
+                    accounts::sub_status.eq(info.sub_status.as_deref()),
+                    accounts::trial_days_left.eq(info.trial_days_left),
+                    accounts::current_period_end.eq(info.current_period_end),
+                    accounts::trial_requests_per_hour.eq(info.trial_requests_per_hour),
+                    accounts::remaining_credits.eq(info.remaining_credits),
+                    accounts::total_credits.eq(info.total_credits),
+                    accounts::remaining_usd.eq(info.remaining_usd),
+                    accounts::next_credits_at.eq(info.next_credits_at.as_deref()),
+                    accounts::info_fetched_at.eq(&now),
+                    accounts::updated_at.eq(&now),
+                ))
+                .execute(&mut *conn)
+                .map_err(sql_err)?;
+            Ok(())
+        })
     }
 }
 
@@ -630,6 +678,32 @@ mod tests {
             AccountList::All(rows) => rows,
             AccountList::Page(_) => unreachable!("unpaged list returns all rows"),
         }
+    }
+
+    #[test]
+    fn concurrent_selection_advances_cursor_inside_connection_lock() {
+        let store = std::sync::Arc::new(AccountStore::new(Db::open(":memory:").unwrap()));
+        for email in ["a@test", "b@test"] {
+            let record = serde_json::from_value(
+                serde_json::json!({"user":{"email":email},"access_token":"rca_test"}),
+            )
+            .unwrap();
+            store.upsert(&record).unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.next_available().unwrap().email
+                })
+            })
+            .collect();
+        barrier.wait();
+        let emails: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(emails.iter().filter(|email| *email == "a@test").count(), 4);
     }
 
     #[test]

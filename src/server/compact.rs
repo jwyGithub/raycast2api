@@ -102,9 +102,23 @@ impl SummaryCache {
         summary_text: String,
     ) {
         let mut entries = self.entries.lock().await;
+        let now = Instant::now();
+        entries.retain(|_, list| {
+            list.retain(|c| now.duration_since(c.created_at) < SUMMARY_CACHE_TTL);
+            !list.is_empty()
+        });
+        if !entries.contains_key(model)
+            && entries.len() >= 32
+            && let Some(key) = entries.keys().next().cloned()
+        {
+            entries.remove(&key);
+        }
         let list = entries.entry(model.to_string()).or_default();
         let now = Instant::now();
         list.retain(|c| now.duration_since(c.created_at) < SUMMARY_CACHE_TTL);
+        if list.len() >= 128 {
+            list.remove(0);
+        }
         list.push(CachedSummary {
             prefix_hash,
             covered_messages,

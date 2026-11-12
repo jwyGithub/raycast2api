@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 /// 一个共享的 SQLite 连接(引用计数 + 互斥)。
 ///
-/// 网关流量下 SQLite 操作是微秒级,一把互斥锁足够;若未来需要异步
-/// 驱动,只替换本文件,业务 store 的 `&Db` 签名不变。
+/// Store operations run in a Tokio blocking section. The connection still serializes SQL;
+/// use separate connections or a dedicated writer when measured lock contention warrants it.
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<SqliteConnection>>);
 
@@ -38,9 +38,30 @@ impl Db {
     }
 }
 
+/// Yield Tokio async-worker capacity while executing synchronous store operations.
+pub(crate) fn blocking<T>(operation: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(operation)
+    } else {
+        operation()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn synchronous_store_work_does_not_stall_async_worker() {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let other = tokio::spawn(async move {
+            send.send(()).unwrap();
+        });
+        blocking(|| receive.blocking_recv().unwrap());
+        other.await.unwrap();
+    }
 
     #[test]
     fn opens_in_memory_and_runs_sql() {

@@ -16,7 +16,7 @@
 use serde::Deserialize;
 
 use crate::account::store::{AccountRow, AccountStore};
-use crate::config::{OAUTH_CLIENT_ID, OAUTH_TOKEN_URL};
+use crate::config::OAUTH_CLIENT_ID;
 
 /// 一次换新的结果。
 #[derive(Debug)]
@@ -40,91 +40,76 @@ struct OAuthTokenResponse {
     refresh_token: Option<String>,
 }
 
-/// 换新并落盘:换新 token 对后立即原子写回账号存储(rotation 要求,
-/// 不落盘 = 账号即死)。这是所有 401 自动恢复路径的唯一入口。
-///
-/// 返回新 access_token 供调用方立即重试;`Err(())` 表示换新失败或
-/// 落盘失败(原因已记日志)。
-pub async fn renew_and_persist(
-    http: &reqwest::Client,
+/// 按账号串行续期；锁内重新读库并复用其他请求已经换新的凭据。
+pub async fn auto_renew(
     store: &AccountStore,
-    email: &str,
-    refresh_token: &str,
-) -> Result<String, ()> {
-    match renew_token_call(http, refresh_token).await {
-        TokenRenewalOutcome::Renewed {
-            access_token,
-            refresh_token: new_refresh,
-        } => store
-            .update_tokens(email, &access_token, new_refresh.as_deref())
-            .map(|_| {
-                tracing::info!(account = %email, "→ token renewed and persisted");
-                access_token
-            })
-            .map_err(|err| {
-                tracing::error!(
-                    account = %email,
-                    "→ CRITICAL: renewed token but failed to persist: {err}"
-                );
-            }),
-        TokenRenewalOutcome::InvalidGrant => {
-            tracing::warn!(account = %email, "→ refresh_token invalid_grant, account dead");
-            Err(())
-        }
-        TokenRenewalOutcome::Failed(reason) => {
-            tracing::warn!(account = %email, "→ token renewal failed: {reason}");
-            Err(())
-        }
+    client: &crate::raycast::client::RaycastClient,
+    account: &AccountRow,
+) -> Result<String, crate::error::GatewayError> {
+    use crate::error::GatewayError;
+    let lock = store.renewal_lock(&account.email);
+    let _guard = lock.lock().await;
+    let current = store
+        .get(&account.email)?
+        .ok_or_else(|| GatewayError::NotFound("account removed during renewal".into()))?;
+    if current.access_token != account.access_token {
+        return Ok(current.access_token);
     }
-}
-
-/// 账号没有可用的 refresh_token。集中判断,调用方据此决定走哪条恢复路径。
-pub fn extract_refresh_token(account: &AccountRow) -> Option<String> {
-    account
+    let refresh = current
         .refresh_token
         .as_deref()
         .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| GatewayError::TokenInvalid {
+            message: "no refresh_token stored".into(),
+        })?;
+    persist_outcome(
+        store,
+        &current.email,
+        renew_token_call(client, refresh).await,
+    )
 }
 
-/// 401 后的自动续命:账号有 refresh_token 就换新并原子写回。
-/// 复用调用方传入的 HTTP 客户端(与主链路同一代理配置)。
-///
-/// `Ok(true)` = 换新成功且已落盘;`Ok(false)` = 没有 refresh_token,跳过;
-/// `Err(())` = 换新失败(invalid_grant 或网络),账号不可自动恢复。
-pub async fn auto_renew(
+fn persist_outcome(
     store: &AccountStore,
-    http: &reqwest::Client,
-    account: &AccountRow,
-) -> Result<bool, ()> {
-    let Some(refresh_token) = extract_refresh_token(account) else {
-        tracing::warn!(
-            "account renewal: {} no refresh_token, cannot auto-renew",
-            account.email
-        );
-        return Ok(false);
-    };
-    renew_and_persist(http, store, &account.email, &refresh_token)
-        .await
-        .map(|_| true)
+    email: &str,
+    outcome: TokenRenewalOutcome,
+) -> Result<String, crate::error::GatewayError> {
+    use crate::error::GatewayError;
+    match outcome {
+        TokenRenewalOutcome::Renewed {
+            access_token,
+            refresh_token,
+        } => {
+            if !store.update_tokens(email, &access_token, refresh_token.as_deref())? {
+                return Err(GatewayError::Internal(
+                    "renewed account disappeared before persistence".into(),
+                ));
+            }
+            Ok(access_token)
+        }
+        TokenRenewalOutcome::InvalidGrant => Err(GatewayError::TokenInvalid {
+            message: "refresh_token invalid_grant".into(),
+        }),
+        TokenRenewalOutcome::Failed(reason) => Err(GatewayError::Upstream {
+            status: 502,
+            message: reason,
+        }),
+    }
 }
 
 /// 用 refresh_token 换新 token 对。成功前旧 refresh_token 仍有效,成功后
-/// 立即作废 —— 一般应调 [`renew_and_persist`] / [`auto_renew`] 而不是直接用它。
-async fn renew_token_call(http: &reqwest::Client, refresh_token: &str) -> TokenRenewalOutcome {
+/// 立即作废 —— 一般应调 [`auto_renew`] 而不是直接用它。
+async fn renew_token_call(
+    client: &crate::raycast::client::RaycastClient,
+    refresh_token: &str,
+) -> TokenRenewalOutcome {
     let body = serde_json::json!({
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
         "client_id": OAUTH_CLIENT_ID,
     });
-    let response = match http
-        .post(OAUTH_TOKEN_URL)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-    {
+    let response = match client.oauth_token(&body).await {
         Ok(r) => r,
         Err(e) => return TokenRenewalOutcome::Failed(format!("network: {e}")),
     };
@@ -153,7 +138,7 @@ async fn renew_token_call(http: &reqwest::Client, refresh_token: &str) -> TokenR
             access_token: token,
             refresh_token: tokens.refresh_token,
         },
-        Some(token) => TokenRenewalOutcome::Failed(format!("unexpected token format: {token}")),
+        Some(_) => TokenRenewalOutcome::Failed("unexpected token format".into()),
         None => TokenRenewalOutcome::Failed("no access_token in response".into()),
     }
 }
@@ -161,6 +146,55 @@ async fn renew_token_call(http: &reqwest::Client, refresh_token: &str) -> TokenR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renewal_preserves_error_kinds_and_requires_persistence() {
+        use crate::error::GatewayError;
+        let store = AccountStore::new(crate::db::Db::open(":memory:").unwrap());
+        assert!(matches!(
+            persist_outcome(&store, "missing", TokenRenewalOutcome::InvalidGrant),
+            Err(GatewayError::TokenInvalid { .. })
+        ));
+        assert!(matches!(
+            persist_outcome(
+                &store,
+                "missing",
+                TokenRenewalOutcome::Failed("network".into())
+            ),
+            Err(GatewayError::Upstream { status: 502, .. })
+        ));
+        assert!(matches!(
+            persist_outcome(
+                &store,
+                "missing",
+                TokenRenewalOutcome::Renewed {
+                    access_token: "rca_new".into(),
+                    refresh_token: Some("new".into())
+                }
+            ),
+            Err(GatewayError::Internal(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_stale_snapshots_reuse_rotated_credentials() {
+        let state = crate::server::state::compact_test_state();
+        let record: crate::account::wire::AccountRecord = serde_json::from_value(serde_json::json!({"user":{"email":"renew@test"},"access_token":"rca_old","refresh_token":"old"})).unwrap();
+        state.accounts.upsert(&record).unwrap();
+        let old = state.accounts.get("renew@test").unwrap().unwrap();
+        let lock = state.accounts.renewal_lock("renew@test");
+        let guard = lock.lock().await;
+        let a = auto_renew(&state.accounts, &state.client, &old);
+        let b = auto_renew(&state.accounts, &state.client, &old);
+        state
+            .accounts
+            .update_tokens("renew@test", "rca_new", Some("new"))
+            .unwrap();
+        drop(guard);
+        let (a, b) = tokio::join!(a, b);
+        assert_eq!(a.unwrap(), "rca_new");
+        assert_eq!(b.unwrap(), "rca_new");
+    }
 
     #[test]
     fn outcome_is_debug() {

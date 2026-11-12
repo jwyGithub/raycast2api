@@ -17,14 +17,3 @@ pub enum Protocol {
     /// OpenAI Chat Completions API — `POST /v1/chat/completions`.
     ChatCompletions,
 }
-
-impl Protocol {
-    /// The entry path this protocol is served on.
-    pub fn path(self) -> &'static str {
-        match self {
-            Protocol::Messages => "/v1/messages",
-            Protocol::Responses => "/v1/responses",
-            Protocol::ChatCompletions => "/v1/chat/completions",
-        }
-    }
-}

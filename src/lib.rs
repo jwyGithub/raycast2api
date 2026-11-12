@@ -7,9 +7,9 @@
 //! * [`config`]    — static endpoints and runtime [`config::Settings`].
 //! * [`core`]      — the canonical, protocol- and provider-agnostic model.
 //! * [`db`]        — shared SQLite infrastructure (connection management).
-//! * [`debug`]     — request-correlation support for the request-log store.
+//! * [`log::context`]     — request-correlation support for the request-log store.
 //! * [`error`]     — the unified [`error::GatewayError`] (OpenAI-style output).
-//! * [`log`]       — request-log storage (inbound/upstream/response, 3-day retention).
+//! * [`log`]       — request-log storage (inbound/upstream/response, 7-day retention).
 //! * [`signature`] — the `X-Raycast-Signature-v2` computation.
 //! * [`raycast`]   — the upstream provider (async client, wire types, SSE).
 //! * [`protocol`]  — the client-protocol adapters (OpenAI Chat Completions,
@@ -21,7 +21,6 @@ pub mod account;
 pub mod config;
 pub mod core;
 pub mod db;
-pub mod debug;
 pub mod error;
 pub mod log;
 pub mod protocol;

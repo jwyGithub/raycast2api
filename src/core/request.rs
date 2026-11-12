@@ -73,9 +73,4 @@ impl CanonicalRequest {
             reasoning_effort: None,
         }
     }
-
-    /// Whether this request wants a "think" (reasoning) completion.
-    pub fn wants_thinking(&self) -> bool {
-        self.reasoning_effort.is_some()
-    }
 }

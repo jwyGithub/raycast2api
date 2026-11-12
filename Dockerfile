@@ -13,11 +13,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --user-group --create-home app
 COPY --from=builder /app/target/release/raycast2api /usr/local/bin/raycast2api
-USER app
 # The gateway reads config.json / store/ relative to its CWD.
 WORKDIR /app
 # Writable home for the SQLite store (bind-mounted over by compose).
 RUN mkdir -p /app/store && chown app:app /app/store
+USER app
 # Default listen address is 0.0.0.0:8787 (override with HOST / PORT env vars).
 EXPOSE 8787
 ENTRYPOINT ["raycast2api"]

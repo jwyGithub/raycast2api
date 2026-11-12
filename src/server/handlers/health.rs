@@ -18,11 +18,18 @@ pub async fn health() -> Response {
 /// Readiness: report `ready` when the backend is believed to be working;
 /// otherwise probe upstream at most once per rate-limit window.
 pub async fn ready(State(state): State<SharedState>) -> Response {
+    if state.accounts.count_available() == 0 {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status":"not ready", "message":"No available accounts"})),
+        )
+            .into_response();
+    }
     if state.health.is_working() {
         return Json(json!({ "status": "ready" })).into_response();
     }
 
-    if !state.health.should_recheck() {
+    if !state.health.begin_check() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "status": "not ready", "message": "Backend not working, rate limited" })),
@@ -30,7 +37,6 @@ pub async fn ready(State(state): State<SharedState>) -> Response {
             .into_response();
     }
 
-    state.health.record_check();
     match state.client.fetch_models().await {
         Ok(models) if !models.is_empty() => {
             state.health.mark_working();

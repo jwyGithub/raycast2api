@@ -41,44 +41,65 @@ impl PeekedError {
 /// with every byte back in place, byte-identical to not peeking at all.
 pub async fn peek_first_payload(
     response: reqwest::Response,
+    timeout: std::time::Duration,
 ) -> (Option<PeekedError>, reqwest::Response) {
     let status = response.status();
     let mut bytes = response.bytes_stream();
-    let Some(Ok(chunk)) = bytes.next().await else {
-        // 流空或读错:交给上层按原样处理(与不偷看时行为一致)。
-        return (None, rebuild(status, bytes.boxed(), None));
-    };
-
-    let Ok(text) = std::str::from_utf8(&chunk) else {
-        return (None, rebuild(status, bytes, Some(chunk)));
-    };
-
-    // 逐行扫描到首个 `data:` 行为止:错误 payload 前可能有 event:/注释行。
-    let mut consumed = 0usize; // 已扫描字节数(行边界)
-    let mut error: Option<RaycastSseError> = None;
+    let mut captured = Vec::new();
+    let mut decoder = super::sse::SseDecoder::new();
+    let mut error = None;
     let mut error_raw = String::new();
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim();
-        if let Some(data) = trimmed.strip_prefix("data:") {
-            // 首个 data payload:是错误就记下并消费到本行末;无论是否错误,
-            // 扫描都到此为止 —— 内容流的首个 payload 是正常 delta。
-            if let Ok(payload) = serde_json::from_str::<RaycastSsePayload>(data.trim())
-                && let Some(err) = payload.error
-            {
-                error = Some(err);
-                error_raw = data.trim().to_string();
+    let mut consumed = 0;
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, bytes.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                captured.extend_from_slice(&chunk);
+                if captured.len() > 256 * 1024 {
+                    break;
+                }
+                if let Some(payload) = decoder.push_bytes(&chunk).into_iter().next() {
+                    if let Ok(parsed) = serde_json::from_str::<RaycastSsePayload>(&payload) {
+                        error = parsed.error;
+                        error_raw = payload;
+                    }
+                    // Consume only through the first data line; preserve subsequent payloads.
+                    for line in captured.split_inclusive(|b| *b == b'\n') {
+                        consumed += line.len();
+                        if line.starts_with(b"data:") {
+                            break;
+                        }
+                    }
+                    break;
+                }
             }
-            consumed += line.len();
-            break;
+            Ok(Some(Err(error))) => {
+                let replay =
+                    futures_util::stream::iter([Ok(ByteChunk::from(captured)), Err(error)])
+                        .chain(bytes);
+                return (None, rebuild(status, replay, None));
+            }
+            Ok(None) => break,
+            Err(_) => {
+                let replay = futures_util::stream::iter([
+                    Ok(ByteChunk::from(captured)),
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "upstream first payload timeout",
+                    )),
+                ]);
+                let response = axum::http::Response::builder()
+                    .status(status)
+                    .body(reqwest::Body::wrap_stream(replay))
+                    .unwrap();
+                return (None, reqwest::Response::from(response));
+            }
         }
-        // event:/id:/注释/空行:跳过继续扫。
-        consumed += line.len();
     }
-
     if let Some(parsed) = error {
         // 是流内错误:消费已扫描字节(错误行含前面的事件行),剩余接回流前端。
-        let rest = &text[consumed..];
-        let chunk = (!rest.is_empty()).then(|| ByteChunk::from(rest.to_owned()));
+        let rest = &captured[consumed..];
+        let chunk = (!rest.is_empty()).then(|| ByteChunk::copy_from_slice(rest));
         return (
             Some(PeekedError {
                 parsed,
@@ -89,7 +110,10 @@ pub async fn peek_first_payload(
     }
 
     // 不是错误流:整个 chunk 原样放回。
-    (None, rebuild(status, bytes, Some(chunk)))
+    (
+        None,
+        rebuild(status, bytes, Some(ByteChunk::from(captured))),
+    )
 }
 
 /// Splice an error payload back to the front of a stream so the downstream
@@ -180,6 +204,41 @@ impl ByteStream {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn configured_timeout_stops_waiting_for_first_payload() {
+        let response = rebuild(
+            reqwest::StatusCode::OK,
+            futures_util::stream::pending::<reqwest::Result<ByteChunk>>(),
+            None,
+        );
+        let (error, response) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            peek_first_payload(response, std::time::Duration::from_millis(5)),
+        )
+        .await
+        .unwrap();
+        assert!(error.is_none());
+        assert!(response.bytes().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn recognizes_error_across_chunks_after_keepalive() {
+        let chunks = [
+            b": ping\n".as_slice(),
+            b"data: {\"error\":{\"message\":\"limit\",",
+            b"\"http_status\":429}}\nrest\n",
+        ];
+        let response = rebuild(
+            reqwest::StatusCode::OK,
+            futures_util::stream::iter(chunks.map(|s| Ok(ByteChunk::from(s)))),
+            None,
+        );
+        let (error, response) =
+            peek_first_payload(response, std::time::Duration::from_secs(20)).await;
+        assert_eq!(error.unwrap().parsed.http_status, 429);
+        assert_eq!(drained(response).await, b"rest\n");
+    }
+
     /// 用给定的首 chunk 构造一个待偷看的 200 响应。
     fn response_with(body: &'static [u8]) -> reqwest::Response {
         let stream = futures_util::stream::iter([Ok::<_, reqwest::Error>(ByteChunk::from(body))]);
@@ -200,7 +259,8 @@ mod tests {
     #[tokio::test]
     async fn error_payload_is_peeked_and_rest_is_preserved() {
         let body = b"data: {\"error\":{\"message\":\"limit\",\"http_status\":429,\"retry_after\":447}}\ndata: {\"complete\":true}\n";
-        let (peeked, rest) = peek_first_payload(response_with(body)).await;
+        let (peeked, rest) =
+            peek_first_payload(response_with(body), std::time::Duration::from_secs(20)).await;
         let err = peeked.expect("error peeked");
         assert_eq!(err.parsed.http_status, 429);
         assert!(err.parsed.is_usage_limit());
@@ -212,7 +272,8 @@ mod tests {
     #[tokio::test]
     async fn error_after_event_lines_is_still_peeked() {
         let body = b": keep-alive\n\n: another comment\n\n: keep-alive\n\ndata: {\"error\":{\"message\":\"limit\",\"http_status\":429}}\ndata: {\"complete\":true}\n";
-        let (peeked, rest) = peek_first_payload(response_with(body)).await;
+        let (peeked, rest) =
+            peek_first_payload(response_with(body), std::time::Duration::from_secs(20)).await;
         let err = peeked.expect("error peeked through event lines");
         assert_eq!(err.parsed.http_status, 429);
         assert_eq!(drained(rest).await, b"data: {\"complete\":true}\n");
@@ -221,7 +282,8 @@ mod tests {
     #[tokio::test]
     async fn normal_payload_is_passed_through_byte_identical() {
         let body = b"data: {\"text\":\"hi\"}\ndata: [DONE]\n";
-        let (peeked, rest) = peek_first_payload(response_with(body)).await;
+        let (peeked, rest) =
+            peek_first_payload(response_with(body), std::time::Duration::from_secs(20)).await;
         assert!(peeked.is_none());
         assert_eq!(drained(rest).await, body);
     }
@@ -230,7 +292,8 @@ mod tests {
     #[tokio::test]
     async fn content_stream_with_event_prefix_passes_through() {
         let body = b"event: message\ndata: {\"text\":\"hi\"}\ndata: [DONE]\n";
-        let (peeked, rest) = peek_first_payload(response_with(body)).await;
+        let (peeked, rest) =
+            peek_first_payload(response_with(body), std::time::Duration::from_secs(20)).await;
         assert!(peeked.is_none());
         assert_eq!(drained(rest).await, body);
     }
@@ -238,7 +301,8 @@ mod tests {
     #[tokio::test]
     async fn chunk_without_complete_line_passes_through() {
         let body = b"data: {\"te";
-        let (peeked, rest) = peek_first_payload(response_with(body)).await;
+        let (peeked, rest) =
+            peek_first_payload(response_with(body), std::time::Duration::from_secs(20)).await;
         assert!(peeked.is_none());
         assert_eq!(drained(rest).await, body);
     }
@@ -246,7 +310,8 @@ mod tests {
     #[tokio::test]
     async fn restore_splices_raw_payload_back() {
         let body = b"data: {\"complete\":true}\n";
-        let (peeked, rest) = peek_first_payload(response_with(body)).await;
+        let (peeked, rest) =
+            peek_first_payload(response_with(body), std::time::Duration::from_secs(20)).await;
         assert!(peeked.is_none());
 
         let raw = r#"{"error":{"message":"limit","http_status":429}}"#;

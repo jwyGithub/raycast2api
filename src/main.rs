@@ -26,6 +26,8 @@ async fn main() {
     };
 
     let http = reqwest::Client::builder()
+        .connect_timeout(settings.upstream_timeout)
+        .read_timeout(settings.upstream_timeout)
         .build()
         .expect("failed to build HTTP client");
 
@@ -46,11 +48,17 @@ async fn main() {
             let mut last_vacuum = std::time::Instant::now();
             loop {
                 interval.tick().await;
-                let deleted = request_log.cleanup_expired();
+                let log = request_log.clone();
+                let deleted = tokio::task::spawn_blocking(move || log.cleanup_expired())
+                    .await
+                    .unwrap_or(0);
                 if deleted > 0
                     && last_vacuum.elapsed() >= std::time::Duration::from_secs(24 * 60 * 60)
                 {
-                    request_log.vacuum();
+                    let log = request_log.clone();
+                    if let Err(error) = tokio::task::spawn_blocking(move || log.vacuum()).await {
+                        tracing::warn!(%error, "log maintenance failed");
+                    }
                     last_vacuum = std::time::Instant::now();
                 }
             }

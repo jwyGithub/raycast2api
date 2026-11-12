@@ -5,7 +5,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use futures_util::StreamExt;
 
-use crate::debug::{self, REQUEST_ID};
+use crate::log::context::{self as debug, REQUEST_ID};
 use crate::util;
 
 use super::super::state::SharedState;
@@ -19,7 +19,7 @@ const MAX_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 ///
 /// Scope is inference-only (see the request-log spec): only the three
 /// Inference bodies above the log limit continue as streams without payload
-/// capture. Log writes are fire-and-forget and never fail the request.
+/// capture. Log writes run in blocking sections; failures never fail the request.
 pub async fn request_logging(
     State(state): State<SharedState>,
     request: Request,
@@ -37,6 +37,24 @@ pub async fn request_logging(
         return next.run(request).await;
     }
 
+    let permit = match state.inference_slots.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            use axum::response::IntoResponse;
+            return (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({"error":{"message":"gateway concurrency limit reached","type":"overloaded_error"}}))).into_response();
+        }
+    };
+    let response = capture(state, request, next).await;
+    let (parts, body) = response.into_parts();
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        let mut chunks = body.into_data_stream();
+        while let Some(chunk) = chunks.next().await { yield chunk; }
+    };
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+async fn capture(state: SharedState, request: Request, next: Next) -> Response {
     if request
         .headers()
         .get(CONTENT_LENGTH)
@@ -153,6 +171,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_permit_lives_until_response_body_is_dropped() {
+        let state = crate::server::state::compact_test_state();
+        let app = Router::new()
+            .route("/v1/responses", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                request_logging,
+            ));
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(state.inference_slots.available_permits(), 63);
+        drop(response);
+        assert_eq!(state.inference_slots.available_permits(), 64);
+        let permits = state
+            .inference_slots
+            .clone()
+            .acquire_many_owned(64)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request()).await.unwrap().status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(permits);
+    }
+
+    #[tokio::test]
     async fn oversized_inference_body_reaches_handler_without_payload_logging() {
         let db = Db::open(":memory:").unwrap();
         let accounts = Arc::new(AccountStore::new(db.clone()));
@@ -164,6 +215,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             bind_addr_dual: None,
             model_overrides: Default::default(),
+            upstream_timeout: std::time::Duration::from_secs(20),
             accounts_db: ":memory:".into(),
             proxies: Vec::new(),
             proxies_enabled: false,

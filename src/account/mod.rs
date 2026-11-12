@@ -5,3 +5,5 @@ pub mod quota_refresh;
 pub mod store;
 pub mod token_renewal;
 pub mod wire;
+
+pub mod service;

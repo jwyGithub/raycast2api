@@ -3,10 +3,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::account::store::AccountStore;
-use crate::config::{DEFAULT_INTERNAL_MODEL, DEFAULT_PROVIDER, Settings};
+use crate::config::Settings;
 use crate::error::GatewayError;
 use crate::log::store::RequestLogStore;
 use crate::raycast::client::RaycastClient;
@@ -25,6 +25,7 @@ pub struct AppState {
     pub settings: Arc<Settings>,
     pub client: RaycastClient,
     pub health: BackendHealth,
+    pub inference_slots: std::sync::Arc<tokio::sync::Semaphore>,
     /// 账号池(账号 CRUD 接口与刷新触发使用)。
     pub accounts: Arc<AccountStore>,
     /// 请求日志存储(推理请求三体采集写入)。
@@ -32,6 +33,8 @@ pub struct AppState {
     /// auto-compact 摘要缓存(按模型 + 被压缩前缀 hash)。
     pub summary_cache: SummaryCache,
     models_cache: RwLock<Option<ModelsCache>>,
+    models_refresh: Mutex<()>,
+    models_failed_at: Mutex<Option<Instant>>,
 }
 
 struct ModelsCache {
@@ -50,15 +53,18 @@ impl AppState {
             settings,
             client,
             health: BackendHealth::default(),
+            inference_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             accounts,
             log,
             summary_cache: SummaryCache::default(),
             models_cache: RwLock::new(None),
+            models_refresh: Mutex::new(()),
+            models_failed_at: Mutex::new(None),
         }
     }
 
     /// Return the model list, serving a cached copy while it is fresh and
-    /// otherwise fetching from upstream (updating health and the cache).
+    /// otherwise fetching from upstream, with stale-on-error and failure backoff.
     pub async fn models(&self) -> Result<Vec<RaycastRawModel>, GatewayError> {
         if let Some(cache) = self.models_cache.read().await.as_ref()
             && cache.fetched_at.elapsed() < MODELS_CACHE_TTL
@@ -66,9 +72,29 @@ impl AppState {
             return Ok(cache.models.clone());
         }
 
+        let _refresh = self.models_refresh.lock().await;
+        if let Some(cache) = self.models_cache.read().await.as_ref()
+            && cache.fetched_at.elapsed() < MODELS_CACHE_TTL
+        {
+            return Ok(cache.models.clone());
+        }
+        if self
+            .models_failed_at
+            .lock()
+            .await
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+        {
+            if let Some(cache) = self.models_cache.read().await.as_ref() {
+                return Ok(cache.models.clone());
+            }
+            return Err(GatewayError::Upstream {
+                status: 503,
+                message: "model registry refresh temporarily unavailable".into(),
+            });
+        }
         match self.client.fetch_models().await {
             Ok(models) => {
-                self.health.mark_working();
+                *self.models_failed_at.lock().await = None;
                 *self.models_cache.write().await = Some(ModelsCache {
                     fetched_at: Instant::now(),
                     models: models.clone(),
@@ -76,7 +102,11 @@ impl AppState {
                 Ok(models)
             }
             Err(err) => {
-                self.health.mark_failed();
+                *self.models_failed_at.lock().await = Some(Instant::now());
+                if let Some(cache) = self.models_cache.read().await.as_ref() {
+                    tracing::warn!(%err, "using stale model cache");
+                    return Ok(cache.models.clone());
+                }
                 Err(err)
             }
         }
@@ -85,22 +115,18 @@ impl AppState {
     /// Resolve an OpenAI-facing model id to `(provider, internal_model)`,
     /// applying the configured `model_overrides` aliases first, then looking up
     /// the upstream model list, falling back to the configured defaults.
-    pub async fn resolve_model(&self, requested_id: &str) -> (String, String) {
+    pub async fn resolve_model(
+        &self,
+        requested_id: &str,
+    ) -> Result<(String, String), GatewayError> {
         let requested_id = self
             .settings
             .model_overrides
             .get(requested_id)
             .map(String::as_str)
             .unwrap_or(requested_id);
-        if let Ok(models) = self.models().await
-            && let Some(model) = models.iter().find(|m| m.id == requested_id)
-        {
-            return (model.provider.clone(), model.model.clone());
-        }
-        (
-            DEFAULT_PROVIDER.to_string(),
-            DEFAULT_INTERNAL_MODEL.to_string(),
-        )
+        let resolved = crate::raycast::models::resolve(&self.models().await?, requested_id);
+        Ok((resolved.provider, resolved.model))
     }
 }
 
@@ -116,6 +142,7 @@ pub(crate) fn compact_test_state() -> SharedState {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,
         model_overrides: Default::default(),
+        upstream_timeout: std::time::Duration::from_secs(20),
         accounts_db: ":memory:".into(),
         proxies: Vec::new(),
         proxies_enabled: false,
@@ -137,4 +164,18 @@ pub(crate) fn compact_test_state() -> SharedState {
         ],
     }));
     Arc::new(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn failed_model_refresh_keeps_known_model_instead_of_default() {
+        let mut state = compact_test_state();
+        let inner = Arc::get_mut(&mut state).unwrap();
+        inner.models_cache.get_mut().as_mut().unwrap().fetched_at =
+            Instant::now() - MODELS_CACHE_TTL;
+        let (provider, model) = state.resolve_model("test-model").await.unwrap();
+        assert_eq!((provider.as_str(), model.as_str()), ("openai", "test"));
+    }
 }

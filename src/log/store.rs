@@ -16,7 +16,6 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS request_logs (id INTEGER PRIMAR
 #[diesel(table_name = request_logs)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 struct StoredLog {
-    id: i64,
     request_id: String,
     created_at: i64,
     method: Option<String>,
@@ -35,18 +34,6 @@ struct NewLog<'a> {
     inbound_json: Option<&'a str>,
 }
 impl StoredLog {
-    fn entry(self) -> LogEntry {
-        LogEntry {
-            id: self.id,
-            request_id: self.request_id,
-            created_at: self.created_at,
-            method: self.method,
-            path: self.path,
-            inbound_bytes: self.inbound_json.map(|v| v.len() as i64),
-            upstream_bytes: self.upstream_json.map(|v| v.len() as i64),
-            response_bytes: self.response_text.map(|v| v.len() as i64),
-        }
-    }
     fn detail(self) -> LogDetail {
         LogDetail {
             request_id: self.request_id,
@@ -64,76 +51,90 @@ pub struct RequestLogStore {
 }
 impl RequestLogStore {
     pub fn new(db: Db) -> Self {
-        if let Err(e) = db.lock().batch_execute(SCHEMA) {
-            tracing::error!("request log schema: {e}");
-        }
-        let store = Self { db };
-        if store.cleanup_expired() > 0 {
-            store.vacuum();
-        }
-        store
+        crate::db::blocking(|| {
+            if let Err(e) = db.lock().batch_execute(SCHEMA) {
+                tracing::error!("request log schema: {e}");
+            }
+            let store = Self { db };
+            if store.cleanup_expired() > 0 {
+                store.vacuum();
+            }
+            store
+        })
     }
     pub fn count(&self) -> Result<u64, String> {
-        let mut c = self.db.lock();
-        request_logs::table
-            .count()
-            .get_result::<i64>(&mut *c)
-            .map(|n| n as u64)
-            .map_err(|e| e.to_string())
+        crate::db::blocking(|| {
+            let mut c = self.db.lock();
+            request_logs::table
+                .count()
+                .get_result::<i64>(&mut *c)
+                .map(|n| n as u64)
+                .map_err(|e| e.to_string())
+        })
     }
     pub fn insert_request(&self, id: &str, method: &str, path: &str, body: &serde_json::Value) {
-        let body = serde_json::to_string_pretty(body).unwrap_or_default();
-        let mut c = self.db.lock();
-        if let Err(e) = diesel::insert_into(request_logs::table)
-            .values(NewLog {
-                request_id: id,
-                created_at: unix_secs() as i64,
-                method: Some(method),
-                path: Some(path),
-                inbound_json: Some(&body),
-            })
-            .on_conflict(request_logs::request_id)
-            .do_nothing()
-            .execute(&mut *c)
-        {
-            tracing::warn!("request log insert ({id}): {e}");
-        }
+        crate::db::blocking(|| {
+            let body = serde_json::to_string_pretty(body).unwrap_or_default();
+            let mut c = self.db.lock();
+            if let Err(e) = diesel::insert_into(request_logs::table)
+                .values(NewLog {
+                    request_id: id,
+                    created_at: unix_secs() as i64,
+                    method: Some(method),
+                    path: Some(path),
+                    inbound_json: Some(&body),
+                })
+                .on_conflict(request_logs::request_id)
+                .do_nothing()
+                .execute(&mut *c)
+            {
+                tracing::warn!("request log insert ({id}): {e}");
+            }
+        })
     }
     pub fn insert_request_without_body(&self, id: &str, method: &str, path: &str) {
-        let mut c = self.db.lock();
-        if let Err(e) = diesel::insert_into(request_logs::table)
-            .values(NewLog {
-                request_id: id,
-                created_at: unix_secs() as i64,
-                method: Some(method),
-                path: Some(path),
-                inbound_json: None,
-            })
-            .on_conflict(request_logs::request_id)
-            .do_nothing()
-            .execute(&mut *c)
-        {
-            tracing::warn!("request log insert ({id}): {e}");
-        }
+        crate::db::blocking(|| {
+            let mut c = self.db.lock();
+            if let Err(e) = diesel::insert_into(request_logs::table)
+                .values(NewLog {
+                    request_id: id,
+                    created_at: unix_secs() as i64,
+                    method: Some(method),
+                    path: Some(path),
+                    inbound_json: None,
+                })
+                .on_conflict(request_logs::request_id)
+                .do_nothing()
+                .execute(&mut *c)
+            {
+                tracing::warn!("request log insert ({id}): {e}");
+            }
+        })
     }
     pub fn update_upstream(&self, id: &str, body: &serde_json::Value) {
-        let body = serde_json::to_string_pretty(body).unwrap_or_default();
-        let mut c = self.db.lock();
-        if let Err(e) = diesel::update(request_logs::table.filter(request_logs::request_id.eq(id)))
-            .set(request_logs::upstream_json.eq(Some(body)))
-            .execute(&mut *c)
-        {
-            tracing::warn!("request log upstream ({id}): {e}");
-        }
+        crate::db::blocking(|| {
+            let body = serde_json::to_string_pretty(body).unwrap_or_default();
+            let mut c = self.db.lock();
+            if let Err(e) =
+                diesel::update(request_logs::table.filter(request_logs::request_id.eq(id)))
+                    .set(request_logs::upstream_json.eq(Some(body)))
+                    .execute(&mut *c)
+            {
+                tracing::warn!("request log upstream ({id}): {e}");
+            }
+        })
     }
     pub fn update_response(&self, id: &str, body: &str) {
-        let mut c = self.db.lock();
-        if let Err(e) = diesel::update(request_logs::table.filter(request_logs::request_id.eq(id)))
-            .set(request_logs::response_text.eq(Some(body)))
-            .execute(&mut *c)
-        {
-            tracing::warn!("request log response ({id}): {e}");
-        }
+        crate::db::blocking(|| {
+            let mut c = self.db.lock();
+            if let Err(e) =
+                diesel::update(request_logs::table.filter(request_logs::request_id.eq(id)))
+                    .set(request_logs::response_text.eq(Some(body)))
+                    .execute(&mut *c)
+            {
+                tracing::warn!("request log response ({id}): {e}");
+            }
+        })
     }
     pub fn list(
         &self,
@@ -141,68 +142,120 @@ impl RequestLogStore {
         created_at: Option<i64>,
         request_id: Option<&str>,
     ) -> Result<Page<LogEntry>, String> {
-        if page == 0 || page_size == 0 {
-            return Err("page and page_size must be positive".into());
-        }
-        let mut c = self.db.lock();
-        let mut query = request_logs::table.into_boxed::<diesel::sqlite::Sqlite>();
-        let mut count_query = request_logs::table.into_boxed::<diesel::sqlite::Sqlite>();
-        if let Some(created_at) = created_at {
-            query = query.filter(request_logs::created_at.eq(created_at));
-            count_query = count_query.filter(request_logs::created_at.eq(created_at));
-        }
-        if let Some(request_id) = request_id.filter(|id| !id.trim().is_empty()) {
-            query = query.filter(request_logs::request_id.eq(request_id));
-            count_query = count_query.filter(request_logs::request_id.eq(request_id));
-        }
-        let total = count_query
-            .count()
-            .get_result::<i64>(&mut *c)
-            .map_err(|e| e.to_string())? as u64;
-        let items = query
-            .order(request_logs::id.desc())
-            .limit(i64::from(page_size))
-            .offset(i64::from(page - 1) * i64::from(page_size))
-            .select(StoredLog::as_select())
-            .load::<StoredLog>(&mut *c)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(StoredLog::entry)
-            .collect();
-        Ok(Page::new(items, total, page, page_size))
+        crate::db::blocking(|| {
+            if page == 0 || page_size == 0 {
+                return Err("page and page_size must be positive".into());
+            }
+            let mut c = self.db.lock();
+            let mut query = request_logs::table.into_boxed::<diesel::sqlite::Sqlite>();
+            let mut count_query = request_logs::table.into_boxed::<diesel::sqlite::Sqlite>();
+            if let Some(created_at) = created_at {
+                query = query.filter(request_logs::created_at.eq(created_at));
+                count_query = count_query.filter(request_logs::created_at.eq(created_at));
+            }
+            if let Some(request_id) = request_id.filter(|id| !id.trim().is_empty()) {
+                query = query.filter(request_logs::request_id.eq(request_id));
+                count_query = count_query.filter(request_logs::request_id.eq(request_id));
+            }
+            let total = count_query
+                .count()
+                .get_result::<i64>(&mut *c)
+                .map_err(|e| e.to_string())? as u64;
+            let items = query
+                .order(request_logs::id.desc())
+                .limit(i64::from(page_size))
+                .offset(i64::from(page - 1) * i64::from(page_size))
+                .select((
+                    request_logs::id,
+                    request_logs::request_id,
+                    request_logs::created_at,
+                    request_logs::method,
+                    request_logs::path,
+                    diesel::dsl::sql::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>>(
+                        "length(CAST(inbound_json AS BLOB))",
+                    ),
+                    diesel::dsl::sql::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>>(
+                        "length(CAST(upstream_json AS BLOB))",
+                    ),
+                    diesel::dsl::sql::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>>(
+                        "length(CAST(response_text AS BLOB))",
+                    ),
+                ))
+                .load::<(
+                    i64,
+                    String,
+                    i64,
+                    Option<String>,
+                    Option<String>,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                )>(&mut *c)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(
+                    |(
+                        id,
+                        request_id,
+                        created_at,
+                        method,
+                        path,
+                        inbound_bytes,
+                        upstream_bytes,
+                        response_bytes,
+                    )| LogEntry {
+                        id,
+                        request_id,
+                        created_at,
+                        method,
+                        path,
+                        inbound_bytes,
+                        upstream_bytes,
+                        response_bytes,
+                    },
+                )
+                .collect();
+            Ok(Page::new(items, total, page, page_size))
+        })
     }
     pub fn detail(&self, id: &str) -> Option<LogDetail> {
-        let mut c = self.db.lock();
-        request_logs::table
-            .filter(request_logs::request_id.eq(id))
-            .select(StoredLog::as_select())
-            .first::<StoredLog>(&mut *c)
-            .ok()
-            .map(StoredLog::detail)
+        crate::db::blocking(|| {
+            let mut c = self.db.lock();
+            request_logs::table
+                .filter(request_logs::request_id.eq(id))
+                .select(StoredLog::as_select())
+                .first::<StoredLog>(&mut *c)
+                .ok()
+                .map(StoredLog::detail)
+        })
     }
     pub fn cleanup_expired(&self) -> usize {
-        let mut c = self.db.lock();
-        match diesel::delete(
-            request_logs::table
-                .filter(request_logs::created_at.lt(unix_secs() as i64 - RETENTION_SECS)),
-        )
-        .execute(&mut *c)
-        {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!("request log cleanup: {e}");
-                0
+        crate::db::blocking(|| {
+            let mut c = self.db.lock();
+            match diesel::delete(
+                request_logs::table
+                    .filter(request_logs::created_at.lt(unix_secs() as i64 - RETENTION_SECS)),
+            )
+            .execute(&mut *c)
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!("request log cleanup: {e}");
+                    0
+                }
             }
-        }
+        })
     }
     pub fn vacuum(&self) {
-        if let Err(e) = self
-            .db
-            .lock()
-            .batch_execute("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
-        {
-            tracing::warn!("request log vacuum: {e}");
-        }
+        crate::db::blocking(|| {
+            if let Err(e) = self
+                .db
+                .lock()
+                .batch_execute("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+            {
+                tracing::warn!("request log vacuum: {e}");
+            }
+        })
     }
 }
 

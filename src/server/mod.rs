@@ -43,15 +43,17 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/v1/chat/completions",
             post(handlers::chat::chat_completions)
-                .layer(axum::extract::DefaultBodyLimit::disable()),
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
         .route(
             "/v1/messages",
-            post(handlers::messages::messages).layer(axum::extract::DefaultBodyLimit::disable()),
+            post(handlers::messages::messages)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
         .route(
             "/v1/responses",
-            post(handlers::responses::responses).layer(axum::extract::DefaultBodyLimit::disable()),
+            post(handlers::responses::responses)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
         .route("/v1/models", get(handlers::models::list_models))
         .route("/health", get(handlers::health::health))

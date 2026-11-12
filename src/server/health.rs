@@ -19,7 +19,7 @@ pub struct BackendHealth {
 impl Default for BackendHealth {
     fn default() -> Self {
         Self {
-            is_working: AtomicBool::new(true), // optimistic default
+            is_working: AtomicBool::new(false), // optimistic default
             last_check_ms: AtomicU64::new(0),
         }
     }
@@ -38,15 +38,14 @@ impl BackendHealth {
         self.is_working.load(Ordering::Relaxed)
     }
 
-    /// Whether enough time has passed to justify a fresh upstream probe.
-    pub fn should_recheck(&self) -> bool {
-        now_ms().saturating_sub(self.last_check_ms.load(Ordering::Relaxed))
-            >= READINESS_CHECK_INTERVAL_MS
-    }
-
-    /// Record that a probe is being performed now (resets the rate limiter).
-    pub fn record_check(&self) {
-        self.last_check_ms.store(now_ms(), Ordering::Relaxed);
+    /// Claim the next probe atomically so concurrent callers cannot duplicate it.
+    pub fn begin_check(&self) -> bool {
+        let now = now_ms();
+        self.last_check_ms
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+                (now.saturating_sub(last) >= READINESS_CHECK_INTERVAL_MS).then_some(now)
+            })
+            .is_ok()
     }
 }
 
@@ -55,4 +54,16 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn starts_unready_and_claims_only_one_probe() {
+        let health = BackendHealth::default();
+        assert!(!health.is_working());
+        assert!(health.begin_check());
+        assert!(!health.begin_check());
+    }
 }

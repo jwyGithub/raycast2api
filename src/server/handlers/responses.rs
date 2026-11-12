@@ -13,14 +13,12 @@ use futures_util::{StreamExt, future::BoxFuture, stream::BoxStream};
 
 use crate::core::event::CanonicalEvent;
 use crate::core::request::CanonicalRequest;
-use crate::debug::{self, REQUEST_ID};
 use crate::error::GatewayError;
+use crate::log::context::{self as debug, REQUEST_ID};
 use crate::protocol::InboundAdapter;
 use crate::protocol::responses::outbound::{StreamEncoder, custom_names, to_event};
 use crate::protocol::responses::wire::ResponsesRequest;
 use crate::protocol::responses::{ResponsesInbound, ResponsesOutbound};
-use crate::raycast::builder::build_chat_request;
-use crate::raycast::stream::canonical_events_with_retry;
 use crate::server::compact;
 use crate::server::pipeline;
 use crate::server::state::SharedState;
@@ -155,15 +153,7 @@ async fn summarize(
     state: &SharedState,
     request: crate::core::request::CanonicalRequest,
 ) -> Result<String, GatewayError> {
-    let (provider, model) = state.resolve_model(&request.model).await;
-    let raycast_request = build_chat_request(&request, &provider, &model);
-    let response = state.client.send_chat(&raycast_request).await?;
-    let events = canonical_events_with_retry(
-        response,
-        state.client.clone(),
-        raycast_request,
-        state.log.clone(),
-    );
+    let events = pipeline::events(state, &request).await?;
     let mut events = std::pin::pin!(events);
     let mut text = String::new();
     while let Some(event) = events.next().await {

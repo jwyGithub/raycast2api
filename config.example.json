@@ -1,9 +1,11 @@
 {
-  "host": "0.0.0.0",
-  "port": 8787,
-  "api_key": "your-api-key-here",
-  "raycast_device_id": "your-raycast-device-id",
-  "raycast_signature_secret": null,
-  "proxies": [],
-  "proxies_enabled": false
+    "host": "0.0.0.0",
+    "port": 8787,
+    "api_key": "your-api-key-here",
+    "raycast_device_id": "your-raycast-device-id",
+    "raycast_signature_secret": null,
+    "proxies": [],
+    "proxies_enabled": false,
+    "upstream_timeout_secs": 20
 }
+

@@ -193,45 +193,8 @@ pub async fn restore(
     State(state): State<SharedState>,
     Json(request): Json<EmailRequest>,
 ) -> Result<Response, GatewayError> {
-    if !state.accounts.reinstate(&request.email)? {
-        return Err(GatewayError::NotFound(format!(
-            "no account with email {}",
-            request.email
-        )));
-    }
-
-    // 实时验证:能查通则顺手更新额度信息;查不通不影响"已恢复"这个事实。
-    let mut upstream_note: Option<String> = None;
-    if let Some(row) = state.accounts.get(&request.email)? {
-        match crate::account::quota_refresh::fetch_info(&state.client, &row.access_token).await {
-            Ok(Some(info)) => {
-                state.accounts.update_info(&request.email, &info)?;
-            }
-            Ok(None) => {
-                // token 已死:恢复没意义,摘回去并明确告知。
-                state
-                    .accounts
-                    .mark_unavailable(&request.email, "token 失效 (401)");
-                upstream_note = Some("token 已失效 (401),恢复后仍不可用;需重新授权".into());
-            }
-            Err(err) if crate::raycast::client::is_account_dead_upstream(&err) => {
-                let err = crate::account::quota_refresh::record_refresh_error(
-                    &state.accounts,
-                    &request.email,
-                    err,
-                );
-                upstream_note = Some(err.to_string());
-            }
-            Err(_) => {
-                upstream_note =
-                    Some("上游查询失败(网络/其他),账号已恢复可用但额度信息未更新".into());
-            }
-        }
-    }
-
-    let row = state.accounts.get(&request.email)?.ok_or_else(|| {
-        GatewayError::NotFound(format!("no account with email {}", request.email))
-    })?;
+    let (row, upstream_note) =
+        crate::account::service::restore(&state.accounts, &state.client, &request.email).await?;
     let mut view = account_view(row);
     view.unavailable_reason = upstream_note.clone();
     // note 不该污染 available 语义:查询成功时 reason 已是 None。

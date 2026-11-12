@@ -1,5 +1,7 @@
 # raycast2api 架构与流程图
 
+> 2026-11-12：本文保留总体设计；当前实现、修复清单与验证范围以 [项目架构与优化记录](./architecture-optimization-2026-11-12.md) 为准。
+
 > 目标:作为**协议转换中间层**,把 Claude Code(Anthropic 协议)与 Codex / OpenAI 兼容客户端(OpenAI 协议)的标准请求,转换为 Raycast AI 后端所需的参数;再把 Raycast 的响应按**请求来源路径**反向转换回 Anthropic 或 OpenAI 协议。
 >
 > ✅ **Raycast AI 后端协议已抓包确认**,详见 [`raycast-backend-protocol.md`](./raycast-backend-protocol.md)。核心事实:后端接口为 `POST https://backend.raycast.com/api/v1/ai/chat_completions`,**始终以 SSE 流式返回**(请求体无 `stream` 字段);"非流式"由网关聚合流后一次性返回。

@@ -17,6 +17,8 @@
 
 ## 架构
 
+当前实现、修复 TODO 与部署限制见 [2026-11-12 项目架构与优化记录](./doc/architecture-optimization-2026-11-12.md)。
+
 网关采用"协议适配层 → 统一内部模型 → 上游适配层"的分层设计，客户端协议与上游 Raycast 互不感知，任意一侧都可独立演进：
 
 ```
@@ -108,6 +110,7 @@ cp config.example.json config.json
 | `api_key` | `API_KEY` | 否 | 无 | 网关自身的 API key；不设置则不鉴权 |
 | `accounts_db` | `ACCOUNTS_DB` | 否 | `store/store.db` | SQLite 存储库文件路径（账号表及后续模块共用） |
 | `host` | `HOST` | 否 | `0.0.0.0` | 监听地址（须为 IP） |
+| `upstream_timeout_secs` | — | 否 | `20` | 上游超时秒数，正整数；用于连接、响应头、首包、SSE 空闲及普通查询/OAuth。修改后重启生效，流式任务持续有输出可超过此时长 |
 | `port` | `PORT` | 否 | `8787` | 监听端口 |
 | `proxies` | `PROXIES` | 否 | `[]` | 上游代理链（http/https/socks5 URL 数组；环境变量用逗号分隔）。上游直连发生网络错误时按顺序逐个换代理重试，全失败才报错；缺省纯直连 |
 

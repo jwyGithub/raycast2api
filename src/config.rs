@@ -59,7 +59,7 @@ pub const MIN_COOLDOWN_SECS: u64 = 60;
 pub const MAX_COOLDOWN_SECS: u64 = 24 * 60 * 60;
 
 /// JSON configuration file structure.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ConfigFile {
     pub host: Option<String>,
     pub port: Option<u16>,
@@ -68,6 +68,8 @@ pub struct ConfigFile {
     pub raycast_signature_secret: Option<String>,
     /// SQLite 存储库路径,默认 `store/store.db`。
     pub accounts_db: Option<String>,
+    /// 上游超时（秒），必须大于零，默认 20。
+    pub upstream_timeout_secs: Option<std::num::NonZeroU64>,
     /// 上游代理链(可选):`http://`/`https://`/`socks5://` URL 列表。
     /// `proxies_enabled` 决定代理是首选还是回退通道;缺省/空 = 纯直连。
     #[serde(default, alias = "proxies")]
@@ -100,6 +102,7 @@ pub struct Settings {
     pub model_overrides: HashMap<String, String>,
     /// SQLite 账号库路径(账号表与后续模块共用)。
     pub accounts_db: String,
+    pub upstream_timeout: std::time::Duration,
     /// 上游代理链:按顺序尝试的代理 URL;空 = 纯直连。
     pub proxies: Vec<String>,
     /// 代理通道模式:`true` = 代理优先(全挂回退直连),`false` = 直连优先
@@ -111,21 +114,17 @@ impl Settings {
     /// Read configuration from a JSON file, with environment variables as fallback.
     /// Tries to load from `config.json` first; if not found, falls back to environment.
     pub fn from_config() -> Result<Self, String> {
-        // Try loading from config.json
-        if let Ok(config) = Self::load_config_file("config.json") {
-            return Self::from_config_file(config);
-        }
-
-        // Fallback to environment variables
-        Self::from_env()
+        Self::from_path(std::path::Path::new("config.json"))
     }
 
-    /// Load configuration from a JSON file.
-    fn load_config_file(path: &str) -> Result<ConfigFile, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read config file '{path}': {e}"))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("failed to parse config file '{path}': {e}"))
+    fn from_path(path: &std::path::Path) -> Result<Self, String> {
+        match std::fs::read_to_string(path) {
+            Ok(content) => Self::from_config_file(
+                serde_json::from_str(&content).map_err(|e| format!("invalid config.json: {e}"))?,
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::from_env(),
+            Err(error) => Err(format!("failed to read config.json: {error}")),
+        }
     }
 
     /// Create Settings from a ConfigFile, with environment variable overrides.
@@ -179,6 +178,11 @@ impl Settings {
             bind_addr,
             bind_addr_dual,
             model_overrides: config.model_overrides.unwrap_or_default(),
+            upstream_timeout: std::time::Duration::from_secs(
+                config
+                    .upstream_timeout_secs
+                    .map_or(20, std::num::NonZeroU64::get),
+            ),
             accounts_db,
             proxies,
             proxies_enabled,
@@ -188,53 +192,7 @@ impl Settings {
     /// Read configuration from the environment. Returns an error naming the
     /// first missing/invalid required variable.
     fn from_env() -> Result<Self, String> {
-        let raycast_device_id = env_required("RAYCAST_DEVICE_ID")?;
-
-        let accounts_db = env_opt("ACCOUNTS_DB").unwrap_or_else(|| "store/store.db".to_string());
-
-        let host = env_opt("HOST").unwrap_or_else(|| "0.0.0.0".to_string());
-        let port: u16 = match env_opt("PORT") {
-            Some(p) => p.parse().map_err(|_| format!("invalid PORT: {p}"))?,
-            None => 8787,
-        };
-
-        // Parse primary address
-        let addr_string = if host.contains(':') {
-            format!("[{host}]:{port}")
-        } else {
-            format!("{host}:{port}")
-        };
-
-        let bind_addr: SocketAddr = addr_string
-            .parse()
-            .map_err(|e| format!("invalid HOST/PORT '{addr_string}': {e} (HOST must be an IP)"))?;
-
-        // Dual-stack binding: if primary is IPv4 "0.0.0.0", also bind to IPv6 "[::]"
-        let bind_addr_dual = if bind_addr.ip() == IpAddr::from([0, 0, 0, 0]) {
-            Some(SocketAddr::new(
-                IpAddr::from([0, 0, 0, 0, 0, 0, 0, 0]),
-                port,
-            ))
-        } else {
-            None
-        };
-
-        let proxies = parse_proxies(None, env_opt("PROXIES"))?;
-        // 环境变量模式没有 config 文件,PROXIES 存在即视为代理优先。
-        let proxies_enabled = !proxies.is_empty();
-
-        Ok(Self {
-            raycast_device_id,
-            raycast_signature_secret: env_opt("RAYCAST_SIGNATURE_SECRET"),
-            api_key: env_opt("API_KEY"),
-            bind_addr,
-            bind_addr_dual,
-            // No env-var form for a map; aliases are config-file only.
-            model_overrides: HashMap::new(),
-            accounts_db,
-            proxies,
-            proxies_enabled,
-        })
+        Self::from_config_file(ConfigFile::default())
     }
 
     /// The signing secret as an `Option<&str>`, ready for the signature code.
@@ -271,13 +229,6 @@ fn parse_proxies(
     Ok(proxies)
 }
 
-fn env_required(key: &str) -> Result<String, String> {
-    match std::env::var(key) {
-        Ok(v) if !v.is_empty() => Ok(v),
-        _ => Err(format!("missing required environment variable {key}")),
-    }
-}
-
 fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
 }
@@ -285,6 +236,46 @@ fn env_opt(key: &str) -> Option<String> {
 #[cfg(test)]
 mod proxy_tests {
     use super::*;
+
+    #[test]
+    fn upstream_timeout_defaults_and_accepts_positive_seconds_only() {
+        for (json, expected) in [
+            (r#"{"raycast_device_id":"test"}"#, 20),
+            (
+                r#"{"raycast_device_id":"test","upstream_timeout_secs":45}"#,
+                45,
+            ),
+        ] {
+            let config = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                Settings::from_config_file(config)
+                    .unwrap()
+                    .upstream_timeout
+                    .as_secs(),
+                expected
+            );
+        }
+        for value in ["0", "-1", "1.5", "\"20\""] {
+            assert!(
+                serde_json::from_str::<ConfigFile>(&format!(
+                    "{{\"upstream_timeout_secs\":{value}}}"
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_configuration_does_not_fall_back_to_environment() {
+        let path = std::env::temp_dir().join(format!(
+            "r2a-invalid-config-{}.json",
+            crate::util::new_ulid()
+        ));
+        std::fs::write(&path, "{").unwrap();
+        let error = Settings::from_path(&path).unwrap_err();
+        std::fs::remove_file(path).unwrap();
+        assert!(error.contains("invalid config.json"));
+    }
 
     #[test]
     fn parse_proxies_validates_scheme_and_skips_empty() {

@@ -1,6 +1,6 @@
 //! Bridges the Raycast SSE transport to the canonical event stream.
 //!
-//! [`canonical_events`] owns the upstream [`reqwest::Response`] and yields a
+//! [`canonical_events_with_retry`] owns the upstream [`reqwest::Response`] and yields a
 //! provider-agnostic [`CanonicalEvent`] stream: it feeds the raw byte chunks
 //! through the [`SseDecoder`], then maps each decoded `data:` payload with the
 //! [`parser`](super::parser). This is the single place the byte transport meets
@@ -17,7 +17,7 @@ use futures_util::{Stream, StreamExt, future::BoxFuture};
 use std::collections::VecDeque;
 
 use crate::core::event::CanonicalEvent;
-use crate::debug;
+use crate::log::context as debug;
 use crate::log::format::{DeltaLogBuffer, truncate_for_log};
 use crate::log::store::RequestLogStore;
 
@@ -25,14 +25,6 @@ use super::parser::parse_events;
 use super::sse::SseDecoder;
 
 use std::sync::Arc;
-
-/// Decode a Raycast chat SSE response into a stream of [`CanonicalEvent`]s.
-pub fn canonical_events(
-    response: reqwest::Response,
-    log: Arc<RequestLogStore>,
-) -> impl Stream<Item = CanonicalEvent> {
-    decode_events(response, log).map(|event| event.unwrap_or_else(|()| premature_error()))
-}
 
 /// Retry only unexpected SSE truncation, using the exact same upstream body.
 pub fn canonical_events_with_retry(
@@ -42,7 +34,8 @@ pub fn canonical_events_with_retry(
     log: Arc<RequestLogStore>,
 ) -> impl Stream<Item = CanonicalEvent> + Send + 'static {
     let id = debug::current_request_id();
-    retry_once(response, log, move || {
+    let timeout = client.upstream_timeout();
+    retry_once(response, log, timeout, move || {
         Box::pin(async move {
             debug::REQUEST_ID
                 .scope(id, client.send_chat(&request))
@@ -61,21 +54,30 @@ fn premature_error() -> CanonicalEvent {
 fn retry_once(
     response: reqwest::Response,
     log: Arc<RequestLogStore>,
+    timeout: std::time::Duration,
     resend: impl FnOnce() -> BoxFuture<'static, Result<reqwest::Response, GatewayError>>
     + Send
     + 'static,
 ) -> impl Stream<Item = CanonicalEvent> + Send + 'static {
     let id = debug::current_request_id();
-    let first = decode_events(response, log.clone());
+    let first = decode_events(response, log.clone(), timeout);
     stream! {
         let mut delivered = VecDeque::new();
+        let mut delivered_bytes = 0usize;
+        let mut can_retry = true;
         let mut first = std::pin::pin!(first);
         let mut truncated = false;
         while let Some(result) = first.next().await {
             match result {
                 Ok(event) => {
                     let terminal = matches!(event, CanonicalEvent::Finish { .. } | CanonicalEvent::Error { .. });
-                    delivered.push_back(event.clone());
+                    delivered_bytes += match &event {
+                        CanonicalEvent::TextDelta(s) | CanonicalEvent::ReasoningDelta(s) | CanonicalEvent::ThoughtSignature(s) => s.len(),
+                        CanonicalEvent::ToolCall(call) => call.id.len() + call.name.len() + call.arguments.len(),
+                        _ => 0,
+                    };
+                    if delivered_bytes > 2 * 1024 * 1024 || delivered.len() >= 16_384 { can_retry = false; delivered.clear(); }
+                    if can_retry { delivered.push_back(event.clone()); }
                     yield event;
                     if terminal { return; }
                 }
@@ -83,6 +85,7 @@ fn retry_once(
             }
         }
         if !truncated { return; }
+        if !can_retry { yield premature_error(); return; }
         tracing::warn!("upstream SSE truncated [{id}] — retrying identical request once");
         let retry_started = std::time::Instant::now();
         tracing::trace!(request_id = %id, attempt = 1, max_retries = 1, delivered_events = delivered.len(), "SSE retry: sending identical request");
@@ -98,7 +101,7 @@ fn retry_once(
                 return;
             }
         };
-        let retry = debug::REQUEST_ID.scope(id.clone(), async { decode_events(response, log) }).await;
+        let retry = debug::REQUEST_ID.scope(id.clone(), async { decode_events(response, log, timeout) }).await;
         let mut retry = std::pin::pin!(retry);
         while let Some(result) = retry.next().await {
             let event = match result {
@@ -188,6 +191,7 @@ fn skip_delivered(
 fn decode_events(
     response: reqwest::Response,
     log: Arc<RequestLogStore>,
+    timeout: std::time::Duration,
 ) -> impl Stream<Item = Result<CanonicalEvent, ()>> + Send + 'static {
     // Grab the correlation id *here*: the task-local REQUEST_ID scope is only
     // valid inside the handler, while the stream below is polled outside it.
@@ -196,6 +200,8 @@ fn decode_events(
 
     stream! {
         let mut payloads: Vec<String> = Vec::new();
+        let mut captured_bytes = 0usize;
+        let mut capture_full = false;
         let mut bytes = response.bytes_stream();
         let mut decoder = SseDecoder::new();
         let mut text_log = DeltaLogBuffer::default();
@@ -205,7 +211,7 @@ fn decode_events(
         // 已打印过的通知数:每次增量打印新通知,避免重复刷屏。
         let mut seen_notifications = 0;
 
-        while let Some(chunk) = bytes.next().await {
+        while let Ok(Some(chunk)) = tokio::time::timeout(timeout, bytes.next()).await {
             let Ok(chunk) = chunk else {
                 // 上游传输层断连(连接重置/代理掐断):流没有 error payload、
                 // 没有 finish 就直接没了。必须留痕,否则排查时终端日志
@@ -219,7 +225,13 @@ fn decode_events(
                 break;
             };
             for payload in decoder.push_bytes(&chunk) {
-                payloads.push(payload.clone());
+                if !capture_full && captured_bytes + payload.len() < 2 * 1024 * 1024 {
+                    captured_bytes += payload.len() + 1;
+                    payloads.push(payload.clone());
+                } else if !capture_full {
+                    capture_full = true;
+                    payloads.push("[gateway: response log truncated at 2 MiB]".into());
+                }
                 // ponytail: 打印原始 SSE 数据用于调试
                 tracing::debug!("upstream SSE payload: {}", payload);
 
@@ -307,6 +319,23 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[tokio::test]
+    async fn output_over_retry_budget_never_replays_request() {
+        let text = "x".repeat(2 * 1024 * 1024 + 1);
+        let events: Vec<_> = retry_once(
+            response(&[json!({"text":text})]),
+            log(),
+            std::time::Duration::from_secs(20),
+            || panic!("oversized output must not be replayed"),
+        )
+        .collect()
+        .await;
+        assert!(matches!(
+            events.last(),
+            Some(CanonicalEvent::Error { status: 502, .. })
+        ));
+    }
+
     fn log() -> Arc<RequestLogStore> {
         Arc::new(RequestLogStore::new(Db::open(":memory:").unwrap()))
     }
@@ -340,6 +369,7 @@ mod tests {
                 json!({"text":"世界"}),
             ]),
             log(),
+            std::time::Duration::from_secs(20),
             move || {
                 Box::pin(async move {
                     retried.fetch_add(1, Ordering::SeqCst);
@@ -376,9 +406,12 @@ mod tests {
             vec![json!({"text":"ok"}), finish()],
             vec![json!({"error":{"http_status":502,"message":"explicit error"}})],
         ] {
-            let events: Vec<_> = retry_once(response(&payloads), log(), || {
-                panic!("must not retry explicit terminal events")
-            })
+            let events: Vec<_> = retry_once(
+                response(&payloads),
+                log(),
+                std::time::Duration::from_secs(20),
+                || panic!("must not retry explicit terminal events"),
+            )
             .collect()
             .await;
             assert!(matches!(
@@ -390,9 +423,12 @@ mod tests {
 
     #[tokio::test]
     async fn second_truncation_is_failure_without_third_attempt() {
-        let events: Vec<_> = retry_once(response(&[json!({"text":"A"})]), log(), || {
-            Box::pin(async { Ok(response(&[json!({"text":"AB"})])) })
-        })
+        let events: Vec<_> = retry_once(
+            response(&[json!({"text":"A"})]),
+            log(),
+            std::time::Duration::from_secs(20),
+            || Box::pin(async { Ok(response(&[json!({"text":"AB"})])) }),
+        )
         .collect()
         .await;
         assert_eq!(&events[..2], &[text("A"), text("B")]);
@@ -405,9 +441,12 @@ mod tests {
     #[tokio::test]
     async fn retry_divergence_or_shorter_answer_fails_before_emitting_bad_content() {
         for payload in ["AX", "A"] {
-            let events: Vec<_> = retry_once(response(&[json!({"text":"AB"})]), log(), move || {
-                Box::pin(async move { Ok(response(&[json!({"text":payload}), finish()])) })
-            })
+            let events: Vec<_> = retry_once(
+                response(&[json!({"text":"AB"})]),
+                log(),
+                std::time::Duration::from_secs(20),
+                move || Box::pin(async move { Ok(response(&[json!({"text":payload}), finish()])) }),
+            )
             .collect()
             .await;
             assert_eq!(events.len(), 2);
@@ -421,17 +460,22 @@ mod tests {
     #[tokio::test]
     async fn retry_connection_failure_or_business_error_is_terminal() {
         for connection_error in [true, false] {
-            let events: Vec<_> = retry_once(response(&[]), log(), move || {
-                Box::pin(async move {
-                    if connection_error {
-                        Err(GatewayError::NoAccount("no account".into()))
-                    } else {
-                        Ok(response(&[
-                            json!({"error":{"http_status":429,"message":"limited"}}),
-                        ]))
-                    }
-                })
-            })
+            let events: Vec<_> = retry_once(
+                response(&[]),
+                log(),
+                std::time::Duration::from_secs(20),
+                move || {
+                    Box::pin(async move {
+                        if connection_error {
+                            Err(GatewayError::NoAccount("no account".into()))
+                        } else {
+                            Ok(response(&[
+                                json!({"error":{"http_status":429,"message":"limited"}}),
+                            ]))
+                        }
+                    })
+                },
+            )
             .collect()
             .await;
             assert!(matches!(events.as_slice(), [CanonicalEvent::Error { .. }]));
@@ -490,9 +534,12 @@ mod tests {
         store.insert_request("retry-id", "POST", "/v1/responses", &json!({}));
         let events = debug::REQUEST_ID
             .scope("retry-id".into(), async {
-                retry_once(first, store.clone(), || {
-                    Box::pin(async { Ok(response(&[json!({"text":"AB"}), finish()])) })
-                })
+                retry_once(
+                    first,
+                    store.clone(),
+                    std::time::Duration::from_secs(20),
+                    || Box::pin(async { Ok(response(&[json!({"text":"AB"}), finish()])) }),
+                )
             })
             .await;
         let events: Vec<_> = events.collect().await;
@@ -504,9 +551,12 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_first_stream_never_starts_retry() {
-        let events = retry_once(response(&[json!({"text":"A"})]), log(), || {
-            panic!("cancelled stream must not retry")
-        });
+        let events = retry_once(
+            response(&[json!({"text":"A"})]),
+            log(),
+            std::time::Duration::from_secs(20),
+            || panic!("cancelled stream must not retry"),
+        );
         let mut events = Box::pin(events);
         assert_eq!(events.next().await, Some(text("A")));
         drop(events);
@@ -529,14 +579,19 @@ mod tests {
     async fn responses_adapter_completes_recovered_stream_and_fails_diverged_stream() {
         use crate::protocol::{OutboundAdapter, responses::ResponsesOutbound};
         for divergent in [false, true] {
-            let events = retry_once(response(&[json!({"text":"A"})]), log(), move || {
-                Box::pin(async move {
-                    Ok(response(&[
-                        json!({"text": if divergent { "X" } else { "AB" }}),
-                        finish(),
-                    ]))
-                })
-            });
+            let events = retry_once(
+                response(&[json!({"text":"A"})]),
+                log(),
+                std::time::Duration::from_secs(20),
+                move || {
+                    Box::pin(async move {
+                        Ok(response(&[
+                            json!({"text": if divergent { "X" } else { "AB" }}),
+                            finish(),
+                        ]))
+                    })
+                },
+            );
             let rendered = ResponsesOutbound::stream("model", events);
             let bytes = axum::body::to_bytes(rendered.into_body(), usize::MAX)
                 .await
