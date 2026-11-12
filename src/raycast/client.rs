@@ -129,7 +129,9 @@ impl RaycastClient {
                 Err(error) => {
                     // 池空且从未拿到上游错误:用冷却 ETA 充实 503,让客户端
                     // 知道这是限流而非永久故障,以及什么时候能恢复。
-                    return Err(last_error.unwrap_or_else(|| enrich_no_account(error, &self.accounts)));
+                    return Err(
+                        last_error.unwrap_or_else(|| enrich_no_account(error, &self.accounts))
+                    );
                 }
             };
             tracing::info!(account = %account.email, tag = ?account.tag, "→ using account");

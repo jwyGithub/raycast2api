@@ -640,8 +640,8 @@ fn streaming_tool_call_with_safety_check_carries_safeguard_results() {
     use raycast2api::core::message::ToolCall;
     use raycast2api::core::response::FinishReason as FR;
     use raycast2api::core::usage::Usage;
-    use raycast2api::protocol::messages::outbound::{MessagesOutbound, StreamEncoder};
     use raycast2api::protocol::OutboundAdapter;
+    use raycast2api::protocol::messages::outbound::{MessagesOutbound, StreamEncoder};
 
     let events = futures_util::stream::iter(vec![
         CE::ToolCall(ToolCall {
@@ -668,9 +668,11 @@ fn streaming_tool_call_with_safety_check_carries_safeguard_results() {
         },
         events,
     );
-    let bytes = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(async { axum::body::to_bytes(rendered.into_body(), usize::MAX).await.unwrap() });
+    let bytes = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        axum::body::to_bytes(rendered.into_body(), usize::MAX)
+            .await
+            .unwrap()
+    });
     let text = String::from_utf8(bytes.to_vec()).unwrap();
     let delta_line = text
         .lines()
@@ -681,8 +683,7 @@ fn streaming_tool_call_with_safety_check_carries_safeguard_results() {
     let results = &frame["delta"]["safeguard_results"];
     assert_eq!(results["type"], "available");
     assert_eq!(
-        results["tool_uses"]["toolu_1"]["type"],
-        "unavailable",
+        results["tool_uses"]["toolu_1"]["type"], "unavailable",
         "gateway cannot classify; explicit unavailable keeps auto mode alive"
     );
 
@@ -699,10 +700,16 @@ fn streaming_tool_call_with_safety_check_carries_safeguard_results() {
         ),
         events2,
     );
-    let bytes2 = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(async { axum::body::to_bytes(rendered2.into_body(), usize::MAX).await.unwrap() });
-    assert!(!String::from_utf8(bytes2.to_vec()).unwrap().contains("safeguard_results"));
+    let bytes2 = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        axum::body::to_bytes(rendered2.into_body(), usize::MAX)
+            .await
+            .unwrap()
+    });
+    assert!(
+        !String::from_utf8(bytes2.to_vec())
+            .unwrap()
+            .contains("safeguard_results")
+    );
 
     // Encoder direct: finalize() without safeguards stays unchanged.
     let mut enc = StreamEncoder::new();

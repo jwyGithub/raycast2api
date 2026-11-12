@@ -82,10 +82,7 @@ impl GatewayError {
                 (
                     StatusCode::TOO_MANY_REQUESTS,
                     "rate_limit_error",
-                    format!(
-                        "{message} (retry-after: {}s)",
-                        retry_after_secs.max(&0)
-                    ),
+                    format!("{message} (retry-after: {}s)", retry_after_secs.max(&0)),
                 )
             }
             GatewayError::Internal(m) => {
@@ -138,14 +135,15 @@ impl IntoResponse for GatewayError {
         //   immediately (a 503 without it is retried on exponential backoff,
         //   which is the "client waits forever" symptom).
         match &self {
-            GatewayError::RateLimited { retry_after_secs, .. } => {
+            GatewayError::RateLimited {
+                retry_after_secs, ..
+            } => {
                 if let Ok(value) =
                     axum::http::HeaderValue::from_str(&retry_after_secs.max(&0).to_string())
                 {
-                    response.headers_mut().insert(
-                        axum::http::header::RETRY_AFTER,
-                        value,
-                    );
+                    response
+                        .headers_mut()
+                        .insert(axum::http::header::RETRY_AFTER, value);
                 }
             }
             GatewayError::NoAccount(_) => {

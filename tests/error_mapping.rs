@@ -96,7 +96,12 @@ fn rate_limited_clamps_negative_eta() {
     let response = err.into_response();
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
-        response.headers().get("retry-after").unwrap().to_str().unwrap(),
+        response
+            .headers()
+            .get("retry-after")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "0"
     );
 }
@@ -108,7 +113,10 @@ fn no_account_sets_x_should_retry_false() {
     let response = GatewayError::NoAccount("pool empty".into()).into_response();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        response.headers().get("x-should-retry").map(|v| v.to_str().unwrap()),
+        response
+            .headers()
+            .get("x-should-retry")
+            .map(|v| v.to_str().unwrap()),
         Some("false")
     );
 }

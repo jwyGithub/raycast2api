@@ -34,9 +34,7 @@ use crate::error::GatewayError;
 use crate::protocol::OutboundAdapter;
 use crate::util::new_uuid;
 
-use super::wire::{
-    MessageResponse, OutputBlock, OutputUsage, SafeguardResults,
-};
+use super::wire::{MessageResponse, OutputBlock, OutputUsage, SafeguardResults};
 
 /// Zero-sized marker selecting the Anthropic Messages outbound rendering.
 pub struct MessagesOutbound;
@@ -338,7 +336,10 @@ impl StreamEncoder {
     /// [`finalize`](Self::finalize) with optional auto-mode safeguard results
     /// attached to the `message_delta.delta` (Claude Code expects them there
     /// when it requested a server-side safety check).
-    pub fn finalize_with_safeguards(&mut self, safeguards: Option<SafeguardResults>) -> Vec<SseFrame> {
+    pub fn finalize_with_safeguards(
+        &mut self,
+        safeguards: Option<SafeguardResults>,
+    ) -> Vec<SseFrame> {
         if self.finalized {
             return Vec::new();
         }

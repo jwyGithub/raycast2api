@@ -87,7 +87,9 @@ pub enum SafeguardVerdict {
         explanation: Option<String>,
     },
     Skipped,
-    Unavailable { reason: &'static str },
+    Unavailable {
+        reason: &'static str,
+    },
 }
 
 /// The `safeguard_results` payload carried on the terminating
