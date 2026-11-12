@@ -7,6 +7,68 @@
         <title>Raycast 管理控制台</title>
         <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
         <script defer src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css" />
+        <style>
+            .flatpickr-calendar.raycast-calendar {
+                position: fixed;
+                margin: 0;
+                padding: 6px;
+                border: 1px solid #e4e7ec;
+                border-radius: 12px;
+                background: white;
+                color: #242933;
+                font:
+                    13px/1.5 system-ui,
+                    sans-serif;
+                box-shadow: 0 8px 24px #1018281a;
+                z-index: 60;
+            }
+            .raycast-calendar::before,
+            .raycast-calendar::after {
+                display: none;
+            }
+            .raycast-calendar .flatpickr-day {
+                border-radius: 8px;
+            }
+            .raycast-calendar .flatpickr-day.selected {
+                background: #262b33;
+                border-color: #262b33;
+            }
+            .raycast-calendar .flatpickr-day:hover {
+                background: #f1f5f9;
+                border-color: #f1f5f9;
+                color: #242933;
+            }
+            .raycast-calendar .flatpickr-day:focus-visible,
+            .raycast-calendar button:focus-visible {
+                outline: 2px solid #3b82f6;
+                outline-offset: -2px;
+            }
+            .raycast-calendar .flatpickr-time {
+                border-color: #e4e7ec;
+                margin-top: 6px;
+            }
+            .raycast-calendar .picker-actions {
+                display: flex;
+                justify-content: space-between;
+                gap: 8px;
+                border-top: 1px solid #e4e7ec;
+                padding: 8px 4px 2px;
+            }
+            .raycast-calendar .picker-actions button {
+                cursor: pointer;
+                border: 1px solid #e4e7ec;
+                border-radius: 8px;
+                background: white;
+                padding: 6px 12px;
+                font: inherit;
+            }
+            .raycast-calendar .picker-actions button:last-child {
+                background: #262b33;
+                border-color: #262b33;
+                color: white;
+            }
+        </style>
         <style type="text/tailwindcss">
             @theme {
                 --color-brand: #262b33;
@@ -26,6 +88,8 @@
             import { computePosition, autoUpdate, offset, flip, shift } from 'https://cdn.jsdelivr.net/npm/@floating-ui/dom@1.8.0/+esm';
             import dayjs from 'https://cdn.jsdelivr.net/npm/dayjs@1.11.23/+esm';
             import customParseFormat from 'https://cdn.jsdelivr.net/npm/dayjs@1.11.23/plugin/customParseFormat.js/+esm';
+            import flatpickr from 'https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/+esm';
+            import { Mandarin } from 'https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/zh.js/+esm';
             dayjs.extend(customParseFormat);
             const motionEnabled = () => window.gsap && !matchMedia('(prefers-reduced-motion: reduce)').matches;
             class UiTooltip extends LitElement {
@@ -134,7 +198,13 @@
                     const content = this.shadowRoot.querySelector('.content');
                     window.gsap?.killTweensOf(content);
                     if (this.isConnected && motionEnabled())
-                        window.gsap.to(content, { opacity: 0, y: 4, duration: 0.12, ease: 'power1.out', onComplete: () => tip.hidePopover() });
+                        window.gsap.to(content, {
+                            opacity: 0,
+                            y: 4,
+                            duration: 0.12,
+                            ease: 'power1.out',
+                            onComplete: () => tip.hidePopover()
+                        });
                     else tip.hidePopover();
                 }
                 scheduleHide() {
@@ -168,7 +238,9 @@
                             @keydown=${e => {
                                 if (e.key === 'Escape') this.hide();
                             }}
-                        ><div class="content">${this.content}</div></div>`;
+                        >
+                            <div class="content">${this.content}</div>
+                        </div>`;
                 }
             }
             customElements.define('ui-tooltip', UiTooltip);
@@ -565,6 +637,141 @@
                 }
             }
             customElements.define('ui-select', UiSelect);
+            class UiDatePicker extends LitElement {
+                static properties = { value: { type: String }, disabled: { type: Boolean }, label: { type: String } };
+                static nextId = 0;
+                constructor() {
+                    super();
+                    this.value = '';
+                    this.label = '日期时间';
+                    this.inputId = 'date-picker-' + ++UiDatePicker.nextId;
+                }
+                createRenderRoot() {
+                    return this;
+                }
+                connectedCallback() {
+                    super.connectedCallback();
+                    this.updateComplete.then(() => {
+                        if (!this.isConnected || this.picker) return;
+                        this.picker = flatpickr(this.querySelector('input'), {
+                            locale: Mandarin,
+                            enableTime: true,
+                            enableSeconds: true,
+                            time_24hr: true,
+                            minuteIncrement: 1,
+                            disableMobile: true,
+                            animate: false,
+                            monthSelectorType: 'static',
+                            dateFormat: 'Y-m-d H:i:S',
+                            ariaDateFormat: 'Y年m月d日',
+                            position: () => this.updatePosition?.(),
+                            onReady: (_, __, picker) => {
+                                picker.calendarContainer.classList.add('raycast-calendar');
+                                picker.hourElement.setAttribute('aria-label', '时');
+                                picker.minuteElement.setAttribute('aria-label', '分');
+                                picker.secondElement.setAttribute('aria-label', '秒');
+                                const actions = document.createElement('div');
+                                actions.className = 'picker-actions';
+                                for (const [text, action] of [
+                                    [
+                                        '清除',
+                                        () => {
+                                            picker.clear();
+                                            picker.close();
+                                        }
+                                    ],
+                                    ['确定', () => picker.close()]
+                                ]) {
+                                    const button = document.createElement('button');
+                                    button.type = 'button';
+                                    button.textContent = text;
+                                    button.addEventListener('click', action);
+                                    actions.append(button);
+                                }
+                                picker.calendarContainer.append(actions);
+                            },
+                            onChange: dates => {
+                                this.value = dates.length ? dayjs(dates[0]).format('YYYY-MM-DDTHH:mm:ss') : '';
+                                this.dispatchEvent(
+                                    new CustomEvent('date-change', { detail: { value: this.value }, bubbles: true, composed: true })
+                                );
+                            },
+                            onOpen: (_, __, picker) => this.startPositioning(picker),
+                            onClose: () => this.stopPositioning()
+                        });
+                        this.syncValue();
+                    });
+                }
+                updated() {
+                    this.syncValue();
+                }
+                syncValue() {
+                    if (!this.picker) return;
+                    if (this.disabled) this.picker.close();
+                    const current = this.picker.selectedDates[0];
+                    if ((current ? dayjs(current).format('YYYY-MM-DDTHH:mm:ss') : '') === this.value) return;
+                    if (!this.value) this.picker.clear(false);
+                    else {
+                        const date = dayjs(this.value, ['YYYY-MM-DDTHH:mm:ss', 'YYYY-MM-DDTHH:mm'], true);
+                        if (date.isValid()) this.picker.setDate(date.toDate(), false);
+                    }
+                }
+                startPositioning(picker) {
+                    this.stopPositioning();
+                    const calendar = picker.calendarContainer;
+                    calendar.style.visibility = 'hidden';
+                    const update = async () => {
+                        try {
+                            const { x, y } = await computePosition(this.querySelector('input'), calendar, {
+                                strategy: 'fixed',
+                                placement: 'bottom-start',
+                                middleware: [offset(8), flip({ padding: 12 }), shift({ padding: 12, crossAxis: true })]
+                            });
+                            if (this.updatePosition !== update || !picker.isOpen || !this.isConnected) return;
+                            Object.assign(calendar.style, { left: x + 'px', top: y + 'px', visibility: 'visible' });
+                        } catch (error) {
+                            if (this.updatePosition === update) picker.close();
+                            console.warn('日期控件定位失败:', error);
+                        }
+                    };
+                    this.updatePosition = update;
+                    this.cleanupPosition = autoUpdate(this.querySelector('input'), calendar, update);
+                }
+                stopPositioning() {
+                    this.updatePosition = null;
+                    this.cleanupPosition?.();
+                    this.cleanupPosition = null;
+                }
+                disconnectedCallback() {
+                    this.stopPositioning();
+                    this.picker?.destroy();
+                    this.picker = null;
+                    super.disconnectedCallback();
+                }
+                render() {
+                    return html`<label for=${this.inputId} class="mb-1 block text-xs text-muted">${this.label}</label>
+                        <div class="relative">
+                            <input
+                                id=${this.inputId}
+                                type="text"
+                                autocomplete="off"
+                                class="h-9 w-56 max-w-full cursor-pointer rounded-lg border border-line bg-white pl-3 pr-9 text-[13px] text-ink hover:border-[#c9ced7] disabled:opacity-40"
+                                placeholder="请选择日期和时间"
+                                ?disabled=${this.disabled}
+                            />
+                            <svg
+                                class="pointer-events-none absolute right-3 top-2.5 size-4 text-muted"
+                                viewBox="0 0 16 16"
+                                fill="none"
+                                aria-hidden="true"
+                            >
+                                <rect x="2" y="3.5" width="12" height="10.5" rx="2" stroke="currentColor"></rect>
+                                <path d="M5 2v3M11 2v3M2 7h12" stroke="currentColor" stroke-linecap="round"></path>
+                            </svg>
+                        </div>`;
+                }
+            }
+            customElements.define('ui-date-picker', UiDatePicker);
             class AccountCard extends LitElement {
                 static properties = { account: { attribute: false }, busy: { type: Boolean } };
                 createRenderRoot() {
@@ -846,17 +1053,13 @@
                                     @input=${e => (this.requestId = e.target.value)}
                                 />
                             </div>
-                            <div>
-                                <label for="log-created-at" class="mb-1 block text-xs text-muted">创建时间（精确到秒）</label
-                                ><input
-                                    id="log-created-at"
-                                    type="datetime-local"
-                                    step="1"
-                                    class="h-9 max-w-full rounded-lg border border-line bg-white px-3 text-[13px]"
-                                    .value=${this.createdAt}
-                                    @input=${e => (this.createdAt = e.target.value)}
-                                />
-                            </div>
+                            <ui-date-picker
+                                class="block"
+                                label="创建时间（精确到秒）"
+                                .value=${this.createdAt}
+                                .disabled=${this.loading}
+                                @date-change=${e => (this.createdAt = e.detail.value)}
+                            ></ui-date-picker>
                             <button
                                 class="h-9 rounded-lg bg-brand px-4 text-[13px] text-white disabled:opacity-40"
                                 ?disabled=${this.loading}
@@ -1034,6 +1237,7 @@ ${this.formatBody(this.detail?.[this.detailTab])}</pre
 
             class AccountConsole extends LitElement {
                 static properties = {
+                    pageSize: { state: true },
                     panel: { state: true },
                     accounts: { state: true },
                     page: { state: true },
@@ -1052,6 +1256,7 @@ ${this.formatBody(this.detail?.[this.detailTab])}</pre
                     super();
                     Object.assign(this, {
                         panel: 'accounts',
+                        pageSize: 24,
                         accounts: [],
                         page: 1,
                         total: 0,
@@ -1103,7 +1308,7 @@ ${this.formatBody(this.detail?.[this.detailTab])}</pre
                         this.error = '';
                     }
                     try {
-                        const data = await this.request('list', { page: this.page, page_size: 24, status: this.status });
+                        const data = await this.request('list', { page: this.page, page_size: this.pageSize, status: this.status });
                         this.accounts = data.items || [];
                         this.total = data.total || 0;
                         this.pages = data.total_pages || 0;
@@ -1203,6 +1408,7 @@ ${this.formatBody(this.detail?.[this.detailTab])}</pre
                     }
                 }
                 async switchPanel(panel) {
+                    this.querySelector('ui-date-picker')?.picker?.close();
                     this.panel = panel;
                     await this.updateComplete;
                     if (panel === 'logs') this.querySelector('logs-panel').load();
@@ -1335,6 +1541,18 @@ ${this.formatBody(this.detail?.[this.detailTab])}</pre
                                                     : '暂无账号'}
                                             </p>
                                             <div class="flex shrink-0 items-center gap-2">
+                                                <ui-select
+                                                    class="block"
+                                                    label="账号每页条数"
+                                                    .options=${[12, 24, 48, 96].map(size => [String(size), '每页 ' + size + ' 条'])}
+                                                    .value=${String(this.pageSize)}
+                                                    .disabled=${this.loading}
+                                                    @select-change=${e => {
+                                                        this.pageSize = Number(e.detail.value);
+                                                        this.page = 1;
+                                                        this.load();
+                                                    }}
+                                                ></ui-select>
                                                 <ui-button
                                                     class="inline-flex"
                                                     label="上一页"
