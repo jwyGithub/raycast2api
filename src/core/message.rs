@@ -86,10 +86,6 @@ impl Message {
     /// carries no error flag on `role:"tool"` messages, so a failed result is
     /// marked in-band; the model reads this and knows the output is an error.
     pub fn error_marker(is_error: bool) -> &'static str {
-        if is_error {
-            "[tool error] "
-        } else {
-            ""
-        }
+        if is_error { "[tool error] " } else { "" }
     }
 }

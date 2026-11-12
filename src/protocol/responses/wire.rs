@@ -154,7 +154,7 @@ pub enum InboundToolChoice {
     },
 }
 
-/// Responses reasoning config: `{ "effort": "low" | "medium" | "high", ... }`.
+/// Responses reasoning config: `{ "effort": "low" | "medium" | "high" | "xhigh" | "max", ... }`.
 #[derive(Debug, Deserialize)]
 pub struct ReasoningConfig {
     #[serde(default)]

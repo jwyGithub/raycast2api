@@ -113,11 +113,11 @@ fn adaptive_thinking_enables_reasoning() {
 
     assert!(matches!(
         canonical.reasoning_effort,
-        Some(ReasoningEffort::Medium)
+        Some(ReasoningEffort::High)
     ));
 
     let raycast = build_chat_request(&canonical, "anthropic", "claude");
-    assert_eq!(raycast.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(raycast.reasoning_effort.as_deref(), Some("high"));
 }
 
 #[test]

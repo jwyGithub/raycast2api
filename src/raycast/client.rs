@@ -165,7 +165,10 @@ impl RaycastClient {
                             );
                             return Err(GatewayError::Upstream {
                                 status,
-                                message: format!("{message}{}", crate::raycast::parser::content_policy_hint()),
+                                message: format!(
+                                    "{message}{}",
+                                    crate::raycast::parser::content_policy_hint()
+                                ),
                             });
                         }
                         if err.parsed.is_usage_limit() {

@@ -20,7 +20,7 @@
 //!   arguments are the raw `input` JSON-encoded; a
 //!   `custom_tool_call_output` item → a [`Role::Tool`] message answering it.
 //! * `reasoning.effort` → [`ReasoningEffort`] (a present `reasoning` object with
-//!   no recognized effort defaults to `Medium`, matching the plan's default).
+//!   no recognized effort defaults to `High`).
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -280,15 +280,17 @@ fn tool_choice(choice: InboundToolChoice) -> ToolChoice {
     }
 }
 
-/// Map `reasoning.effort` onto the canonical depth. A present `reasoning`
-/// object without a recognized effort enables thinking at the middle effort.
+/// Map `reasoning.effort` onto the canonical depth. The accepted values are
+/// `low`/`medium`/`high`/`xhigh`/`max`; a present `reasoning` object without a
+/// recognized effort enables thinking at `high`.
 fn reasoning_effort(reasoning: ReasoningConfig) -> ReasoningEffort {
     match reasoning.effort.as_deref() {
-        Some("minimal") | Some("low") => ReasoningEffort::Low,
-        Some("high") => ReasoningEffort::High,
+        Some("low") => ReasoningEffort::Low,
+        Some("medium") => ReasoningEffort::Medium,
         // `xhigh` is a Raycast wire value (the real client sends it); Responses
         // clients may also pass `max`, which clamps to the top known effort.
         Some("xhigh" | "max") => ReasoningEffort::XHigh,
-        _ => ReasoningEffort::Medium,
+        // `high` and any unrecognized value.
+        _ => ReasoningEffort::High,
     }
 }

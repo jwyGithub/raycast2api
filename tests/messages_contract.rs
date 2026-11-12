@@ -475,12 +475,13 @@ fn events(frames: &[raycast2api::protocol::messages::outbound::SseFrame]) -> Vec
 fn output_config_effort_maps_verbatim() {
     for (sent, expected) in [
         ("low", ReasoningEffort::Low),
-        ("minimal", ReasoningEffort::Low),
         ("medium", ReasoningEffort::Medium),
         ("high", ReasoningEffort::High),
         ("xhigh", ReasoningEffort::XHigh),
         // `max` has no Raycast wire value; clamps to the top known effort.
         ("max", ReasoningEffort::XHigh),
+        // Anything outside low/medium/high/xhigh/max falls back to high.
+        ("minimal", ReasoningEffort::High),
     ] {
         let canonical = parse(json!({
             "model": "claude-x",
@@ -531,14 +532,14 @@ fn thinking_budget_buckets_to_effort() {
 }
 
 #[test]
-fn adaptive_thinking_without_budget_is_medium() {
+fn adaptive_thinking_without_budget_is_high() {
     let canonical = parse(json!({
         "model": "claude-x",
         "messages": [{ "role": "user", "content": "hi" }],
         "thinking": { "type": "adaptive" }
     }))
     .unwrap();
-    assert_eq!(canonical.reasoning_effort, Some(ReasoningEffort::Medium));
+    assert_eq!(canonical.reasoning_effort, Some(ReasoningEffort::High));
 }
 
 #[test]
@@ -588,11 +589,10 @@ fn tool_result_is_error_is_kept_and_marked_upstream() {
             tool_error: false,
         },
     );
-    let mut canonical =
-        raycast2api::core::request::CanonicalRequest::new(
-            raycast2api::core::protocol::Protocol::Messages,
-            "claude-x",
-        );
+    let mut canonical = raycast2api::core::request::CanonicalRequest::new(
+        raycast2api::core::protocol::Protocol::Messages,
+        "claude-x",
+    );
     canonical.messages = messages;
     let built =
         raycast2api::raycast::builder::build_chat_request(&canonical, "anthropic", "claude-x");

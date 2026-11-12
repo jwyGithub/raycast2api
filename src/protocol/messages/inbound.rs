@@ -18,9 +18,9 @@
 //!   them by forwarding them as user turns, so dropping them would silently lose
 //!   a large slice of the conversation.
 //! * multiple `text` blocks within one message are joined with `"\n"`.
-//! * `thinking.type` of `"enabled"` or `"adaptive"` → [`ReasoningEffort::Medium`]
-//!   (Anthropic expresses depth as a token budget; the gateway maps "on" to the
-//!   middle effort, matching the plan's default).
+//! * `thinking.type` of `"enabled"` or `"adaptive"` without a `budget_tokens` →
+//!   [`ReasoningEffort::High`]; with a budget it is bucketed (see
+//!   [`reasoning_effort`]). `output_config.effort` takes priority over both.
 
 use std::collections::HashMap;
 
@@ -66,7 +66,10 @@ impl InboundAdapter for MessagesInbound {
         canonical.tools = tools(request.tools);
         canonical.tool_choice = request.tool_choice.map(tool_choice);
         canonical.reasoning_effort = reasoning_effort(
-            request.output_config.as_ref().and_then(|o| o.effort.as_deref()),
+            request
+                .output_config
+                .as_ref()
+                .and_then(|o| o.effort.as_deref()),
             request.thinking.as_ref(),
         );
 
@@ -78,13 +81,14 @@ impl InboundAdapter for MessagesInbound {
 ///
 /// Priority:
 /// 1. `output_config.effort` — the authoritative per-turn effort (Claude Code
-///    ≥2.x, beta `effort-2025-11-24`). Mapped verbatim: `low`/`medium`/`high`/
-///    `xhigh` are Raycast wire values (the real client sends `xhigh`); `max`
-///    has no Raycast equivalent, so it clamps to `xhigh`.
+///    ≥2.x, beta `effort-2025-11-24`). The accepted values are `low`/`medium`/
+///    `high`/`xhigh`/`max`: the first four are Raycast wire values (the real
+///    client sends `xhigh`); `max` has no Raycast equivalent, so it clamps to
+///    `xhigh`. Anything else falls back to `high`.
 /// 2. `thinking.budget_tokens` — the legacy budget form; bucketed to the
-///    nearest effort (32k → xhigh, 16k → high, 8k → medium, lower → low).
-/// 3. thinking on without a budget (`adaptive`) → `medium`, the same default
-///    the harness itself declares for sonnet-5-5.
+///    nearest effort (32k → xhigh, 16k → high, 4k → medium, lower → low).
+/// 3. thinking on without a budget (`adaptive`) → `high`, the same fallback as
+///    an unrecognized `output_config.effort`.
 /// 4. Thinking off (or absent) → `None`.
 fn reasoning_effort(
     output_effort: Option<&str>,
@@ -92,10 +96,11 @@ fn reasoning_effort(
 ) -> Option<ReasoningEffort> {
     if let Some(effort) = output_effort {
         return Some(match effort {
-            "low" | "minimal" => ReasoningEffort::Low,
-            "high" => ReasoningEffort::High,
+            "low" => ReasoningEffort::Low,
+            "medium" => ReasoningEffort::Medium,
             "xhigh" | "max" => ReasoningEffort::XHigh,
-            _ => ReasoningEffort::Medium,
+            // `high` and any unrecognized value.
+            _ => ReasoningEffort::High,
         });
     }
     let thinking = thinking?;
@@ -107,7 +112,7 @@ fn reasoning_effort(
         Some(budget) if budget >= 16_000 => ReasoningEffort::High,
         Some(budget) if budget >= 4_000 => ReasoningEffort::Medium,
         Some(_) => ReasoningEffort::Low,
-        None => ReasoningEffort::Medium,
+        None => ReasoningEffort::High,
     })
 }
 
