@@ -1,48 +1,25 @@
 # docker-compose.yml — 运行 raycast2api 网关
 #
-# 配置方式二选一：
-#   A. 挂载 config.json（推荐，与本地运行一致）：
-#        取消下方 volumes 中 config.json 一行的注释，
-#        则无需任何环境变量（device_id 等都从 config.json 读）。
-#   B. 环境变量：
-#        在同目录建 .env 文件，至少填入 RAYCAST_DEVICE_ID=你的设备ID。
+# 仅通过同目录的 config.json 配置，不提供环境变量配置入口。
+# 首次运行前复制 config.example.json 为 config.json 并填写配置；
+# host 保持 0.0.0.0、port 保持 8787，与下方容器端口映射一致。
 #
 # 账号池与请求日志持久化在 ./store/store.db；账号通过 /v1/accounts 接口管理。
 #
-# 说明：所有可选项留空即视为“未设置”（网关内部把空字符串当作 None）。
-
 services:
-  raycast2api:
-    # 默认拉取 CI 发布到 GHCR 的镜像；可用 RAYCAST2API_TAG 固定版本（如 0.0.1 / 0.0）。
-    image: ghcr.io/jwygithub/raycast2api:${RAYCAST2API_TAG:-latest}
-    # 想用本地源码构建时，注释掉上面的 image，改用：
-    # build: .
-    container_name: raycast2api
-    restart: unless-stopped
-    # 以宿主机用户身份运行，绑定挂载的 ./store 等目录才可写（镜像内默认的
-    # app 用户 uid 与宿主机不一致时，SQLite 会报 unable to open database file）。
-    # 1000:1000 是常见 Linux 桌面/服务器用户；按 `id -u` / `id -g` 调整。
-    user: "1000:1000"
-    ports:
-      # 左侧是宿主机端口（可用 PORT 覆盖），右侧是容器内固定端口 8787。
-      - "${PORT:-8787}:8787"
-    environment:
-      # ---- 方式 B 必填：Raycast 设备ID（挂载 config.json 时可整段删除）----
-      RAYCAST_DEVICE_ID: ${RAYCAST_DEVICE_ID:-}
-      # ---- 可选（留空即为未设置）----
-      API_KEY: ${API_KEY:-}                                    # 网关自身 API key；留空 = 不鉴权
-      RAYCAST_SIGNATURE_SECRET: ${RAYCAST_SIGNATURE_SECRET:-}  # 留空 = 使用内置默认密钥
-      RUST_LOG: ${RUST_LOG:-info}                              # 日志级别（tracing env-filter）
-      # HOST/PORT 沿用镜像默认 0.0.0.0:8787，通常无需覆盖。
-    # 配置与数据：注意容器内路径都在 /app 下（Dockerfile 的 WORKDIR）——
-    # 挂到 /config.json 这类根路径网关是读不到的。
-    volumes:
-      # 方式 A：挂载 config.json（取消注释后 environment 段可只留 RUST_LOG 等可选项）
-      # - ./config.json:/app/config.json:ro
-      # store/ 目录整体挂载持久化 SQLite 存储库——必须挂目录而非单文件，否则 WAL 边车
-      # （store.db-wal/-shm）留在容器层，容器异常退出时未 checkpoint 的数据会丢失。
-      - ./store:/app/store
-    # 宿主机 ./store/ 目录不存在时 Docker 会自动创建空目录，无需手工准备。
-    #
-    # 备注：运行镜像基于 debian-slim，未内置 curl/wget，故不设 healthcheck；
-    # 如需健康探测，可在编排层对 http://<host>:8787/health 做外部检查。
+    raycast2api:
+        # 默认拉取 CI 发布到 GHCR 的镜像；固定版本时直接修改标签。
+        image: ghcr.io/jwygithub/raycast2api:latest
+        # 想用本地源码构建时，注释掉上面的 image，改用：
+        # build: .
+        container_name: raycast2api
+        restart: unless-stopped
+        # 以宿主机用户身份运行，绑定挂载的 ./store 等目录才可写（镜像内默认的
+        # app 用户 uid 与宿主机不一致时，SQLite 会报 unable to open database file）。
+        # 1000:1000 是常见 Linux 桌面/服务器用户；按 `id -u` / `id -g` 调整。
+        user: '1000:1000'
+        ports:
+            - '8787:8787'
+        volumes:
+            - ./config.json:/app/config.json:ro
+            - ./store:/app/store

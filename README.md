@@ -80,9 +80,21 @@ cargo run --release
 
 启动前需要提供配置（见下文）。若未设置 `api_key`，网关会接受**未鉴权**请求并打印告警。
 
+### Docker Compose 部署
+
+`docker-compose.yml` 仅通过只读挂载的 `config.json` 配置，不提供 `environment`、`env_file` 或环境变量插值入口。启动前复制并填写配置：
+
+```bash
+cp config.example.json config.json
+# 编辑 config.json，填写 raycast_device_id、api_key 等配置
+docker compose up -d
+```
+
+`config.json` 中的 `host` 保持 `0.0.0.0`、`port` 保持 `8787`；配置文件缺失时容器启动会报错。镜像标签及宿主机端口直接在 `docker-compose.yml` 中修改。修改配置后执行 `docker compose restart` 生效，账号池和请求日志持久化在 `./store`。
+
 ## 配置
 
-配置加载顺序：优先读取项目根目录的 `config.json`；**环境变量始终覆盖**文件中的同名项。若没有 `config.json`，则完全从环境变量读取。
+程序配置加载顺序（本地运行或自行注入容器环境变量时）：优先读取项目根目录的 `config.json`；**环境变量始终覆盖**文件中的同名项。若没有 `config.json`，则完全从环境变量读取。上面的 Compose 部署不注入这些环境变量。
 
 复制示例文件并填入你的 Raycast 凭据：
 
