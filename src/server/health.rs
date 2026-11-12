@@ -42,7 +42,7 @@ impl BackendHealth {
     pub fn begin_check(&self) -> bool {
         let now = now_ms();
         self.last_check_ms
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
                 (now.saturating_sub(last) >= READINESS_CHECK_INTERVAL_MS).then_some(now)
             })
             .is_ok()
