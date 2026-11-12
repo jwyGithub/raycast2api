@@ -126,7 +126,11 @@ impl RaycastClient {
         for _ in 0..attempts {
             let mut account = match self.accounts.next_available() {
                 Ok(account) => account,
-                Err(error) => return Err(last_error.unwrap_or(error)),
+                Err(error) => {
+                    // 池空且从未拿到上游错误:用冷却 ETA 充实 503,让客户端
+                    // 知道这是限流而非永久故障,以及什么时候能恢复。
+                    return Err(last_error.unwrap_or_else(|| enrich_no_account(error, &self.accounts)));
+                }
             };
             tracing::info!(account = %account.email, tag = ?account.tag, "→ using account");
             let result = self.try_chat(&account, &body).await;
@@ -274,9 +278,15 @@ impl RaycastClient {
             attempts,
             "all available accounts failed; surfacing last error to client"
         );
-        Err(last_error.unwrap_or(GatewayError::NoAccount(
-            "no available Raycast account; add or refresh one via POST /v1/accounts/create".into(),
-        )))
+        Err(last_error.unwrap_or_else(|| {
+            enrich_no_account(
+                GatewayError::NoAccount(
+                    "no available Raycast account; add or refresh one via POST /v1/accounts/create"
+                        .into(),
+                ),
+                &self.accounts,
+            )
+        }))
     }
 
     /// 单次上游请求(签名 + 发送 + 状态校验),供 [`Self::send_chat`] 轮换调用。
@@ -410,10 +420,32 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
     Err(GatewayError::Upstream { status, message })
 }
 
+/// 池全空的 [`GatewayError::NoAccount`] 充实:查最早已恢复的冷却账号。
+/// 有账号在冷却 → [`GatewayError::RateLimited`] (429 + `Retry-After`),
+/// harness 读头精确等待并显示 "rate limited until …";全被摘除/池空 →
+/// 保持 503 但附 `x-should-retry: false`,harness 立即放弃而不是指数退避
+/// 反复打。
+fn enrich_no_account(error: GatewayError, accounts: &AccountStore) -> GatewayError {
+    let GatewayError::NoAccount(message) = error else {
+        return error;
+    };
+    match accounts.earliest_cooldown_secs() {
+        Some(secs) if secs > 0 => {
+            let mins = (secs as f64 / 60.0).ceil() as u64;
+            GatewayError::RateLimited {
+                retry_after_secs: secs,
+                message: format!(
+                    "all Raycast accounts are rate-limited; earliest recovers in ~{secs}s (~{mins} min)"
+                ),
+            }
+        }
+        _ => GatewayError::NoAccount(format!(
+            "{message}; no account is in cooldown — every account was removed (flagged/unavailable) or the pool is empty"
+        )),
+    }
+}
+
 /// HTTP 层(非流内)错误是否为账号本身不可用(风控/订阅缺失):`ensure_success`
-/// 只保留了原始响应文本,这里从文本里识别上游样本的特征串。特征来自真实
-/// 样本的 message/subcode—— message 内容可能变,但 subcode("account_unavailable")
-/// 是 Raycast 的结构化字段,双保险。
 pub(crate) fn is_account_dead_upstream(err: &GatewayError) -> bool {
     let GatewayError::Upstream { status, message } = err else {
         return false;

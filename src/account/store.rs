@@ -471,6 +471,26 @@ impl AccountStore {
         })
     }
 
+    /// 池全空时,最早已恢复可用的冷却账号还有多少秒可用(`None` = 没有在冷却的
+    /// 账号,即全被摘除或池本身为空)。供 [`GatewayError::NoAccount`] 给客户端
+    /// 一个可行动的恢复时间,而不是一句笼统的"没有可用账号"。
+    ///
+    /// [`GatewayError::NoAccount`]: crate::error::GatewayError::NoAccount
+    pub fn earliest_cooldown_secs(&self) -> Option<i64> {
+        crate::db::blocking(|| {
+            let now = unix_secs() as i64;
+            let mut conn = self.db.lock();
+            accounts::table
+                .filter(accounts::available.eq(1))
+                .filter(accounts::cooldown_until.gt(now))
+                .select(diesel::dsl::min(accounts::cooldown_until))
+                .first::<Option<i64>>(&mut *conn)
+                .map(|earliest| earliest.map(|until| until - now))
+                .map_err(sql_err)
+                .unwrap_or(None)
+        })
+    }
+
     /// 按邮箱和/或状态删除;返回删除行数。
     pub fn delete(&self, email: Option<&str>, status: Option<&str>) -> Result<usize, GatewayError> {
         crate::db::blocking(|| {

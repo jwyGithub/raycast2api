@@ -28,6 +28,15 @@ pub enum GatewayError {
     },
     /// No usable Raycast account in the store (503).
     NoAccount(String),
+    /// Every account is rate-limited (429). Carries the cooldown ETA so the
+    /// response can set `Retry-After`, which the Claude Code harness honors
+    /// exactly (pausing until reset and showing "rate limited until …")
+    /// instead of retrying a 503 on its own exponential backoff.
+    RateLimited {
+        /// Seconds until the earliest account recovers.
+        retry_after_secs: i64,
+        message: String,
+    },
     /// Any other internal failure (500).
     Internal(String),
 }
@@ -60,6 +69,24 @@ impl GatewayError {
             ),
             GatewayError::NoAccount(m) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "server_error", m.clone())
+            }
+            GatewayError::RateLimited {
+                retry_after_secs,
+                message,
+            } => {
+                // 429 + `rate_limit_error` is the quota shape the Claude Code
+                // harness recognizes and does NOT blind-retry: it reads
+                // `Retry-After` and waits precisely. `Retry-After` cannot be
+                // negative; clamp for the degenerate race where the cooldown
+                // expires between sampling and rendering.
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate_limit_error",
+                    format!(
+                        "{message} (retry-after: {}s)",
+                        retry_after_secs.max(&0)
+                    ),
+                )
             }
             GatewayError::Internal(m) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "relay_error", m.clone())
@@ -103,7 +130,33 @@ impl IntoResponse for GatewayError {
                 code: None,
             },
         };
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        // Retry hints the Claude Code harness understands:
+        // * `Retry-After` on 429 → it pauses exactly that long and shows
+        //   "rate limited until <time>" instead of blind-retrying.
+        // * `x-should-retry: false` on 5xx → its `shouldRetry` returns false
+        //   immediately (a 503 without it is retried on exponential backoff,
+        //   which is the "client waits forever" symptom).
+        match &self {
+            GatewayError::RateLimited { retry_after_secs, .. } => {
+                if let Ok(value) =
+                    axum::http::HeaderValue::from_str(&retry_after_secs.max(&0).to_string())
+                {
+                    response.headers_mut().insert(
+                        axum::http::header::RETRY_AFTER,
+                        value,
+                    );
+                }
+            }
+            GatewayError::NoAccount(_) => {
+                response.headers_mut().insert(
+                    axum::http::HeaderName::from_static("x-should-retry"),
+                    axum::http::HeaderValue::from_static("false"),
+                );
+            }
+            _ => {}
+        }
+        response
     }
 }
 

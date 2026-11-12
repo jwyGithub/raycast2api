@@ -65,3 +65,50 @@ fn upstream_display_composes_status_and_message() {
     };
     assert_eq!(err.to_string(), "Raycast API error (503): unavailable");
 }
+
+#[test]
+fn rate_limited_maps_to_429_with_retry_after_header() {
+    let err = GatewayError::RateLimited {
+        retry_after_secs: 511,
+        message: "all accounts rate-limited".into(),
+    };
+    // Harness-side kind must be rate_limit_error — assert via the message tail
+    // before moving the error into the response.
+    assert!(err.to_string().contains("retry-after: 511s"));
+    let response = err.into_response();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .expect("Retry-After header present")
+        .to_str()
+        .unwrap();
+    assert_eq!(retry_after, "511");
+}
+
+#[test]
+fn rate_limited_clamps_negative_eta() {
+    // Degenerate race: cooldown expires between sampling and rendering.
+    let err = GatewayError::RateLimited {
+        retry_after_secs: -5,
+        message: "late".into(),
+    };
+    let response = err.into_response();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.headers().get("retry-after").unwrap().to_str().unwrap(),
+        "0"
+    );
+}
+
+#[test]
+fn no_account_sets_x_should_retry_false() {
+    // The Claude Code harness retries 503s on exponential backoff unless this
+    // header is present; with it, `shouldRetry` returns false immediately.
+    let response = GatewayError::NoAccount("pool empty".into()).into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers().get("x-should-retry").map(|v| v.to_str().unwrap()),
+        Some("false")
+    );
+}
