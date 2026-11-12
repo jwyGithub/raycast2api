@@ -72,6 +72,14 @@ impl InboundAdapter for MessagesInbound {
                 .and_then(|o| o.effort.as_deref()),
             request.thinking.as_ref(),
         );
+        // Auto mode's server-side safety check: the harness expects a verdict
+        // for each tool call in the terminating message_delta (see
+        // `SafeguardResults`). Without one it denies every tool use for the
+        // session, so flag it for the outbound adapter.
+        canonical.server_safety_check = request
+            .safeguards
+            .iter()
+            .any(|s| s.kind == "dangerous_tool_use");
 
         Ok(canonical)
     }

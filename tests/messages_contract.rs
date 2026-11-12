@@ -613,3 +613,104 @@ fn tool_result_is_error_is_kept_and_marked_upstream() {
         .expect("tool message with success present");
     assert!(!ok_msg.content.text.starts_with("[tool error] "));
 }
+
+// --- Auto-mode safeguard results -----------------------------------------
+
+#[test]
+fn safeguards_field_flags_server_safety_check() {
+    let canonical = parse(json!({
+        "model": "claude-x",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "safeguards": [{ "type": "dangerous_tool_use", "classifier_context": {"k": "v"} }]
+    }))
+    .unwrap();
+    assert!(canonical.server_safety_check);
+
+    let plain = parse(json!({
+        "model": "claude-x",
+        "messages": [{ "role": "user", "content": "hi" }]
+    }))
+    .unwrap();
+    assert!(!plain.server_safety_check);
+}
+
+#[test]
+fn streaming_tool_call_with_safety_check_carries_safeguard_results() {
+    use raycast2api::core::event::CanonicalEvent as CE;
+    use raycast2api::core::message::ToolCall;
+    use raycast2api::core::response::FinishReason as FR;
+    use raycast2api::core::usage::Usage;
+    use raycast2api::protocol::messages::outbound::{MessagesOutbound, StreamEncoder};
+    use raycast2api::protocol::OutboundAdapter;
+
+    let events = futures_util::stream::iter(vec![
+        CE::ToolCall(ToolCall {
+            id: "toolu_1".into(),
+            name: "Bash".into(),
+            arguments: "{}".into(),
+        }),
+        CE::Finish {
+            reason: FR::ToolCalls,
+            usage: Usage::default(),
+        },
+    ]);
+    // Safety check requested: the terminating message_delta carries
+    // safeguard_results with an explicit verdict per tool call.
+    let rendered = MessagesOutbound::stream_with_request(
+        "claude-x",
+        &{
+            let mut r = raycast2api::core::request::CanonicalRequest::new(
+                raycast2api::core::protocol::Protocol::Messages,
+                "claude-x",
+            );
+            r.server_safety_check = true;
+            r
+        },
+        events,
+    );
+    let bytes = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async { axum::body::to_bytes(rendered.into_body(), usize::MAX).await.unwrap() });
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let delta_line = text
+        .lines()
+        .find(|l| l.contains("safeguard_results"))
+        .expect("safeguard_results on message_delta");
+    let frame: serde_json::Value =
+        serde_json::from_str(delta_line.trim_start_matches("data: ")).unwrap();
+    let results = &frame["delta"]["safeguard_results"];
+    assert_eq!(results["type"], "available");
+    assert_eq!(
+        results["tool_uses"]["toolu_1"]["type"],
+        "unavailable",
+        "gateway cannot classify; explicit unavailable keeps auto mode alive"
+    );
+
+    // No safety check requested: no safeguard_results in any frame.
+    let events2 = futures_util::stream::iter(vec![CE::Finish {
+        reason: FR::Stop,
+        usage: Usage::default(),
+    }]);
+    let rendered2 = MessagesOutbound::stream_with_request(
+        "claude-x",
+        &raycast2api::core::request::CanonicalRequest::new(
+            raycast2api::core::protocol::Protocol::Messages,
+            "claude-x",
+        ),
+        events2,
+    );
+    let bytes2 = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async { axum::body::to_bytes(rendered2.into_body(), usize::MAX).await.unwrap() });
+    assert!(!String::from_utf8(bytes2.to_vec()).unwrap().contains("safeguard_results"));
+
+    // Encoder direct: finalize() without safeguards stays unchanged.
+    let mut enc = StreamEncoder::new();
+    let frames = enc.finalize();
+    let dumped = frames
+        .iter()
+        .map(|f| f.data.to_string())
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(!dumped.contains("safeguard_results"));
+}

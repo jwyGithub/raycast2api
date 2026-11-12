@@ -27,13 +27,16 @@ use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
 
 use crate::core::event::CanonicalEvent;
+use crate::core::request::CanonicalRequest;
 use crate::core::response::{CanonicalResponse, FinishReason};
 use crate::core::usage::Usage as CanonicalUsage;
 use crate::error::GatewayError;
 use crate::protocol::OutboundAdapter;
 use crate::util::new_uuid;
 
-use super::wire::{MessageResponse, OutputBlock, OutputUsage};
+use super::wire::{
+    MessageResponse, OutputBlock, OutputUsage, SafeguardResults,
+};
 
 /// Zero-sized marker selecting the Anthropic Messages outbound rendering.
 pub struct MessagesOutbound;
@@ -43,7 +46,35 @@ impl OutboundAdapter for MessagesOutbound {
         Json(message_response(model, response)).into_response()
     }
 
+    fn stream_with_request<S>(model: &str, request: &CanonicalRequest, events: S) -> Response
+    where
+        S: Stream<Item = CanonicalEvent> + Send + 'static,
+    {
+        Self::stream_safeguards(model, request.server_safety_check, events)
+    }
+
     fn stream<S>(model: &str, events: S) -> Response
+    where
+        S: Stream<Item = CanonicalEvent> + Send + 'static,
+    {
+        Self::stream_safeguards(model, false, events)
+    }
+
+    fn render_error(error: GatewayError) -> Response {
+        super::error::render(error)
+    }
+}
+
+impl MessagesOutbound {
+    /// Streaming render with optional auto-mode safeguard results. When
+    /// `safety_check` is set (Claude Code auto mode), every tool call the
+    /// upstream emits gets an explicit `unavailable` verdict in the
+    /// terminating `message_delta.delta.safeguard_results` — the harness
+    /// treats a missing result as "dropped on the way" and denies *all* tool
+    /// use for the rest of the session, while an explicit verdict keeps it
+    /// running (each call still needs user approval, which auto mode always
+    /// did when it can't classify).
+    fn stream_safeguards<S>(model: &str, safety_check: bool, events: S) -> Response
     where
         S: Stream<Item = CanonicalEvent> + Send + 'static,
     {
@@ -59,7 +90,11 @@ impl OutboundAdapter for MessagesOutbound {
             // terminal `error` frame is already emitted, so `finalize` (which
             // would append message_delta/message_stop) must be skipped.
             let mut failed = false;
+            let mut tool_use_ids: Vec<String> = Vec::new();
             while let Some(event) = events.next().await {
+                if let CanonicalEvent::ToolCall(call) = &event {
+                    tool_use_ids.push(call.id.clone());
+                }
                 let finished = matches!(event, CanonicalEvent::Finish { .. });
                 failed |= matches!(event, CanonicalEvent::Error { .. });
                 for frame in encoder.push(event) {
@@ -75,17 +110,15 @@ impl OutboundAdapter for MessagesOutbound {
             // follow it. (`finalize` is idempotent, so the normal path can
             // call it unconditionally here.)
             if !failed {
-                for frame in encoder.finalize() {
+                for frame in encoder.finalize_with_safeguards(
+                    safety_check.then(|| SafeguardResults::all_unavailable(&tool_use_ids)),
+                ) {
                     yield to_event(&frame);
                 }
             }
         };
 
         Sse::new(sse).into_response()
-    }
-
-    fn render_error(error: GatewayError) -> Response {
-        super::error::render(error)
     }
 }
 
@@ -299,17 +332,28 @@ impl StreamEncoder {
     /// `message_stop`. Idempotent, so it is safe to call after a `Finish` event
     /// and again when the stream ends.
     pub fn finalize(&mut self) -> Vec<SseFrame> {
+        self.finalize_with_safeguards(None)
+    }
+
+    /// [`finalize`](Self::finalize) with optional auto-mode safeguard results
+    /// attached to the `message_delta.delta` (Claude Code expects them there
+    /// when it requested a server-side safety check).
+    pub fn finalize_with_safeguards(&mut self, safeguards: Option<SafeguardResults>) -> Vec<SseFrame> {
         if self.finalized {
             return Vec::new();
         }
         self.finalized = true;
 
         let mut frames = self.close_current();
+        let mut delta = json!({ "stop_reason": self.stop_reason, "stop_sequence": null });
+        if let Some(results) = safeguards {
+            delta["safeguard_results"] = serde_json::to_value(results).unwrap_or(Value::Null);
+        }
         frames.push(SseFrame {
             event: "message_delta",
             data: json!({
                 "type": "message_delta",
-                "delta": { "stop_reason": self.stop_reason, "stop_sequence": null },
+                "delta": delta,
                 // Full usage, matching the non-streaming `OutputUsage` shape:
                 // Raycast only reports a single cached-token count (prompt read
                 // from cache → `cache_read_input_tokens`); cache creation is

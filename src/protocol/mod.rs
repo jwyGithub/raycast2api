@@ -76,6 +76,18 @@ pub trait OutboundAdapter {
         Self::stream(model, events)
     }
 
+    /// `stream` with the request's tool definitions *and* the request itself,
+    /// for protocols that need request context on the way out (the Anthropic
+    /// adapter must answer Claude Code auto mode's server-side safety check).
+    /// Defaults to [`stream_with_tools`](Self::stream_with_tools).
+    fn stream_with_request<S>(model: &str, request: &CanonicalRequest, events: S) -> Response
+    where
+        S: Stream<Item = CanonicalEvent> + Send + 'static,
+    {
+        let _ = request;
+        Self::stream_with_tools(model, &request.tools, events)
+    }
+
     /// Render a gateway error in this protocol's error shape.
     fn render_error(error: GatewayError) -> Response;
 }

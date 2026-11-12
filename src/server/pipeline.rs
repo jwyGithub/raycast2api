@@ -32,10 +32,10 @@ pub async fn run<O: OutboundAdapter>(
     request: CanonicalRequest,
 ) -> Result<Response, GatewayError> {
     let events = events(state, &request).await?;
-    let client_model = request.model;
+    let client_model = request.model.clone();
 
     if request.stream {
-        Ok(O::stream_with_tools(&client_model, &request.tools, events))
+        Ok(O::stream_with_request(&client_model, &request, events))
     } else {
         match aggregate(events).await {
             Ok(aggregated) => Ok(O::render_complete_with_tools(

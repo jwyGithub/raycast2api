@@ -47,6 +47,13 @@ pub struct MessagesRequest {
     /// clients; the inbound adapter then falls back to the thinking budget.
     #[serde(default)]
     pub output_config: Option<OutputConfig>,
+    /// Claude Code auto mode's server-side safety classification request:
+    /// `[{type: "dangerous_tool_use", classifier_context: {...}}]`. The
+    /// gateway can't classify, but it must answer: the harness treats a
+    /// response with no `safeguard_results` as "dropped on the way" and
+    /// denies every tool use for the session. See [`SafeguardResults`].
+    #[serde(default)]
+    pub safeguards: Vec<Safeguard>,
 }
 
 /// The `output_config` object: currently only `effort` is meaningful to the
@@ -55,6 +62,69 @@ pub struct MessagesRequest {
 pub struct OutputConfig {
     #[serde(default)]
     pub effort: Option<String>,
+}
+
+/// One entry of the inbound `safeguards[]` array (Claude Code auto mode).
+/// Only `dangerous_tool_use` is meaningful: the harness asks the *server* to
+/// classify each tool call as safe or unsafe before the client will run it.
+/// Everything else (unknown types) is tolerated and ignored.
+#[derive(Debug, Deserialize)]
+pub struct Safeguard {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub classifier_context: Value,
+}
+
+/// Per-tool-call verdict the harness expects back in
+/// `message_delta.delta.safeguard_results.tool_uses`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SafeguardVerdict {
+    Evaluated {
+        outcome: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        explanation: Option<String>,
+    },
+    Skipped,
+    Unavailable { reason: &'static str },
+}
+
+/// The `safeguard_results` payload carried on the terminating
+/// `message_delta.delta`. `status.type: "available"` with a verdict per
+/// `tool_use` id is the only shape the harness accepts as a real answer; the
+/// gateway cannot classify, so every call gets an explicit
+/// `unavailable` verdict.
+#[derive(Debug, Serialize)]
+pub struct SafeguardResults {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub tool_uses: std::collections::HashMap<String, SafeguardVerdict>,
+}
+
+impl SafeguardResults {
+    /// An explicit `unavailable` verdict for every collected tool-use id. This
+    /// is load-bearing: without it the harness sees a response with no
+    /// classification result and denies *every* auto-mode tool use for the
+    /// rest of the session ("auto mode unavailable"). An explicit verdict is
+    /// recognized as an answer, keeping the session usable.
+    pub fn all_unavailable(tool_use_ids: &[String]) -> Self {
+        Self {
+            kind: "available",
+            tool_uses: tool_use_ids
+                .iter()
+                .cloned()
+                .map(|id| {
+                    (
+                        id,
+                        SafeguardVerdict::Unavailable {
+                            reason: "gateway_not_supported",
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 /// `system` may be a bare string or an array of text blocks.

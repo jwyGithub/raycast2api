@@ -59,6 +59,12 @@ pub struct CanonicalRequest {
     pub tool_choice: Option<ToolChoice>,
     /// Reasoning depth when the client requested a "think" completion.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// The client asked for server-side tool-use classification (Claude Code
+    /// auto mode's `safeguards` field). The gateway cannot classify, but the
+    /// outbound adapter must still acknowledge: it answers every tool call
+    /// with an explicit `unavailable` verdict so the client doesn't lock out
+    /// tool use for the session.
+    pub server_safety_check: bool,
 }
 
 impl CanonicalRequest {
@@ -76,6 +82,7 @@ impl CanonicalRequest {
             tools: Vec::new(),
             tool_choice: None,
             reasoning_effort: None,
+            server_safety_check: false,
         }
     }
 }
