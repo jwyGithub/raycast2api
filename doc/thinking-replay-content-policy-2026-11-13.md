@@ -115,27 +115,36 @@ gpt round3 的形态说明 OpenAI 侧签名是"每个推理块一个",推理块�
 
 ---
 
-## 4. 修复实现
+## 4. 修复实现(两轮迭代)
 
-### 4.1 位置与逻辑
+### 4.1 第一版(v0.0.32)与其缺陷
+
+第一版 gate 在"最后一个 user 消息之后"(保留当前 tool-use 循环的 thinking+signature,剥历史)。**v0.0.32 上线后 400 复发**,复盘定位到判定锚点缺陷:
+
+- Claude Code 会在 `tool_result` 旁边发 user-role 文本块(如 ToolSearch 结果旁的 `"Tool loaded."`、IDE 通知),canonical 折叠后成为 `Role::User` 消息([inbound.rs](../src/protocol/messages/inbound.rs) `push_user`);
+- 这类**循环中途的 user 消息**被 `rposition(role == User)` 当成了新用户输入,`current_loop_start` 落点错误,其后的历史 thinking 全部被误判为"当前循环"而回放;
+- 症状与首发完全一致:消息数涨到 22、thinking 攒够量后概率性 400,连换 5 个账号都失败。
+
+### 4.2 第二版(现行):全剥 + 最后一条 assistant 带签名
 
 `src/raycast/builder.rs` → `build_messages`:
 
 ```rust
-// Everything from the last user message onward is the live tool-use loop;
-// the request is built to continue it, so its thinking stays.
-let current_loop_start = messages
+// The final assistant message of the last turn — the one with tool_calls,
+// else the last assistant text turn. Only that message keeps its signature.
+let signature_index = messages
     .iter()
-    .rposition(|m| m.role == Role::User)
-    .unwrap_or(0);
+    .rposition(|m| m.role == Role::Assistant)
+    .unwrap_or(usize::MAX);
 ```
 
-- `<think>` 回放与 `thought_signature` 附加都 gate 在 `index >= current_loop_start` 上。
-- **保留当前循环**的理由:当前 tool-use 循环的 thinking+signature 是协议要求保留的部分(官方语义),网关此前行为不变,属保守余量。
-- **剥离历史轮**的理由:官方客户端抓包证明其无价值(§3.1),且正是 400 的触发面(§2.3)。
-- 网关转发后的请求,历史部分与真实 Raycast 客户端逐字节等价;当前循环比官方多保留 thinking+signature,与既有协议实现(builder.rs 既有注释,doc/raycast-backend-protocol.md §2.2)一致。
+- **thinking 一律不回放**,无任何 turn 边界判定——与两个官方客户端的观测行为精确一致(Raycast 跨轮不发,Codex 连当前循环都不发,§3.4 / §4.3.1),且"Tool loaded."这类伴随文本不再影响任何逻辑;
+- **signature 只挂在转录最后一条 assistant 消息**上,维持 tool round-trip 所需的签名位;不再依赖 user 消息位置推断轮次;
+- 依据:Raycast 后端从不校验回放的 `thought_signature`(两份抓包都在签名完全缺席的情况下成功)。
 
-### 4.2 不解析 `context_management` 的原因
+**验证**:把生产失败的请求(13 条消息、5 个 thinking 块)原样重放到本地修复版网关(导入线上账号、live upstream):**HTTP 200**,upstream 22 条消息、`<think>` 计数 **0**、signature 恰 1 个(挂在最后的 assistant 上)。全套 220 测试通过,clippy 干净。
+
+### 4.2a 不解析 `context_management` 的原因
 
 harness 实测只发 `keep:"all"`(no-op),解析它拿不到任何有效指令;官方 `keep:N` 语义(N = 保留最近 N 个 assistant turns)在网关侧的直接等价物就是"最后一个 user 消息之后保留"——用消息数组位置实现,零配置、对所有客户端生效。
 
@@ -177,22 +186,24 @@ harness 实测只发 `keep:"all"`(no-op),解析它拿不到任何有效指令;�
 
 即网关比两个官方客户端都保守,唯一多发的是**当前循环内**的 thinking。这是 Anthropic 直连协议要求保留的部分;但 Codex 实测(同轮循环零回传、多轮工具调用照常成功)+ Raycast 客户端抓包(signature 从不回传、三轮全成功)证明 **Raycast 后端链路不校验 signature、不依赖 reasoning 回放**。
 
-**后续退路**(若上线后仍出现零星 400):把 `build_messages` 里的 `index >= current_loop_start` 条件去掉即全剥,与官方客户端完全对齐,分类器暴露面归零。风险仅是当前轮 thinking signature 不再回传——已有证据表明无影响。当前版本(保留当前循环)作为第一档上线,历史剥离已消除实测的全部触发面;当前循环 thinking 每次请求都重新生成、文本较短,撞分类器概率远低于长期堆积的历史。
+~~**后续退路**(若上线后仍出现零星 400):把 `build_messages` 里的 `index >= current_loop_start` 条件去掉即全剥,与官方客户端完全对齐,分类器暴露面归零。~~ **已采纳**:第一版 gate 的"Tool loaded."缺陷暴露后,全剥方案即第二版(§4.2),退路已落地。
 
 ### 4.4 回归测试
 
-`tests/request_building.rs` 新增 3 例:
+`tests/request_building.rs` 现行 4 例(第一版的 3 例已按全剥语义重写):
 
 - `historical_thinking_is_not_replayed` — 旧轮 `<think>` 不出现在 wire
-- `current_loop_thinking_is_replayed` — 当前循环 `<think>` 照常回放
-- `historical_signature_is_dropped_with_its_thinking` — 旧 signature 不回传、当前循环终结消息 signature 保留
+- `no_thinking_is_replayed_anywhere` — 当前循环 thinking 也不回放(第二版语义)
+- `historical_signature_is_dropped_with_its_thinking` — 旧 signature 不回传、转录最后一条 assistant 保留 signature
+- `user_text_adjacent_to_tool_results_does_not_reset_signature` — **生产缺陷回归**:"Tool loaded."式伴随文本不得复活 thinking 回放,signature 落在最后一条 assistant
 
-全套 220 测试通过,clippy 干净,release 构建成功。
+全套 220 测试通过,clippy 干净。
 
 ---
 
 ## 5. 运维备忘
 
 - **识别**:日志中 `content_policy_blocked` / `refusal_blocked` + `retryable:false`;换账号重试无效即为内容类拦截,先用日志 API 重放二分,别怀疑账号池/签名/模型映射。
-- **排查入口**:`POST /v1/logs/list`、`POST /v1/logs/detail`(参数 `request_id`)拿三体全文。
-- **局限**:当前循环内的 thinking 仍会上游(协议要求),理论上仍可能撞分类器;若未来复发,可进一步对齐官方客户端(连当前轮也剥,抓包显示 Raycast 后端不校验 signature),或对 thinking 文本做摘要化。
+- **排查入口**:`POST /v1/logs/list`、`POST /v1/logs/detail`(参数 `request_id`)拿三体全文;判定修复是否生效看 **upstream_json 里 `<think>` 计数是否为 0**(inbound 里有 thinking 是正常的,客户端本来就该发)。
+- **部署坑**:compose 用 `ghcr.io/...:latest` 时 `docker compose up -d` **不会自动拉新镜像**;发版后必须 `docker compose pull && docker compose up -d`,否则线上继续跑旧镜像(v0.0.32 复发时线上实际是 v0.0.31 时代的镜像 + 新代码判定缺陷的叠加)。
+- **本地验证方法**:线上 `GET /v1/accounts/export` 导出账号 → 本地起服务导入 → logs API 拿生产失败请求的 `inbound_json` 原样重放 → 检查 upstream 零 `<think>` 且 200。
