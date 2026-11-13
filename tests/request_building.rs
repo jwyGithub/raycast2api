@@ -152,10 +152,11 @@ fn historical_thinking_is_not_replayed() {
 }
 
 #[test]
-fn current_loop_thinking_is_replayed() {
+fn no_thinking_is_replayed_anywhere() {
     // Mid tool round-trip: the assistant turn after the last user message is
-    // part of the live loop, so its thinking IS replayed. The turn ends in a
-    // tool call, matching how harness thinking turns actually terminate.
+    // part of the live loop, but its thinking is STILL not replayed — neither
+    // official client sends it, and the upstream content filter scans the
+    // replayed text regardless of turn position.
     let mut assistant = think_msg(Role::Assistant, "", "current plan");
     assistant.tool_calls = vec![raycast2api::core::message::ToolCall {
         id: "toolu_1".into(),
@@ -168,24 +169,28 @@ fn current_loop_thinking_is_replayed() {
         Message::text(Role::Tool, "result"),
     ]);
     let out = build_chat_request(&req, "anthropic", "claude");
-    // Wire layout: user, <think>, assistant (empty text + tool call), tool.
-    assert_eq!(out.messages.len(), 4);
+    // Wire layout: user, assistant (empty text + tool call), tool. No <think>.
+    assert_eq!(out.messages.len(), 3);
     assert_eq!(out.messages[0].content.text, "use the tool");
-    assert_eq!(
-        out.messages[1].content.text, "<think>current plan</think>",
-        "current-loop thinking is replayed"
+    assert_eq!(out.messages[1].content.text, "");
+    assert!(!out.messages[1].tool_calls.is_empty());
+    assert_eq!(out.messages[2].content.text, "result");
+    assert!(
+        !out
+            .messages
+            .iter()
+            .any(|m| m.content.text.starts_with("<think>")),
+        "no <think> replay anywhere on the wire"
     );
-    assert_eq!(out.messages[1].role, "assistant");
-    assert_eq!(out.messages[2].content.text, "");
-    assert_eq!(out.messages[3].content.text, "result");
 }
 
 #[test]
 fn historical_signature_is_dropped_with_its_thinking() {
     // A signature belongs to thinking this request no longer replays; sending
     // it would make upstream validate a signature against content it never
-    // saw. Old turns carry neither the <think> text nor the signature, while
-    // the current-loop terminal assistant message keeps its signature.
+    // saw. Old turns carry neither the <think> text nor the signature. The
+    // terminal assistant message of the LAST turn keeps its signature so the
+    // tool round-trip stays valid.
     let mut current = think_msg(Role::Assistant, "", "fresh thought");
     current.tool_calls = vec![raycast2api::core::message::ToolCall {
         id: "toolu_2".into(),
@@ -200,17 +205,55 @@ fn historical_signature_is_dropped_with_its_thinking() {
         Message::text(Role::Tool, "result"),
     ]);
     let out = build_chat_request(&req, "anthropic", "claude");
-    // Wire layout: q1, a1, q2, <think>fresh thought</think>, ""+tool call,
-    // result.
+    // Wire layout: q1, a1, q2, ""+tool call, result — no <think> anywhere.
     let historical = &out.messages[1]; // the "a1" assistant turn
     assert!(historical.extra_content.is_none(), "old signature dropped");
-    // Current-loop terminal assistant message carries the signature (it ends
-    // the turn in a tool call).
-    let terminal = &out.messages[4];
+    // Terminal assistant message of the last turn carries the signature (it
+    // ends the turn in a tool call).
+    let terminal = &out.messages[3];
     assert_eq!(terminal.content.text, "");
     assert!(!terminal.tool_calls.is_empty());
     assert!(
         terminal.extra_content.is_some(),
-        "current-loop signature preserved"
+        "last-turn signature preserved"
     );
+}
+
+#[test]
+fn user_text_adjacent_to_tool_results_does_not_reset_signature() {
+    // The regression that failed in production: a client-adjacent user text
+    // like "Tool loaded." emitted AFTER tool results made the previous
+    // last-user gate treat later thinking as "current loop". Under the
+    // all-strip rule no thinking is replayed at all, so this shape stays
+    // clean regardless, and the signature lands on the final assistant
+    // message of the transcript.
+    let mut assistant = think_msg(Role::Assistant, "working", "loop thought");
+    assistant.tool_calls = vec![raycast2api::core::message::ToolCall {
+        id: "toolu_3".into(),
+        name: "ToolSearch".into(),
+        arguments: "{}".into(),
+    }];
+    let req = req_with(vec![
+        Message::text(Role::User, "q1"),
+        assistant,
+        Message::text(Role::Tool, "Tool loaded."),
+        Message::text(Role::User, "Tool loaded."),
+        Message::text(Role::Tool, "result"),
+    ]);
+    let out = build_chat_request(&req, "anthropic", "claude");
+    assert!(
+        !out
+            .messages
+            .iter()
+            .any(|m| m.content.text.starts_with("<think>")),
+        "tool-adjacent user text must not resurrect thinking replay"
+    );
+    // Signature rides on the last assistant message ("working"), tool-call
+    // turn or not.
+    let last_assistant = out
+        .messages
+        .iter()
+        .rposition(|m| m.role == "assistant")
+        .expect("assistant present");
+    assert!(out.messages[last_assistant].extra_content.is_some());
 }

@@ -112,25 +112,30 @@ fn derive_message_id(messages: &[Message]) -> String {
     }
 }
 
-/// Render canonical messages into Raycast messages, expanding assistant
-/// thinking into its own preceding `<think>` turn — but only for the
-/// **current tool-use loop** (messages after the last user turn).
-///
-/// Historical thinking is stripped: the upstream content filter re-scans
-/// replayed `<think>` text and probabilistically blocks entire requests with
-/// `content_policy_blocked` (observed 2026-11-12/13; stripping all 26 thinking
-/// blocks from the offending 452KB request let it pass verbatim). Old thoughts
-/// carry no replay value, and past-turn thinking blocks are signature-free per
-/// Anthropic's `clear_thinking` semantics — only the current loop's thinking
-/// must survive for the tool round-trip.
+/// Render canonical messages into Raycast messages. Assistant thinking is
+/// **never replayed**: the upstream content filter re-scans `<think>` text and
+/// probabilistically blocks whole requests with `content_policy_blocked`
+/// (observed 2026-11-12/13; stripping all thinking blocks from the offending
+/// 452KB request let it pass verbatim). Neither official client replays it
+/// either — the Raycast app drops it across turns, Codex even mid-loop — and
+/// the Raycast backend never validates `thought_signature` on replay (both
+/// captures succeed with signatures entirely absent). The signature therefore
+/// rides only on the terminal assistant message of the CURRENT turn, where it
+/// keeps the tool round-trip alive; a naive "keep the loop after the last
+/// user message" gate failed because client-adjacent user texts like
+/// "Tool loaded." (emitted alongside tool results) masquerade as a new turn.
 fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
     let mut out = Vec::with_capacity(messages.len());
-    // Everything from the last user message onward is the live tool-use loop;
-    // the request is built to continue it, so its thinking stays.
-    let current_loop_start = messages
+
+    // The final assistant message of the last turn — the one with tool_calls,
+    // else the last assistant text turn. Per the captured protocol
+    // (doc/raycast-backend-protocol.md §2.2) the signature rides there. Only
+    // that message keeps its signature; attaching one to content upstream
+    // never saw would make the backend reject the request.
+    let signature_index = messages
         .iter()
-        .rposition(|m| m.role == Role::User)
-        .unwrap_or(0);
+        .rposition(|m| m.role == Role::Assistant)
+        .unwrap_or(usize::MAX);
 
     for (index, message) in messages.iter().enumerate() {
         // Assistant thinking is carried as a separate assistant message whose
@@ -138,11 +143,8 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
         // thought signature is NOT attached here: upstream validates the
         // signature against the message that ended the assistant turn —
         // replaying it on the `<think>` text message makes the backend reject
-        // the whole request with a 500 ("Something went wrong"). Per the
-        // captured protocol (doc/raycast-backend-protocol.md §2.2), the
-        // signature rides on the terminal assistant message: the one with
-        // `tool_calls` when the turn ended in a tool call, else the text turn.
-        let signature_json = if index >= current_loop_start {
+        // the whole request with a 500 ("Something went wrong").
+        let signature_json = if index == signature_index {
             message.thinking.as_ref().and_then(|t| {
                 t.signature.as_ref().map(|s| {
                     json!({
@@ -151,23 +153,8 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
                 })
             })
         } else {
-            // The signature belongs to a thinking block this request no longer
-            // replays; attaching it would make upstream validate a signature
-            // against content it never saw.
             None
         };
-
-        if let Some(thinking) = &message.thinking {
-            // Replay only current-loop thinking; historical thoughts are
-            // dropped entirely (see fn docs) to keep them away from the
-            // upstream content filter.
-            if index >= current_loop_start {
-                out.push(RaycastMessage::text(
-                    "assistant",
-                    format!("<think>{}</think>", thinking.text),
-                ));
-            }
-        }
 
         let role = role_wire(message.role);
         let mut wire = RaycastMessage::text(role, message.text.clone());
