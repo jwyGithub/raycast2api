@@ -11,8 +11,8 @@
 //! turn — so this module reimplements the same recipe at the protocol boundary:
 //!
 //! 1. **Estimate** request tokens (chars/4, mirroring Codex's
-//!    `approx_token_count`) against the model's `context` (in K tokens from
-//!    `models.json`). Compaction triggers when usage crosses
+//!    `approx_token_count`) against the model's `context` (in K tokens from the
+//!    Raycast `GET /models` response). Compaction triggers when usage crosses
 //!    [`AUTO_COMPACT_RATIO`] (90%, Codex's default) of the window.
 //! 2. **Summarize**: the dropped prefix plus [`SUMMARIZATION_PROMPT`] (the
 //!    verbatim Codex template) goes through the upstream as one extra
@@ -289,7 +289,7 @@ pub(crate) async fn plan(state: &SharedState, request: &CanonicalRequest) -> Com
     let Some(entry) = models.iter().find(|m| m.id == request.model) else {
         return Compaction::NotNeeded;
     };
-    // `context` is in K tokens (models.json); lives in the passthrough `extra`.
+    // `context` is in K tokens (Raycast `GET /models`); lives in the passthrough `extra`.
     let Some(context_k) = entry
         .extra
         .get("context")

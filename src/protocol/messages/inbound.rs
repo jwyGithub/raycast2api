@@ -64,15 +64,14 @@ impl InboundAdapter for MessagesInbound {
         canonical.system = system_prompt(request.system);
         canonical.messages = conversation(request.messages);
         canonical.tools = tools(request.tools);
-        // Auto mode's server-side safety check: the harness expects a verdict
-        // for each tool call in the terminating message_delta (see
-        // `SafeguardResults`). Answer whenever the request carries tools —
-        // production captures show current harnesses do NOT always send the
-        // `safeguards[]` array (earlier assumption), yet still treat a
-        // missing verdict as "classifier gave no verdict" and deny the call.
-        // The gateway cannot classify either way, so an explicit
-        // `unavailable` verdict per collected tool-use id is the only safe
-        // answer; with no tools there is nothing to answer.
+        // Auto mode's server-side safety check: the harness expects a
+        // `safeguard_results` answer in the terminating message_delta (see
+        // `unsupported_safeguard_results`). Answer whenever the request carries
+        // tools — production captures show current harnesses do NOT always send
+        // `safeguards[]`, yet still read a missing result as "no verdict" and
+        // deny the call. The gateway cannot classify, so it answers
+        // `unsupported` (harness then classifies locally); with no tools there
+        // is nothing to answer.
         let has_tools = !canonical.tools.is_empty();
         canonical.server_safety_check = has_tools
             || request

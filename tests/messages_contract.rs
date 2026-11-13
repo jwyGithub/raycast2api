@@ -691,12 +691,10 @@ fn streaming_tool_call_with_safety_check_carries_safeguard_results() {
         .expect("safeguard_results on message_delta");
     let frame: serde_json::Value =
         serde_json::from_str(delta_line.trim_start_matches("data: ")).unwrap();
+    // Harness schema: array of {type, status}; `unsupported` → local classifier.
     let results = &frame["delta"]["safeguard_results"];
-    assert_eq!(results["type"], "available");
-    assert_eq!(
-        results["tool_uses"]["toolu_1"]["type"], "unavailable",
-        "gateway cannot classify; explicit unavailable keeps auto mode alive"
-    );
+    assert_eq!(results[0]["type"], "dangerous_tool_use");
+    assert_eq!(results[0]["status"]["type"], "unsupported");
 
     // No safety check requested: no safeguard_results in any frame.
     let events2 = futures_util::stream::iter(vec![CE::Finish {

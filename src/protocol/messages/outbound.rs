@@ -34,7 +34,7 @@ use crate::error::GatewayError;
 use crate::protocol::OutboundAdapter;
 use crate::util::new_uuid;
 
-use super::wire::{MessageResponse, OutputBlock, OutputUsage, SafeguardResults};
+use super::wire::{MessageResponse, OutputBlock, OutputUsage};
 
 /// Zero-sized marker selecting the Anthropic Messages outbound rendering.
 pub struct MessagesOutbound;
@@ -65,13 +65,11 @@ impl OutboundAdapter for MessagesOutbound {
 
 impl MessagesOutbound {
     /// Streaming render with optional auto-mode safeguard results. When
-    /// `safety_check` is set (Claude Code auto mode), every tool call the
-    /// upstream emits gets an explicit `unavailable` verdict in the
-    /// terminating `message_delta.delta.safeguard_results` — the harness
-    /// treats a missing result as "dropped on the way" and denies *all* tool
-    /// use for the rest of the session, while an explicit verdict keeps it
-    /// running (each call still needs user approval, which auto mode always
-    /// did when it can't classify).
+    /// `safety_check` is set (Claude Code auto mode), the terminating
+    /// `message_delta.delta.safeguard_results` answers `unsupported` (see
+    /// [`unsupported_safeguard_results`]): the harness then classifies locally.
+    /// A missing result is read as "dropped on the way", and `unavailable` as
+    /// "no verdict" — both block the tool call.
     fn stream_safeguards<S>(model: &str, safety_check: bool, events: S) -> Response
     where
         S: Stream<Item = CanonicalEvent> + Send + 'static,
@@ -88,11 +86,7 @@ impl MessagesOutbound {
             // terminal `error` frame is already emitted, so `finalize` (which
             // would append message_delta/message_stop) must be skipped.
             let mut failed = false;
-            let mut tool_use_ids: Vec<String> = Vec::new();
             while let Some(event) = events.next().await {
-                if let CanonicalEvent::ToolCall(call) = &event {
-                    tool_use_ids.push(call.id.clone());
-                }
                 let finished = matches!(event, CanonicalEvent::Finish { .. });
                 failed |= matches!(event, CanonicalEvent::Error { .. });
                 for frame in encoder.push(event) {
@@ -109,7 +103,7 @@ impl MessagesOutbound {
             // call it unconditionally here.)
             if !failed {
                 for frame in encoder.finalize_with_safeguards(
-                    safety_check.then(|| SafeguardResults::all_unavailable(&tool_use_ids)),
+                    safety_check.then(unsupported_safeguard_results),
                 ) {
                     yield to_event(&frame);
                 }
@@ -336,10 +330,7 @@ impl StreamEncoder {
     /// [`finalize`](Self::finalize) with optional auto-mode safeguard results
     /// attached to the `message_delta.delta` (Claude Code expects them there
     /// when it requested a server-side safety check).
-    pub fn finalize_with_safeguards(
-        &mut self,
-        safeguards: Option<SafeguardResults>,
-    ) -> Vec<SseFrame> {
+    pub fn finalize_with_safeguards(&mut self, safeguards: Option<Value>) -> Vec<SseFrame> {
         if self.finalized {
             return Vec::new();
         }
@@ -348,7 +339,7 @@ impl StreamEncoder {
         let mut frames = self.close_current();
         let mut delta = json!({ "stop_reason": self.stop_reason, "stop_sequence": null });
         if let Some(results) = safeguards {
-            delta["safeguard_results"] = serde_json::to_value(results).unwrap_or(Value::Null);
+            delta["safeguard_results"] = results;
         }
         frames.push(SseFrame {
             event: "message_delta",
@@ -444,4 +435,14 @@ fn stop_reason(reason: FinishReason) -> &'static str {
 /// (falling back to an empty object if it isn't valid JSON).
 fn parse_arguments(arguments: &str) -> Value {
     serde_json::from_str(arguments).unwrap_or_else(|_| json!({}))
+}
+
+/// The `message_delta.delta.safeguard_results` value for a gateway that cannot
+/// classify. The harness (verified against Claude Code 2.1.322) parses it as
+/// an **array** of `{type, status}` entries, one per safeguard it requested;
+/// `status.type: "unsupported"` makes it classify locally for the rest of the
+/// session. Anything not matching that shape (a bare object, `unavailable`)
+/// is read as "no verdict" and the call is blocked.
+fn unsupported_safeguard_results() -> Value {
+    serde_json::json!([{ "type": "dangerous_tool_use", "status": { "type": "unsupported" } }])
 }

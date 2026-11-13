@@ -61,9 +61,8 @@ pub struct CanonicalRequest {
     pub reasoning_effort: Option<ReasoningEffort>,
     /// The client asked for server-side tool-use classification (Claude Code
     /// auto mode's `safeguards` field). The gateway cannot classify, but the
-    /// outbound adapter must still acknowledge: it answers every tool call
-    /// with an explicit `unavailable` verdict so the client doesn't lock out
-    /// tool use for the session.
+    /// outbound adapter must still acknowledge: it answers `unsupported`
+    /// so the client falls back to its local classifier.
     pub server_safety_check: bool,
 }
 
