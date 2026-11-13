@@ -64,6 +64,21 @@ impl InboundAdapter for MessagesInbound {
         canonical.system = system_prompt(request.system);
         canonical.messages = conversation(request.messages);
         canonical.tools = tools(request.tools);
+        // Auto mode's server-side safety check: the harness expects a verdict
+        // for each tool call in the terminating message_delta (see
+        // `SafeguardResults`). Answer whenever the request carries tools —
+        // production captures show current harnesses do NOT always send the
+        // `safeguards[]` array (earlier assumption), yet still treat a
+        // missing verdict as "classifier gave no verdict" and deny the call.
+        // The gateway cannot classify either way, so an explicit
+        // `unavailable` verdict per collected tool-use id is the only safe
+        // answer; with no tools there is nothing to answer.
+        let has_tools = !canonical.tools.is_empty();
+        canonical.server_safety_check = has_tools
+            || request
+                .safeguards
+                .iter()
+                .any(|s| s.kind == "dangerous_tool_use");
         canonical.tool_choice = request.tool_choice.map(tool_choice);
         canonical.reasoning_effort = reasoning_effort(
             request
@@ -72,14 +87,6 @@ impl InboundAdapter for MessagesInbound {
                 .and_then(|o| o.effort.as_deref()),
             request.thinking.as_ref(),
         );
-        // Auto mode's server-side safety check: the harness expects a verdict
-        // for each tool call in the terminating message_delta (see
-        // `SafeguardResults`). Without one it denies every tool use for the
-        // session, so flag it for the outbound adapter.
-        canonical.server_safety_check = request
-            .safeguards
-            .iter()
-            .any(|s| s.kind == "dangerous_tool_use");
 
         Ok(canonical)
     }

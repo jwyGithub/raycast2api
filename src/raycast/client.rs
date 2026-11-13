@@ -242,6 +242,23 @@ impl RaycastClient {
                             last_error = Some(GatewayError::Upstream { status, message });
                             continue;
                         }
+                        if err.parsed.is_content_policy_blocked() {
+                            // 流中段的内容策略拦截(peek 只扫首 payload,真实流
+                            // 开头是 ping,错误在其后):与账号无关,
+                            // retryable:false,换号/重试纯属浪费 —— 立即终止,
+                            // 附排查提示透传给客户端(同 peek 分支语义)。
+                            tracing::warn!(
+                                account = %account.email,
+                                "→ upstream content-policy block mid-stream (request content, not account): {message}"
+                            );
+                            return Err(GatewayError::Upstream {
+                                status,
+                                message: format!(
+                                    "{message}{}",
+                                    crate::raycast::parser::content_policy_hint()
+                                ),
+                            });
+                        }
                         tracing::warn!(
                             account = %account.email,
                             "→ upstream in-stream error (not rate-limit): {message}"

@@ -626,6 +626,17 @@ fn safeguards_field_flags_server_safety_check() {
     .unwrap();
     assert!(canonical.server_safety_check);
 
+    // Tools present → answer, even when the harness omits `safeguards[]`
+    // (production captures: current harnesses expect verdicts regardless).
+    let with_tools = parse(json!({
+        "model": "claude-x",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "tools": [{ "name": "Bash", "description": "run", "input_schema": {"type":"object"} }]
+    }))
+    .unwrap();
+    assert!(with_tools.server_safety_check);
+
+    // No tools, no safeguards → nothing to answer.
     let plain = parse(json!({
         "model": "claude-x",
         "messages": [{ "role": "user", "content": "hi" }]
