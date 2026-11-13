@@ -1084,7 +1084,7 @@
                                 </caption>
                                 <thead class="border-b border-line bg-slate-50 text-muted">
                                     <tr>
-                                        ${['请求 ID', '创建时间', '方法', '路径', '入站大小', '上游大小', '响应大小', '操作'].map(
+                                        ${['请求 ID', '创建时间', '方法', '路径', '模型', '入站大小', '上游大小', '响应大小', '操作'].map(
                                             label => html`<th scope="col" class="px-3 py-3 font-medium">${label}</th>`
                                         )}
                                     </tr>
@@ -1111,6 +1111,9 @@
                                                       </td>
                                                       <td class="max-w-64 truncate px-3 py-2 font-mono" title=${item.path || ''}>
                                                           ${item.path || '—'}
+                                                      </td>
+                                                      <td class="max-w-48 truncate px-3 py-2 font-mono" title=${item.model || ''}>
+                                                          ${item.model || '—'}
                                                       </td>
                                                       <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.inbound_bytes)}</td>
                                                       <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.upstream_bytes)}</td>
@@ -1188,7 +1191,7 @@
                                     ${this.detail
                                         ? html`<p>
                                               ${formatDate(this.detail.created_at)} · ${this.detail.method || '—'} ·
-                                              ${this.detail.path || '—'}
+                                              ${this.detail.path || '—'} · ${this.detail.model || '—'}
                                           </p>`
                                         : ''}
                                 </div>

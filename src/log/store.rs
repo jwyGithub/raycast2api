@@ -10,7 +10,9 @@ use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 
 pub const RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS request_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, method TEXT, path TEXT, inbound_json TEXT, upstream_json TEXT, response_text TEXT); CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs(created_at);";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS request_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, method TEXT, path TEXT, model TEXT, inbound_json TEXT, upstream_json TEXT, response_text TEXT); CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs(created_at);";
+/// 旧库补列;新库建表已含 model,此语句会报 duplicate column,忽略即可。
+const ADD_MODEL: &str = "ALTER TABLE request_logs ADD COLUMN model TEXT";
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = request_logs)]
@@ -20,6 +22,7 @@ struct StoredLog {
     created_at: i64,
     method: Option<String>,
     path: Option<String>,
+    model: Option<String>,
     inbound_json: Option<String>,
     upstream_json: Option<String>,
     response_text: Option<String>,
@@ -31,6 +34,7 @@ struct NewLog<'a> {
     created_at: i64,
     method: Option<&'a str>,
     path: Option<&'a str>,
+    model: Option<&'a str>,
     inbound_json: Option<&'a str>,
 }
 impl StoredLog {
@@ -40,6 +44,7 @@ impl StoredLog {
             created_at: self.created_at,
             method: self.method,
             path: self.path,
+            model: self.model,
             inbound_json: self.inbound_json,
             upstream_json: self.upstream_json,
             response_text: self.response_text,
@@ -55,6 +60,7 @@ impl RequestLogStore {
             if let Err(e) = db.lock().batch_execute(SCHEMA) {
                 tracing::error!("request log schema: {e}");
             }
+            let _ = db.lock().batch_execute(ADD_MODEL);
             let store = Self { db };
             if store.cleanup_expired() > 0 {
                 store.vacuum();
@@ -74,6 +80,7 @@ impl RequestLogStore {
     }
     pub fn insert_request(&self, id: &str, method: &str, path: &str, body: &serde_json::Value) {
         crate::db::blocking(|| {
+            let model = body.get("model").and_then(|m| m.as_str());
             let body = serde_json::to_string_pretty(body).unwrap_or_default();
             let mut c = self.db.lock();
             if let Err(e) = diesel::insert_into(request_logs::table)
@@ -82,6 +89,7 @@ impl RequestLogStore {
                     created_at: unix_secs() as i64,
                     method: Some(method),
                     path: Some(path),
+                    model,
                     inbound_json: Some(&body),
                 })
                 .on_conflict(request_logs::request_id)
@@ -101,6 +109,7 @@ impl RequestLogStore {
                     created_at: unix_secs() as i64,
                     method: Some(method),
                     path: Some(path),
+                    model: None,
                     inbound_json: None,
                 })
                 .on_conflict(request_logs::request_id)
@@ -171,6 +180,7 @@ impl RequestLogStore {
                     request_logs::created_at,
                     request_logs::method,
                     request_logs::path,
+                    request_logs::model,
                     diesel::dsl::sql::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>>(
                         "length(CAST(inbound_json AS BLOB))",
                     ),
@@ -187,6 +197,7 @@ impl RequestLogStore {
                     i64,
                     Option<String>,
                     Option<String>,
+                    Option<String>,
                     Option<i64>,
                     Option<i64>,
                     Option<i64>,
@@ -200,6 +211,7 @@ impl RequestLogStore {
                         created_at,
                         method,
                         path,
+                        model,
                         inbound_bytes,
                         upstream_bytes,
                         response_bytes,
@@ -209,6 +221,7 @@ impl RequestLogStore {
                         created_at,
                         method,
                         path,
+                        model,
                         inbound_bytes,
                         upstream_bytes,
                         response_bytes,
@@ -269,15 +282,17 @@ mod tests {
     #[test]
     fn insert_update_duplicate_and_list() {
         let s = store();
-        s.insert_request("a", "POST", "/v1/x", &json!({"n":1}));
+        s.insert_request("a", "POST", "/v1/x", &json!({"n":1,"model":"gpt-4o"}));
         s.update_upstream("a", &json!({"ok":true}));
         s.update_response("a", "你好");
         s.insert_request("a", "POST", "/x", &json!({"n":2}));
         let d = s.detail("a").unwrap();
+        assert_eq!(d.model.as_deref(), Some("gpt-4o"));
         assert!(d.inbound_json.unwrap().contains("1"));
         assert!(d.upstream_json.unwrap().contains("true"));
         let rows = s.list((1, 10), None, None).unwrap();
         assert_eq!(rows.items[0].response_bytes, Some(6));
+        assert_eq!(rows.items[0].model.as_deref(), Some("gpt-4o"));
     }
     #[test]
     fn pagination_and_cleanup() {

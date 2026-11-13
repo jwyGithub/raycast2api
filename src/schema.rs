@@ -33,6 +33,7 @@ diesel::table! {
         created_at -> BigInt,
         method -> Nullable<Text>,
         path -> Nullable<Text>,
+        model -> Nullable<Text>,
         inbound_json -> Nullable<Text>,
         upstream_json -> Nullable<Text>,
         response_text -> Nullable<Text>,
