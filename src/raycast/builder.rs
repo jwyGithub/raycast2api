@@ -147,7 +147,7 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
                 t.signature.as_ref().map(|s| {
                     json!({
                         "anthropic": { "thought_signature": s }
-                    }) 
+                    })
                 })
             })
         } else {

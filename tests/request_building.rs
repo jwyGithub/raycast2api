@@ -139,8 +139,16 @@ fn historical_thinking_is_not_replayed() {
         Message::text(Role::User, "q2"),
     ]);
     let out = build_chat_request(&req, "anthropic", "claude");
-    let bodies: Vec<&str> = out.messages.iter().map(|m| m.content.text.as_str()).collect();
-    assert_eq!(bodies, ["q1", "a1", "q2"], "no <think> replay for old turns");
+    let bodies: Vec<&str> = out
+        .messages
+        .iter()
+        .map(|m| m.content.text.as_str())
+        .collect();
+    assert_eq!(
+        bodies,
+        ["q1", "a1", "q2"],
+        "no <think> replay for old turns"
+    );
 }
 
 #[test]
@@ -164,8 +172,7 @@ fn current_loop_thinking_is_replayed() {
     assert_eq!(out.messages.len(), 4);
     assert_eq!(out.messages[0].content.text, "use the tool");
     assert_eq!(
-        out.messages[1].content.text,
-        "<think>current plan</think>",
+        out.messages[1].content.text, "<think>current plan</think>",
         "current-loop thinking is replayed"
     );
     assert_eq!(out.messages[1].role, "assistant");
