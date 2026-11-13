@@ -24,12 +24,12 @@
 :path: /api/v1/ai/chat_completions
 content-type: application/json
 accept: application/json
-authorization: Bearer rca_c31b9b9d014a5f387c17baae8bad603a...   # Raycast 账号 token
+authorization: Bearer rca_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...   # Raycast 账号 token
 user-agent: Raycast/2.1.3.0 (Windows-amd64 10.0.26100.0)
 origin: file://
-x-raycast-deviceid: 69e4a49f117f3fc450970299a733d0bbe461a142e09fb54c9c6ded895f0e2f67
+x-raycast-deviceid: <64 位十六进制 device_id>
 x-raycast-timestamp: 1788423597
-x-raycast-signature-v2: 3ac48379a6eba86da600309829f5cf56e9bf2cf1a79aebbb2a581f225654d495
+x-raycast-signature-v2: <HMAC-SHA256 十六进制签名>
 x-raycast-experimental: autoModels
 accept-encoding: gzip, deflate, br, zstd
 accept-language: zh-CN,zh;q=0.9,en;q=0.8,...

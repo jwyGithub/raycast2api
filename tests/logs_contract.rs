@@ -20,7 +20,7 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
     let log_store = Arc::new(RequestLogStore::new(db));
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
-        raycast_signature_secret: None,
+        raycast_signature_secret: "secret".into(),
         api_key: Some("test-key".into()),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,

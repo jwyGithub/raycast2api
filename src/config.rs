@@ -1,8 +1,8 @@
 //! Static constants and runtime [`Settings`] for the gateway.
 //!
 //! Static values mirror the reference TypeScript implementation in
-//! `source/src/config.ts`. Runtime settings are read from a JSON config file
-//! or environment variables as fallback.
+//! `source/src/config.ts`. Runtime settings are read from `config.json` only;
+//! environment variables are not consulted.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -84,13 +84,13 @@ pub struct ConfigFile {
     pub model_overrides: Option<HashMap<String, String>>,
 }
 
-/// Runtime configuration, loaded once at startup via [`Settings::from_config`].
+/// Runtime configuration, loaded once at startup via [`Settings::from_path`].
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// Raycast device id (`X-Raycast-DeviceId`, also folded into the signature).
     pub raycast_device_id: String,
-    /// Signing secret; `None` uses the built-in default secret.
-    pub raycast_signature_secret: Option<String>,
+    /// Signing secret for `X-Raycast-Signature-v2` (required, no built-in default).
+    pub raycast_signature_secret: String,
     /// Gateway's own API key. When `None`, the gateway accepts all callers.
     pub api_key: Option<String>,
     /// Primary address the HTTP server binds to (IPv4 or IPv6).
@@ -111,40 +111,33 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Read configuration from a JSON file, with environment variables as fallback.
-    /// Tries to load from `config.json` first; if not found, falls back to environment.
-    pub fn from_config() -> Result<Self, String> {
-        Self::from_path(std::path::Path::new("config.json"))
+    /// Read and validate the JSON configuration file at `path`.
+    pub fn from_path(path: &std::path::Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "config.json not found (copy config.example.json to config.json)".to_string()
+            } else {
+                format!("failed to read config.json: {e}")
+            }
+        })?;
+        Self::from_config_file(
+            serde_json::from_str(&content).map_err(|e| format!("invalid config.json: {e}"))?,
+        )
     }
 
-    fn from_path(path: &std::path::Path) -> Result<Self, String> {
-        match std::fs::read_to_string(path) {
-            Ok(content) => Self::from_config_file(
-                serde_json::from_str(&content).map_err(|e| format!("invalid config.json: {e}"))?,
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::from_env(),
-            Err(error) => Err(format!("failed to read config.json: {error}")),
-        }
-    }
-
-    /// Create Settings from a ConfigFile, with environment variable overrides.
+    /// Create Settings from a parsed ConfigFile.
     fn from_config_file(config: ConfigFile) -> Result<Self, String> {
-        let raycast_device_id = env_opt("RAYCAST_DEVICE_ID")
-            .or(config.raycast_device_id)
-            .ok_or_else(|| "missing RAYCAST_DEVICE_ID".to_string())?;
+        let raycast_device_id = non_empty(config.raycast_device_id)
+            .ok_or_else(|| "missing raycast_device_id in config.json".to_string())?;
+        let raycast_signature_secret = non_empty(config.raycast_signature_secret)
+            .ok_or_else(|| "missing raycast_signature_secret in config.json".to_string())?;
 
-        let accounts_db = env_opt("ACCOUNTS_DB")
-            .or(config.accounts_db)
+        let accounts_db = config
+            .accounts_db
             .unwrap_or_else(|| "store/store.db".to_string());
 
-        let host = env_opt("HOST")
-            .or(config.host)
-            .unwrap_or_else(|| "0.0.0.0".to_string());
-
-        let port: u16 = match env_opt("PORT") {
-            Some(p) => p.parse().map_err(|_| format!("invalid PORT: {p}"))?,
-            None => config.port.unwrap_or(8787),
-        };
+        let host = config.host.unwrap_or_else(|| "0.0.0.0".to_string());
+        let port = config.port.unwrap_or(8787);
 
         // Parse primary address
         let addr_string = if host.contains(':') {
@@ -167,14 +160,13 @@ impl Settings {
             None
         };
 
-        let proxies = parse_proxies(config.proxies, env_opt("PROXIES"))?;
+        let proxies = parse_proxies(config.proxies)?;
         let proxies_enabled = config.proxies_enabled.unwrap_or(false);
 
         Ok(Self {
             raycast_device_id,
-            raycast_signature_secret: env_opt("RAYCAST_SIGNATURE_SECRET")
-                .or(config.raycast_signature_secret),
-            api_key: env_opt("API_KEY").or(config.api_key),
+            raycast_signature_secret,
+            api_key: non_empty(config.api_key),
             bind_addr,
             bind_addr_dual,
             model_overrides: config.model_overrides.unwrap_or_default(),
@@ -188,32 +180,13 @@ impl Settings {
             proxies_enabled,
         })
     }
-
-    /// Read configuration from the environment. Returns an error naming the
-    /// first missing/invalid required variable.
-    fn from_env() -> Result<Self, String> {
-        Self::from_config_file(ConfigFile::default())
-    }
-
-    /// The signing secret as an `Option<&str>`, ready for the signature code.
-    pub fn signature_secret(&self) -> Option<&str> {
-        self.raycast_signature_secret.as_deref()
-    }
 }
 
-/// 解析代理配置:接受 config.json 的数组或 `PROXIES` 环境变量的逗号分隔串,
-/// 去空白项,校验 `http://` / `https://` / `socks5://` 前缀。写错配置在启动时
-/// 就报错,而不是第一次网络抖动时才发现代理根本没生效。
-fn parse_proxies(
-    from_file: Option<Vec<String>>,
-    from_env: Option<String>,
-) -> Result<Vec<String>, String> {
-    let list = match from_env {
-        // 环境变量覆盖文件,与 device_id/api_key 等的优先级一致。
-        Some(s) => s.split(',').map(|p| p.trim().to_string()).collect(),
-        None => from_file.unwrap_or_default(),
-    };
-    let proxies = list
+/// 解析代理配置:去空项,校验 `http://` / `https://` / `socks5://` 前缀。
+/// 写错配置在启动时就报错,而不是第一次网络抖动时才发现代理根本没生效。
+fn parse_proxies(from_file: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    let proxies = from_file
+        .unwrap_or_default()
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
@@ -229,8 +202,9 @@ fn parse_proxies(
     Ok(proxies)
 }
 
-fn env_opt(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|s| !s.is_empty())
+/// Treat an empty string in `config.json` the same as an absent key.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -240,9 +214,12 @@ mod proxy_tests {
     #[test]
     fn upstream_timeout_defaults_and_accepts_positive_seconds_only() {
         for (json, expected) in [
-            (r#"{"raycast_device_id":"test"}"#, 20),
             (
-                r#"{"raycast_device_id":"test","upstream_timeout_secs":45}"#,
+                r#"{"raycast_device_id":"test","raycast_signature_secret":"s"}"#,
+                20,
+            ),
+            (
+                r#"{"raycast_device_id":"test","raycast_signature_secret":"s","upstream_timeout_secs":45}"#,
                 45,
             ),
         ] {
@@ -266,7 +243,7 @@ mod proxy_tests {
     }
 
     #[test]
-    fn malformed_configuration_does_not_fall_back_to_environment() {
+    fn malformed_configuration_is_rejected() {
         let path = std::env::temp_dir().join(format!(
             "r2a-invalid-config-{}.json",
             crate::util::new_ulid()
@@ -278,31 +255,46 @@ mod proxy_tests {
     }
 
     #[test]
-    fn parse_proxies_validates_scheme_and_skips_empty() {
-        assert!(parse_proxies(None, None).unwrap().is_empty());
-        assert!(parse_proxies(Some(vec![]), None).unwrap().is_empty());
-        assert!(parse_proxies(None, Some("  ,,".into())).unwrap().is_empty());
+    fn missing_config_file_is_an_error() {
+        let path = std::env::temp_dir().join(format!(
+            "r2a-missing-config-{}.json",
+            crate::util::new_ulid()
+        ));
+        let error = Settings::from_path(&path).unwrap_err();
+        assert!(error.contains("config.json not found"));
+    }
 
-        let ok = parse_proxies(
-            Some(vec![
-                "http://127.0.0.1:7897".into(),
-                "socks5://user:pass@1.2.3.4:1080".into(),
-                "https://proxy.example.com".into(),
-            ]),
-            None,
-        )
+    #[test]
+    fn device_id_and_signature_secret_are_required() {
+        for (json, missing) in [
+            (r#"{"raycast_signature_secret":"s"}"#, "raycast_device_id"),
+            (r#"{"raycast_device_id":"d"}"#, "raycast_signature_secret"),
+            (
+                r#"{"raycast_device_id":"d","raycast_signature_secret":""}"#,
+                "raycast_signature_secret",
+            ),
+        ] {
+            let error =
+                Settings::from_config_file(serde_json::from_str(json).unwrap()).unwrap_err();
+            assert!(error.contains(missing), "{json} -> {error}");
+        }
+    }
+
+    #[test]
+    fn parse_proxies_validates_scheme_and_skips_empty() {
+        assert!(parse_proxies(None).unwrap().is_empty());
+        assert!(parse_proxies(Some(vec![])).unwrap().is_empty());
+        assert!(parse_proxies(Some(vec!["".into()])).unwrap().is_empty());
+
+        let ok = parse_proxies(Some(vec![
+            "http://127.0.0.1:7897".into(),
+            "socks5://user:pass@1.2.3.4:1080".into(),
+            "https://proxy.example.com".into(),
+        ]))
         .unwrap();
         assert_eq!(ok.len(), 3);
 
-        // 环境变量逗号串切分 + 去空白,并覆盖文件配置。
-        let env = parse_proxies(
-            Some(vec!["http://file.example:1".into()]),
-            Some(" http://a:1 , socks5://b:2 ,".into()),
-        )
-        .unwrap();
-        assert_eq!(env, vec!["http://a:1", "socks5://b:2"]);
-
-        let err = parse_proxies(Some(vec!["ftp://1.2.3.4".into()]), None).unwrap_err();
+        let err = parse_proxies(Some(vec!["ftp://1.2.3.4".into()])).unwrap_err();
         assert!(err.contains("invalid proxy"));
     }
 }

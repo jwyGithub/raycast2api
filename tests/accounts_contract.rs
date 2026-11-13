@@ -20,7 +20,7 @@ fn app_with_api_key(api_key: Option<&str>) -> (axum::Router, Arc<AccountStore>) 
     let store = Arc::new(AccountStore::new(Db::open(":memory:").unwrap()));
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
-        raycast_signature_secret: None,
+        raycast_signature_secret: "secret".into(),
         api_key: api_key.map(str::to_owned),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,

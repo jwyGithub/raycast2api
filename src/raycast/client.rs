@@ -319,7 +319,7 @@ impl RaycastClient {
             &timestamp,
             &self.settings.raycast_device_id,
             body,
-            self.settings.signature_secret(),
+            &self.settings.raycast_signature_secret,
         );
 
         let mut headers =

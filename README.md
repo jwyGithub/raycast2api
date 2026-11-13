@@ -66,9 +66,9 @@ identifyingNumber:  XXXXXXXXXXXX
 device_id: 64 位十六进制字符串
 ```
 
-把最后一行的 `device_id` 填入 `config.json` 的 `raycast_device_id`（或环境变量 `RAYCAST_DEVICE_ID`）。
+把最后一行的 `device_id` 填入 `config.json` 的 `raycast_device_id`。
 
-> Windows 脚本已用真实抓包请求验证（见 `tests/signature_parity_har.rs`）。macOS 脚本沿用 Windows 客户端提取的盐值与 `Production` 后缀，尚未与真实 macOS 抓包逐一比对：首次使用时，建议把输出与本机客户端请求里的 `X-Raycast-DeviceId` 请求头对一下。
+> Windows 脚本的推导算法当初已用真实抓包请求验证。macOS 脚本沿用 Windows 客户端提取的盐值与 `Production` 后缀，尚未与真实 macOS 抓包逐一比对：首次使用时，建议把输出与本机客户端请求里的 `X-Raycast-DeviceId` 请求头对一下。
 
 ### 方式一：Docker Compose（推荐）
 
@@ -79,7 +79,7 @@ git clone https://github.com/jwyGithub/raycast2api.git
 cd raycast2api
 
 cp config.example.json config.json
-# 编辑 config.json，至少填写 raycast_device_id，建议同时设置 api_key
+# 编辑 config.json，必须填写 raycast_device_id 和 raycast_signature_secret，建议同时设置 api_key
 
 docker compose up -d
 ```
@@ -205,9 +205,7 @@ curl http://localhost:8787/v1/models
 
 ## 配置
 
-加载顺序：优先读取项目根目录的 `config.json`，**环境变量始终覆盖**文件中的同名项；若没有 `config.json`，则完全从环境变量读取。`config.json` 存在但格式错误、或无法读取时，网关会直接报错退出，不会悄悄回退到环境变量。
-
-> Docker Compose 部署不注入环境变量，只读取挂载的 `config.json`。环境变量适用于本地运行，或你自行注入容器环境的场景。
+配置只从项目根目录的 `config.json` 读取，**不再读取环境变量**。文件缺失、格式错误，或缺少必填项 `raycast_device_id` / `raycast_signature_secret` 时，网关会直接报错退出。
 
 ```json
 {
@@ -215,7 +213,7 @@ curl http://localhost:8787/v1/models
   "port": 8787,
   "api_key": "your-api-key-here",
   "raycast_device_id": "your-raycast-device-id",
-  "raycast_signature_secret": null,
+  "raycast_signature_secret": "your-raycast-signature-secret",
   "proxies": [],
   "proxies_enabled": false,
   "upstream_timeout_secs": 20,
@@ -223,18 +221,18 @@ curl http://localhost:8787/v1/models
 }
 ```
 
-| 配置项 | 环境变量 | 必填 | 默认 | 说明 |
-| --- | --- | --- | --- | --- |
-| `raycast_device_id` | `RAYCAST_DEVICE_ID` | 是 | — | Raycast 设备 ID，同时参与签名计算；获取方式见[获取 device_id](#获取-device_id) |
-| `raycast_signature_secret` | `RAYCAST_SIGNATURE_SECRET` | 否 | 内置默认密钥 | 签名密钥，一般无需设置 |
-| `api_key` | `API_KEY` | 否 | 无 | 网关自身的 API key；不设置则不鉴权 |
-| `accounts_db` | `ACCOUNTS_DB` | 否 | `store/store.db` | SQLite 存储库路径（账号表与请求日志共用） |
-| `host` | `HOST` | 否 | `0.0.0.0` | 监听地址（须为 IP） |
-| `port` | `PORT` | 否 | `8787` | 监听端口 |
-| `upstream_timeout_secs` | — | 否 | `20` | 上游超时秒数，必须为正整数；用于连接、响应头、首包、SSE 空闲及普通查询 / OAuth。修改后重启生效，流式任务只要持续有输出，总时长可以超过此值 |
-| `proxies` | `PROXIES` | 否 | `[]` | 上游代理链，http / https / socks5 URL 数组；环境变量用逗号分隔。启动时会校验协议前缀，写错直接报错 |
-| `proxies_enabled` | — | 否 | `false` | 代理通道模式：`false` 为直连优先，网络错误时按顺序换代理重试；`true` 为代理优先，全部失败再回退直连。两种模式都要求 `proxies` 非空才生效 |
-| `model_overrides` | — | 否 | `{}` | 客户端模型 ID 到网关模型 ID 的别名表，例如 `{"gpt-6-astra": "openai-gpt-6-astra"}`，在查找上游模型之前应用 |
+| 配置项 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `raycast_device_id` | 是 | — | Raycast 设备 ID，同时参与签名计算；获取方式见[获取 device_id](#获取-device_id) |
+| `raycast_signature_secret` | 是 | — | `X-Raycast-Signature-v2` 的 HMAC 签名密钥，网关不再内置默认值；空字符串视为未填写 |
+| `api_key` | 否 | 无 | 网关自身的 API key；不设置则不鉴权 |
+| `accounts_db` | 否 | `store/store.db` | SQLite 存储库路径（账号表与请求日志共用） |
+| `host` | 否 | `0.0.0.0` | 监听地址（须为 IP） |
+| `port` | 否 | `8787` | 监听端口 |
+| `upstream_timeout_secs` | 否 | `20` | 上游超时秒数，必须为正整数；用于连接、响应头、首包、SSE 空闲及普通查询 / OAuth。修改后重启生效，流式任务只要持续有输出，总时长可以超过此值 |
+| `proxies` | 否 | `[]` | 上游代理链，http / https / socks5 URL 数组。启动时会校验协议前缀，写错直接报错 |
+| `proxies_enabled` | 否 | `false` | 代理通道模式：`false` 为直连优先，网络错误时按顺序换代理重试；`true` 为代理优先，全部失败再回退直连。两种模式都要求 `proxies` 非空才生效 |
+| `model_overrides` | 否 | `{}` | 客户端模型 ID 到网关模型 ID 的别名表，例如 `{"gpt-6-astra": "openai-gpt-6-astra"}`，在查找上游模型之前应用 |
 
 日志级别通过 `RUST_LOG` 控制（基于 `tracing-subscriber` 的 env-filter），默认 `info,tower_http=info`。
 
@@ -331,7 +329,7 @@ tests/             契约测试与签名一致性测试
 cargo test
 ```
 
-`tests/` 下覆盖三种协议的契约测试、消息转换、请求构造、错误映射、ID 派生、账号与日志接口契约，以及签名一致性（`signature_parity*`，使用从 Charles 抓包提取的固定值对齐上游签名）。
+`tests/` 下覆盖三种协议的契约测试、消息转换、请求构造、错误映射、ID 派生、账号与日志接口契约，以及签名一致性（`signature_parity`，用固定的占位 device_id / secret 生成黄金向量）。
 
 ## 发布
 

@@ -16,11 +16,6 @@ use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Default signing secret used when none is supplied, matching the fallback
-/// in the reference implementation.
-pub const DEFAULT_SIGNATURE_SECRET: &str =
-    "6bc455473576ce2cd6f70426caff867aabbe3f7291c1a79681af5e8ce0ca1408";
-
 /// Apply ROT13 to ASCII letters and ROT5 to ASCII digits; leave every other
 /// character (and any non-ASCII character) unchanged.
 ///
@@ -44,16 +39,13 @@ pub fn rot13_rot5_encode(input: &str) -> String {
 /// * `timestamp`  - the value sent in `X-Raycast-Timestamp` (ISO-8601).
 /// * `device_id`  - the value sent in `X-Raycast-DeviceId`.
 /// * `body`       - the exact request body string that will be sent.
-/// * `secret`     - the signing secret; pass `None` to use
-///   [`DEFAULT_SIGNATURE_SECRET`].
+/// * `secret`     - the signing secret (required; there is no built-in default).
 pub fn calculate_signature_v2(
     timestamp: &str,
     device_id: &str,
     body: &str,
-    secret: Option<&str>,
+    secret: &str,
 ) -> String {
-    let secret = secret.unwrap_or(DEFAULT_SIGNATURE_SECRET);
-
     // 1. SHA-256 of the body -> lowercase hex.
     let mut hasher = Sha256::new();
     hasher.update(body.as_bytes());

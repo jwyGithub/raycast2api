@@ -210,7 +210,7 @@ mod tests {
         let log = Arc::new(RequestLogStore::new(db));
         let settings = Arc::new(Settings {
             raycast_device_id: "device".into(),
-            raycast_signature_secret: None,
+            raycast_signature_secret: "secret".into(),
             api_key: None,
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             bind_addr_dual: None,

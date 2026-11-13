@@ -14,12 +14,12 @@ use raycast2api::server::state::AppState;
 async fn main() {
     init_tracing();
 
-    let settings = match Settings::from_config() {
+    let settings = match Settings::from_path(std::path::Path::new("config.json")) {
         Ok(settings) => Arc::new(settings),
         Err(err) => {
             eprintln!("configuration error: {err}");
             eprintln!(
-                "Create a config.json file or set RAYCAST_DEVICE_ID (see config.example.json)."
+                "Create a config.json file with raycast_device_id and raycast_signature_secret (see config.example.json)."
             );
             std::process::exit(1);
         }
@@ -104,7 +104,7 @@ async fn main() {
     );
 
     if settings.api_key.is_none() {
-        tracing::warn!("API_KEY is not set — the gateway will accept unauthenticated requests");
+        tracing::warn!("api_key is not set — the gateway will accept unauthenticated requests");
     }
 
     let app = build_router(state);

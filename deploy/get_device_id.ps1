@@ -6,7 +6,7 @@
 #
 # where `uuid` and `identifyingNumber` come from WMI
 # `Win32_ComputerSystemProduct` (uppercase, hyphenated, concatenated verbatim).
-# Verified against a real captured request (see tests/signature_parity_har.rs).
+# Verified against a real captured request.
 #
 # Usage:  pwsh ./get_device_id.ps1
 

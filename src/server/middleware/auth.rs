@@ -6,8 +6,8 @@ use crate::error::GatewayError;
 
 use super::super::state::SharedState;
 
-/// Enforce the gateway's own API key (from `API_KEY`) on all routes except the
-/// public health probes. When no `API_KEY` is configured, all callers pass.
+/// Enforce the gateway's own API key (`api_key` in config.json) on all routes
+/// except the public health probes. When no `api_key` is configured, all callers pass.
 ///
 /// Two auth header styles are accepted, matching the client protocols the
 /// gateway fronts:

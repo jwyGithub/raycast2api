@@ -106,7 +106,7 @@ pub async fn export(
 ) -> Result<Json<Vec<AccountRecord>>, GatewayError> {
     if state.settings.api_key.is_none() {
         return Err(GatewayError::Unauthorized(
-            "account export requires API_KEY to be configured".into(),
+            "account export requires api_key to be configured".into(),
         ));
     }
     Ok(Json(state.accounts.export_records()?))
