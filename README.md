@@ -48,6 +48,28 @@ Claude Code、Codex 以及各类 OpenAI 兼容客户端，直接把请求打到�
 
 ## 快速开始
 
+### 获取 device_id
+
+`raycast_device_id` 必须与你本机 Raycast 客户端使用的设备 ID 一致，`deploy/` 下的脚本可以在本机直接推导出来。算法为 `device_id = SHA256(uuid + identifyingNumber + SALT + "Production")`，只读取本机硬件标识，不联网。
+
+| 平台 | 命令 | 数据来源 |
+| --- | --- | --- |
+| Windows | `pwsh ./deploy/get_device_id.ps1` | WMI `Win32_ComputerSystemProduct` 的 `UUID` 与 `IdentifyingNumber` |
+| macOS | `./deploy/get_device_id.sh` | `ioreg` 的 `IOPlatformUUID` 与 `IOPlatformSerialNumber` |
+
+输出示例：
+
+```text
+uuid:               XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+identifyingNumber:  XXXXXXXXXXXX
+
+device_id: 64 位十六进制字符串
+```
+
+把最后一行的 `device_id` 填入 `config.json` 的 `raycast_device_id`（或环境变量 `RAYCAST_DEVICE_ID`）。
+
+> Windows 脚本已用真实抓包请求验证（见 `tests/signature_parity_har.rs`）。macOS 脚本沿用 Windows 客户端提取的盐值与 `Production` 后缀，尚未与真实 macOS 抓包逐一比对：首次使用时，建议把输出与本机客户端请求里的 `X-Raycast-DeviceId` 请求头对一下。
+
 ### 方式一：Docker Compose（推荐）
 
 `docker-compose.yml` 默认拉取 CI 发布到 GHCR 的镜像 `ghcr.io/jwygithub/raycast2api:latest`，并且**只通过只读挂载的 `config.json` 配置**，不提供 `environment` / `env_file` 入口。
@@ -203,7 +225,7 @@ curl http://localhost:8787/v1/models
 
 | 配置项 | 环境变量 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
-| `raycast_device_id` | `RAYCAST_DEVICE_ID` | 是 | — | Raycast 设备 ID，同时参与签名计算 |
+| `raycast_device_id` | `RAYCAST_DEVICE_ID` | 是 | — | Raycast 设备 ID，同时参与签名计算；获取方式见[获取 device_id](#获取-device_id) |
 | `raycast_signature_secret` | `RAYCAST_SIGNATURE_SECRET` | 否 | 内置默认密钥 | 签名密钥，一般无需设置 |
 | `api_key` | `API_KEY` | 否 | 无 | 网关自身的 API key；不设置则不鉴权 |
 | `accounts_db` | `ACCOUNTS_DB` | 否 | `store/store.db` | SQLite 存储库路径（账号表与请求日志共用） |
@@ -298,6 +320,7 @@ src/
   server/          路由、中间件（鉴权 / 日志捕获）、handler、状态、pipeline
   log/             请求日志存储与请求关联 ID
   page/            管理控制台（单文件 HTML）
+deploy/            device_id 推导脚本（Windows .ps1 / macOS .sh）
 doc/               架构、时序图、上游协议抓包说明
 tests/             契约测试与签名一致性测试
 ```
