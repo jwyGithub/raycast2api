@@ -34,6 +34,7 @@ diesel::table! {
         method -> Nullable<Text>,
         path -> Nullable<Text>,
         model -> Nullable<Text>,
+        upstream_model -> Nullable<Text>,
         inbound_json -> Nullable<Text>,
         upstream_json -> Nullable<Text>,
         response_text -> Nullable<Text>,

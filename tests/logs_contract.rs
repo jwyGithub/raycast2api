@@ -22,6 +22,7 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
         raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
         api_key: Some("test-key".into()),
+        dashboard_password: None,
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,
         model_overrides: Default::default(),
@@ -78,7 +79,10 @@ async fn get(app: &axum::Router, uri: &str, key: Option<&str>) -> (StatusCode, V
 async fn list_and_detail_round_trip() {
     let (app, log) = app();
     log.insert_request("req_1", "POST", "/v1/responses", &json!({"model": "m"}));
-    log.update_upstream("req_1", &json!({"provider": "openai"}));
+    log.update_upstream(
+        "req_1",
+        &json!({"provider": "openai", "model": "upstream-m"}),
+    );
     log.update_response("req_1", "data: {\"text\":\"hi\"}");
 
     // 列表:不含任何 body 字段,含大小。
@@ -107,6 +111,8 @@ async fn list_and_detail_round_trip() {
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["request_id"], "req_1");
     assert_eq!(arr[0]["method"], "POST");
+    assert_eq!(arr[0]["model"], "m");
+    assert_eq!(arr[0]["upstream_model"], "upstream-m");
     assert!(arr[0].get("inbound_json").is_none());
     assert!(arr[0].get("response_text").is_none());
     assert!(arr[0]["response_bytes"].as_i64().unwrap() > 0);
@@ -122,6 +128,8 @@ async fn list_and_detail_round_trip() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"]["request_id"], "req_1");
+    assert_eq!(body["data"]["model"], "m");
+    assert_eq!(body["data"]["upstream_model"], "upstream-m");
     assert!(
         body["data"]["inbound_json"]
             .as_str()

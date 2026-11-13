@@ -64,6 +64,7 @@ pub struct ConfigFile {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub api_key: Option<String>,
+    pub dashboard_password: Option<String>,
     pub raycast_device_id: Option<String>,
     pub raycast_signature_secret: Option<String>,
     /// SQLite 存储库路径,默认 `store/store.db`。
@@ -93,6 +94,8 @@ pub struct Settings {
     pub raycast_signature_secret: String,
     /// Gateway's own API key. When `None`, the gateway accepts all callers.
     pub api_key: Option<String>,
+    /// Console login password. When absent, dashboard login is disabled.
+    pub dashboard_password: Option<String>,
     /// Primary address the HTTP server binds to (IPv4 or IPv6).
     pub bind_addr: SocketAddr,
     /// Dual-stack: secondary address for dual IPv4/IPv6 binding. `None` if single-stack.
@@ -167,6 +170,7 @@ impl Settings {
             raycast_device_id,
             raycast_signature_secret,
             api_key: non_empty(config.api_key),
+            dashboard_password: non_empty(config.dashboard_password),
             bind_addr,
             bind_addr_dual,
             model_overrides: config.model_overrides.unwrap_or_default(),
@@ -210,6 +214,24 @@ fn non_empty(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod proxy_tests {
     use super::*;
+
+    #[test]
+    fn dashboard_password_preserves_exact_value_and_disables_login_when_empty() {
+        for (password, expected) in [
+            (None, None),
+            (Some(""), None),
+            (Some(" 控制台 password "), Some(" 控制台 password ")),
+        ] {
+            let settings = Settings::from_config_file(ConfigFile {
+                raycast_device_id: Some("device".into()),
+                raycast_signature_secret: Some("secret".into()),
+                dashboard_password: password.map(str::to_owned),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(settings.dashboard_password.as_deref(), expected);
+        }
+    }
 
     #[test]
     fn upstream_timeout_defaults_and_accepts_positive_seconds_only() {

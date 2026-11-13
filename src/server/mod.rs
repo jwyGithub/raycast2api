@@ -67,7 +67,8 @@ pub fn build_router(state: SharedState) -> Router {
             middleware::auth,
         ));
 
-    api.route("/v1/{*path}", get(handlers::not_found))
+    api.route("/v1/login", post(handlers::login::login))
+        .route("/v1/{*path}", get(handlers::not_found))
         .layer(axum::middleware::from_fn(middleware::response_format))
         .layer(TraceLayer::new_for_http())
         .layer(cors)

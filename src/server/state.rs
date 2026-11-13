@@ -139,6 +139,7 @@ pub(crate) fn compact_test_state() -> SharedState {
         raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
         api_key: None,
+        dashboard_password: None,
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,
         model_overrides: Default::default(),

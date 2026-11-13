@@ -43,7 +43,7 @@ Claude Code、Codex 以及各类 OpenAI 兼容客户端，直接把请求打到�
 | 请求日志 | 入站体、上游请求体、上游 SSE 响应存入 SQLite，保留 7 天自动清理 |
 | 管理控制台 | 内置 Web 页面（`GET /`），管理账号池并查看请求日志 |
 | 上游代理链 | 支持 http / https / socks5，可配置代理优先或直连优先 |
-| 可选鉴权 | 设置 `api_key` 后，推理与管理接口都需要携带该 key |
+| 访问鉴权 | `dashboard_password` 用于控制台页面登录，`api_key` 统一用于接口认证 |
 | 双栈监听 | 绑定 `0.0.0.0` 时自动同时监听 IPv6 `[::]` |
 
 ## 快速开始
@@ -79,7 +79,7 @@ git clone https://github.com/jwyGithub/raycast2api.git
 cd raycast2api
 
 cp config.example.json config.json
-# 编辑 config.json，必须填写 raycast_device_id 和 raycast_signature_secret，建议同时设置 api_key
+# 编辑 config.json，必须填写 raycast_device_id 和 raycast_signature_secret，设置 dashboard_password 以登录控制台，建议同时设置 api_key
 
 docker compose up -d
 ```
@@ -100,7 +100,7 @@ cp config.example.json config.json   # 填入配置
 cargo run --release                  # 默认监听 0.0.0.0:8787
 ```
 
-启动后访问 `http://localhost:8787/` 打开[管理控制台](#管理控制台)，或用下面的示例直接请求。若未设置 `api_key`，网关会接受**未鉴权**请求，并在启动日志里打印告警。
+启动后访问 `http://localhost:8787/` 打开[管理控制台](#管理控制台)，输入配置的 `dashboard_password` 后进入，或用下面的示例直接请求。若未设置 `api_key`，网关会接受**未鉴权**请求，并在启动日志里打印告警。
 
 ### 添加账号
 
@@ -189,10 +189,11 @@ curl http://localhost:8787/v1/models
 
 ### 账号与日志管理
 
-管理接口（`/v1/accounts/*`、`/v1/logs/*`）统一返回 `{ code, message, data }`：列表与分页对象放在 `data` 中；删除成功返回 HTTP 200 和 `data: null`；错误响应也使用此包络，错误原因位于 `message`，`data` 为 `null`。模型列表、三种推理接口以及 `/health`、`/ready` 保持各自协议的响应格式。
+登录接口和管理接口（`/v1/login`、`/v1/accounts/*`、`/v1/logs/*`）统一返回 `{ code, message, data }`：列表与分页对象放在 `data` 中；删除成功返回 HTTP 200 和 `data: null`；错误响应也使用此包络，错误原因位于 `message`，`data` 为 `null`。模型列表、三种推理接口以及 `/health`、`/ready` 保持各自协议的响应格式。
 
 | 路径 | 说明 |
 | --- | --- |
+| `POST /v1/login` | 控制台页面登录（JSON body：`dashboard_password`），无需 API key；成功返回配置的 `data.api_key`（未配置时为 `null`），密码错误返回 HTTP 401 |
 | `POST /v1/accounts/list` | 账号列表（body：`page`、`page_size`、`status`；默认每页 10 个，`page_size` 取值 1 到 100） |
 | `POST /v1/accounts/detail` | 单账号信息（body：`email`） |
 | `POST /v1/accounts/create` | 新增 / 更新账号（按 email upsert；支持单个对象或账号数组） |
@@ -203,6 +204,8 @@ curl http://localhost:8787/v1/models
 | `POST /v1/logs/list` | 请求日志列表（body：`page`、`page_size`、`created_at`、`request_id`；默认每页 10 条，不含请求体） |
 | `POST /v1/logs/detail` | 请求日志详情（body：`request_id`；返回入站 / 上游 / 响应全文） |
 
+日志列表与详情中的 `model` 为客户端请求的模型，`upstream_model` 为应用映射后实际发给上游的请求体中的模型。未发送上游请求、上游请求体不含模型或升级前的历史日志，该字段为 `null`。已有数据库启动时会自动补列。
+
 ## 配置
 
 配置只从项目根目录的 `config.json` 读取，**不再读取环境变量**。文件缺失、格式错误，或缺少必填项 `raycast_device_id` / `raycast_signature_secret` 时，网关会直接报错退出。
@@ -212,6 +215,7 @@ curl http://localhost:8787/v1/models
   "host": "0.0.0.0",
   "port": 8787,
   "api_key": "your-api-key-here",
+  "dashboard_password": "your-dashboard-password-here",
   "raycast_device_id": "your-raycast-device-id",
   "raycast_signature_secret": "your-raycast-signature-secret",
   "proxies": [],
@@ -225,7 +229,8 @@ curl http://localhost:8787/v1/models
 | --- | --- | --- | --- |
 | `raycast_device_id` | 是 | — | Raycast 设备 ID，同时参与签名计算；获取方式见[获取 device_id](#获取-device_id) |
 | `raycast_signature_secret` | 是 | — | `X-Raycast-Signature-v2` 的 HMAC 签名密钥，网关不再内置默认值；空字符串视为未填写 |
-| `api_key` | 否 | 无 | 网关自身的 API key；不设置则不鉴权 |
+| `api_key` | 否 | 无 | 网关接口的认证凭据；未设置时接口不鉴权。页面登录成功后返回给前端，用于后续接口调用 |
+| `dashboard_password` | 否 | 无 | 控制台登录密码；未配置或为空时无法登录页面，原有 API key 调用仍可用；修改后重启生效 |
 | `accounts_db` | 否 | `store/store.db` | SQLite 存储库路径（账号表与请求日志共用） |
 | `host` | 否 | `0.0.0.0` | 监听地址（须为 IP） |
 | `port` | 否 | `8787` | 监听端口 |
@@ -270,7 +275,9 @@ curl http://localhost:8787/v1/models
 
 浏览器访问网关根路径 `http://localhost:8787/` 即可打开内置的 **Raycast 管理控制台**，用于查看和管理账号池、翻阅请求日志。
 
-* 页面本身无需鉴权，页面内调用的 `/v1/accounts/*`、`/v1/logs/*` 仍受 `api_key` 保护；在页面里填入 key 后，会保存在浏览器的 localStorage 中，并以 `Authorization: Bearer` 发送。
+* 每次打开或刷新页面先显示密码弹窗，向 `POST /v1/login` 提交 `{"dashboard_password":"你的控制台密码"}`，校验成功后才加载账号和日志。需先在 `config.json` 设置非空 `dashboard_password` 并重启服务。
+* 登录成功返回配置的 `data.api_key`，前端仅将其保存在当前页面内存中，后续接口请求通过 `Authorization: Bearer <api_key>` 携带；关闭、离开或刷新页面时清除，重新进入需再次登录。页面不会将密码或 API key 写入 localStorage / sessionStorage。
+* `dashboard_password` 只用于页面登录校验。管理与推理接口统一按 `api_key` 配置鉴权，与页面是否登录无关；未配置 `api_key` 时，登录返回 `api_key: null`，前端不发送认证头，接口保留原有免鉴权行为。
 * 页面样式与脚本通过 CDN 加载（Tailwind、GSAP、flatpickr），需要浏览器能访问 jsDelivr。
 
 ## 架构

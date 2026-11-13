@@ -12,6 +12,8 @@ pub struct LogEntry {
     pub method: Option<String>,
     pub path: Option<String>,
     pub model: Option<String>,
+    /// 最终上游请求体中的模型名称（已应用模型映射）。
+    pub upstream_model: Option<String>,
     pub inbound_bytes: Option<i64>,
     pub upstream_bytes: Option<i64>,
     pub response_bytes: Option<i64>,
@@ -25,6 +27,8 @@ pub struct LogDetail {
     pub method: Option<String>,
     pub path: Option<String>,
     pub model: Option<String>,
+    /// 最终上游请求体中的模型名称（已应用模型映射）。
+    pub upstream_model: Option<String>,
     pub inbound_json: Option<String>,
     pub upstream_json: Option<String>,
     pub response_text: Option<String>,
