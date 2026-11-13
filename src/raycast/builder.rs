@@ -113,11 +113,26 @@ fn derive_message_id(messages: &[Message]) -> String {
 }
 
 /// Render canonical messages into Raycast messages, expanding assistant
-/// thinking into its own preceding `<think>` turn.
+/// thinking into its own preceding `<think>` turn — but only for the
+/// **current tool-use loop** (messages after the last user turn).
+///
+/// Historical thinking is stripped: the upstream content filter re-scans
+/// replayed `<think>` text and probabilistically blocks entire requests with
+/// `content_policy_blocked` (observed 2026-11-12/13; stripping all 26 thinking
+/// blocks from the offending 452KB request let it pass verbatim). Old thoughts
+/// carry no replay value, and past-turn thinking blocks are signature-free per
+/// Anthropic's `clear_thinking` semantics — only the current loop's thinking
+/// must survive for the tool round-trip.
 fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
     let mut out = Vec::with_capacity(messages.len());
+    // Everything from the last user message onward is the live tool-use loop;
+    // the request is built to continue it, so its thinking stays.
+    let current_loop_start = messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .unwrap_or(0);
 
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         // Assistant thinking is carried as a separate assistant message whose
         // body is the thought wrapped in <think>...</think>. The provider's
         // thought signature is NOT attached here: upstream validates the
@@ -127,19 +142,31 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
         // captured protocol (doc/raycast-backend-protocol.md §2.2), the
         // signature rides on the terminal assistant message: the one with
         // `tool_calls` when the turn ended in a tool call, else the text turn.
-        let signature_json = message.thinking.as_ref().and_then(|t| {
-            t.signature.as_ref().map(|s| {
-                json!({
-                    "anthropic": { "thought_signature": s }
+        let signature_json = if index >= current_loop_start {
+            message.thinking.as_ref().and_then(|t| {
+                t.signature.as_ref().map(|s| {
+                    json!({
+                        "anthropic": { "thought_signature": s }
+                    }) 
                 })
             })
-        });
+        } else {
+            // The signature belongs to a thinking block this request no longer
+            // replays; attaching it would make upstream validate a signature
+            // against content it never saw.
+            None
+        };
 
         if let Some(thinking) = &message.thinking {
-            out.push(RaycastMessage::text(
-                "assistant",
-                format!("<think>{}</think>", thinking.text),
-            ));
+            // Replay only current-loop thinking; historical thoughts are
+            // dropped entirely (see fn docs) to keep them away from the
+            // upstream content filter.
+            if index >= current_loop_start {
+                out.push(RaycastMessage::text(
+                    "assistant",
+                    format!("<think>{}</think>", thinking.text),
+                ));
+            }
         }
 
         let role = role_wire(message.role);

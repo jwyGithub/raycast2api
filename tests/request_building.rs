@@ -110,3 +110,100 @@ fn message_id_rotates_on_new_user_turn() {
         "a new user message must start a new message_id"
     );
 }
+
+// --- Thinking replay scope ----------------------------------------------------
+//
+// The upstream content filter re-scans replayed `<think>` text and
+// probabilistically blocks whole requests with `content_policy_blocked`
+// (observed 2026-11-12/13 on a 452KB transcript; stripping all historical
+// thinking blocks let the identical request pass). The builder therefore
+// replays thinking only for the CURRENT tool-use loop — messages after the
+// last user turn — and drops historical thoughts and their signatures.
+
+fn think_msg(role: Role, text: &str, thought: &str) -> Message {
+    let mut m = Message::text(role, text);
+    m.thinking = Some(raycast2api::core::message::Thinking {
+        text: thought.to_string(),
+        signature: Some(format!("sig-for-{thought}")),
+    });
+    m
+}
+
+#[test]
+fn historical_thinking_is_not_replayed() {
+    // Turn 1 carried thinking; turn 2 is a fresh user message. The old
+    // `<think>` turn must vanish from the wire entirely.
+    let req = req_with(vec![
+        Message::text(Role::User, "q1"),
+        think_msg(Role::Assistant, "a1", "old private thought"),
+        Message::text(Role::User, "q2"),
+    ]);
+    let out = build_chat_request(&req, "anthropic", "claude");
+    let bodies: Vec<&str> = out.messages.iter().map(|m| m.content.text.as_str()).collect();
+    assert_eq!(bodies, ["q1", "a1", "q2"], "no <think> replay for old turns");
+}
+
+#[test]
+fn current_loop_thinking_is_replayed() {
+    // Mid tool round-trip: the assistant turn after the last user message is
+    // part of the live loop, so its thinking IS replayed. The turn ends in a
+    // tool call, matching how harness thinking turns actually terminate.
+    let mut assistant = think_msg(Role::Assistant, "", "current plan");
+    assistant.tool_calls = vec![raycast2api::core::message::ToolCall {
+        id: "toolu_1".into(),
+        name: "Bash".into(),
+        arguments: "{}".into(),
+    }];
+    let req = req_with(vec![
+        Message::text(Role::User, "use the tool"),
+        assistant,
+        Message::text(Role::Tool, "result"),
+    ]);
+    let out = build_chat_request(&req, "anthropic", "claude");
+    // Wire layout: user, <think>, assistant (empty text + tool call), tool.
+    assert_eq!(out.messages.len(), 4);
+    assert_eq!(out.messages[0].content.text, "use the tool");
+    assert_eq!(
+        out.messages[1].content.text,
+        "<think>current plan</think>",
+        "current-loop thinking is replayed"
+    );
+    assert_eq!(out.messages[1].role, "assistant");
+    assert_eq!(out.messages[2].content.text, "");
+    assert_eq!(out.messages[3].content.text, "result");
+}
+
+#[test]
+fn historical_signature_is_dropped_with_its_thinking() {
+    // A signature belongs to thinking this request no longer replays; sending
+    // it would make upstream validate a signature against content it never
+    // saw. Old turns carry neither the <think> text nor the signature, while
+    // the current-loop terminal assistant message keeps its signature.
+    let mut current = think_msg(Role::Assistant, "", "fresh thought");
+    current.tool_calls = vec![raycast2api::core::message::ToolCall {
+        id: "toolu_2".into(),
+        name: "Bash".into(),
+        arguments: "{}".into(),
+    }];
+    let req = req_with(vec![
+        Message::text(Role::User, "q1"),
+        think_msg(Role::Assistant, "a1", "old thought"),
+        Message::text(Role::User, "q2"),
+        current,
+        Message::text(Role::Tool, "result"),
+    ]);
+    let out = build_chat_request(&req, "anthropic", "claude");
+    // Wire layout: q1, a1, q2, <think>fresh thought</think>, ""+tool call,
+    // result.
+    let historical = &out.messages[1]; // the "a1" assistant turn
+    assert!(historical.extra_content.is_none(), "old signature dropped");
+    // Current-loop terminal assistant message carries the signature (it ends
+    // the turn in a tool call).
+    let terminal = &out.messages[4];
+    assert_eq!(terminal.content.text, "");
+    assert!(!terminal.tool_calls.is_empty());
+    assert!(
+        terminal.extra_content.is_some(),
+        "current-loop signature preserved"
+    );
+}
