@@ -176,8 +176,7 @@ fn no_thinking_is_replayed_anywhere() {
     assert!(!out.messages[1].tool_calls.is_empty());
     assert_eq!(out.messages[2].content.text, "result");
     assert!(
-        !out
-            .messages
+        !out.messages
             .iter()
             .any(|m| m.content.text.starts_with("<think>")),
         "no <think> replay anywhere on the wire"
@@ -242,8 +241,7 @@ fn user_text_adjacent_to_tool_results_does_not_reset_signature() {
     ]);
     let out = build_chat_request(&req, "anthropic", "claude");
     assert!(
-        !out
-            .messages
+        !out.messages
             .iter()
             .any(|m| m.content.text.starts_with("<think>")),
         "tool-adjacent user text must not resurrect thinking replay"
