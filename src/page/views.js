@@ -8,6 +8,7 @@ class AccountConsole extends LitElement {
     static properties = {
         panel: { state: true },
         authenticated: { state: true },
+        restoringSession: { state: true },
         dashboardPassword: { state: true },
         loginError: { state: true },
         loggingIn: { state: true }
@@ -17,6 +18,7 @@ class AccountConsole extends LitElement {
         Object.assign(this, {
             panel: 'accounts',
             authenticated: false,
+            restoringSession: true,
             dashboardPassword: '',
             loginError: '',
             loggingIn: false
@@ -24,7 +26,7 @@ class AccountConsole extends LitElement {
         this.handlePageShow = event => {
             if (event.persisted) this.restoreSession();
         };
-        this.handlePageHide = () => this.lockConsole();
+        this.handlePageHide = () => this.lockConsole('', true);
     }
     createRenderRoot() {
         return this;
@@ -39,7 +41,7 @@ class AccountConsole extends LitElement {
         super.disconnectedCallback();
         window.removeEventListener('pageshow', this.handlePageShow);
         window.removeEventListener('pagehide', this.handlePageHide);
-        this.lockConsole();
+        this.lockConsole('', true);
     }
     updated() {
         const dialog = this.querySelector('#dashboard-login');
@@ -48,8 +50,9 @@ class AccountConsole extends LitElement {
             dialog.querySelector('input').focus();
         }
     }
-    lockConsole(error = '') {
+    lockConsole(error = '', restoringSession = false) {
         this.authenticated = false;
+        this.restoringSession = restoringSession;
         this.dashboardPassword = '';
         this.loginAttempt = null;
         this.loggingIn = false;
@@ -62,6 +65,7 @@ class AccountConsole extends LitElement {
     }
     async restoreSession() {
         const attempt = (this.loginAttempt = {});
+        this.restoringSession = true;
         this.loggingIn = true;
         try {
             const response = await fetch('/v1/session', {
@@ -80,7 +84,10 @@ class AccountConsole extends LitElement {
         } catch (error) {
             if (this.loginAttempt === attempt) this.loginError = error.message || '会话验证失败。';
         } finally {
-            if (this.loginAttempt === attempt) this.loggingIn = false;
+            if (this.loginAttempt === attempt) {
+                this.restoringSession = false;
+                this.loggingIn = false;
+            }
         }
     }
     async login(event) {
@@ -159,6 +166,8 @@ class AccountConsole extends LitElement {
         if (panel === 'statistics') this.querySelector('statistics-panel').load();
     }
     render() {
+        if (!this.authenticated && this.restoringSession)
+            return html`<div role="status" class="grid h-full place-items-center text-sm text-muted">正在恢复会话…</div>`;
         if (!this.authenticated)
             return html`<dialog
                 id="dashboard-login"
