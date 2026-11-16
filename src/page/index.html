@@ -1085,7 +1085,7 @@
                                 </caption>
                                 <thead class="border-b border-line bg-slate-50 text-muted">
                                     <tr>
-                                        ${['请求 ID', '创建时间', '方法', '路径', '模型', '上游模型', 'Effort', '入站大小', '上游大小', '响应大小', '操作'].map(
+                                        ${['请求 ID', '创建时间', '方法', '路径', '模型', '上游模型', '推理强度', '入站大小', '上游大小', '响应大小', '操作'].map(
                                             label => html`<th scope="col" class="px-3 py-3 font-medium">${label}</th>`
                                         )}
                                     </tr>
@@ -1207,7 +1207,7 @@
                                               上游模型：<span class="font-mono text-ink">${this.detail.upstream_model || '—'}</span>
                                           </p>
                                           <p class="break-all">
-                                              Effort（请求(上游)）：<span class="font-mono text-ink">${this.detail.effort || '—'}</span>
+                                              推理强度：<span class="font-mono text-ink">${this.detail.effort || '—'}</span>
                                           </p>`
                                         : ''}
                                 </div>

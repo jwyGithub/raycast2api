@@ -10,10 +10,11 @@
 //! The gateway is stateless — clients like Codex resend the full history every
 //! turn — so this module reimplements the same recipe at the protocol boundary:
 //!
-//! 1. **Estimate** request tokens (chars/4, mirroring Codex's
-//!    `approx_token_count`) against the model's `context` (in K tokens from the
-//!    Raycast `GET /models` response). Compaction triggers when usage crosses
-//!    [`AUTO_COMPACT_RATIO`] (90%, Codex's default) of the window.
+//! 1. **Estimate** request tokens using upstream input usage for a matching
+//!    history prefix plus bytes/4 for new messages; fall back to bytes/4 for
+//!    the full request when no prefix matches. Compare against the model's
+//!    `context` (in K tokens from Raycast `GET /models`), triggering at
+//!    [`AUTO_COMPACT_RATIO`] of the window minus [`TRIGGER_MARGIN_TOKENS`].
 //! 2. **Summarize**: the dropped prefix plus [`SUMMARIZATION_PROMPT`] (the
 //!    verbatim Codex template) goes through the upstream as one extra
 //!    completion; the final assistant text is the summary.
@@ -25,9 +26,10 @@
 //! — whose history is a superset — only the not-yet-summarized suffix needs a
 //! second pass. Cache entries expire after [`SUMMARY_CACHE_TTL`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::core::message::{Message, Role};
@@ -47,13 +49,14 @@ const MIN_COMPACT_WINDOW_TOKENS: u64 = 32_000;
 /// `COMPACT_USER_MESSAGE_MAX_TOKENS`).
 const RETAINED_USER_MESSAGE_BUDGET: usize = 20_000;
 
-/// Safety margin subtracted from the estimated request tokens before
-/// comparing against the trigger threshold, absorbing estimator error and the
-/// completion itself.
+/// Safety margin subtracted from the context threshold to leave room for
+/// estimator error and the completion itself.
 const TRIGGER_MARGIN_TOKENS: u64 = 8_000;
 
 /// How long a cached summary stays valid.
 const SUMMARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const USAGE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const USAGE_CACHE_CAPACITY: usize = 1_024;
 
 /// The verbatim Codex summarization template
 /// (`codex-rs/prompts/templates/compact/prompt.md`).
@@ -63,9 +66,114 @@ pub const SUMMARIZATION_PROMPT: &str = "You are performing a CONTEXT CHECKPOINT 
 /// `SUMMARY_PREFIX`), so `is_summary` can recognize prior summaries.
 pub const SUMMARY_PREFIX: &str = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
 
-/// Rough token estimate: ~4 chars per token (Codex's `approx_token_count`).
+/// Rough token estimate: ~4 UTF-8 bytes per token.
 fn approx_tokens(text: &str) -> u64 {
     (text.len() as u64).div_ceil(4)
+}
+
+/// Identifies the exact input whose token count arrives at stream completion.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UsageKey {
+    prefix_hash: [u8; 32],
+    covered_messages: usize,
+}
+
+impl UsageKey {
+    pub(crate) fn new(request: &CanonicalRequest) -> Self {
+        Self {
+            prefix_hash: *usage_prefix_hashes(request).last().unwrap(),
+            covered_messages: request.messages.len(),
+        }
+    }
+}
+
+struct CachedUsage {
+    key: UsageKey,
+    input_tokens: u32,
+    created_at: Instant,
+}
+
+/// Bounded input-token measurements; stores hashes rather than conversation text.
+#[derive(Default)]
+pub struct UsageCache {
+    entries: Mutex<VecDeque<CachedUsage>>,
+}
+
+impl UsageCache {
+    pub(crate) async fn record(&self, key: UsageKey, input_tokens: u32) {
+        // Missing upstream usage is parsed as zero and cannot calibrate a prefix.
+        if input_tokens == 0 || key.covered_messages == 0 {
+            return;
+        }
+        let mut entries = self.entries.lock().await;
+        let now = Instant::now();
+        entries.retain(|entry| {
+            now.duration_since(entry.created_at) < USAGE_CACHE_TTL && entry.key != key
+        });
+        if entries.len() >= USAGE_CACHE_CAPACITY {
+            entries.pop_front();
+        }
+        entries.push_back(CachedUsage {
+            key,
+            input_tokens,
+            created_at: now,
+        });
+    }
+
+    pub(crate) async fn estimate_tokens(&self, request: &CanonicalRequest) -> Option<u64> {
+        let hashes = usage_prefix_hashes(request);
+        let entries = self.entries.lock().await;
+        let now = Instant::now();
+        let entry = entries
+            .iter()
+            .filter(|entry| {
+                now.duration_since(entry.created_at) < USAGE_CACHE_TTL
+                    && hashes.get(entry.key.covered_messages) == Some(&entry.key.prefix_hash)
+            })
+            .max_by_key(|entry| entry.key.covered_messages)?;
+        let added_bytes = message_bytes(&request.messages[entry.key.covered_messages..]);
+        Some(u64::from(entry.input_tokens) + (added_bytes as u64).div_ceil(4))
+    }
+}
+
+/// Every prefix includes the prompt configuration, so unrelated inputs never
+/// share measurements merely because they use the same model or first message.
+fn usage_prefix_hashes(request: &CanonicalRequest) -> Vec<[u8; 32]> {
+    let mut hash = Sha256::new();
+    hash.update(
+        format!(
+            "{:?}",
+            (
+                &request.model,
+                &request.system,
+                &request.tools,
+                &request.tool_choice,
+                &request.reasoning_effort,
+            )
+        )
+        .as_bytes(),
+    );
+    let mut hashes = Vec::with_capacity(request.messages.len() + 1);
+    hashes.push(hash.clone().finalize().into());
+    for message in &request.messages {
+        // The builder never replays thinking text; clients may omit it next turn.
+        hash.update(
+            format!(
+                "{:?}",
+                (
+                    message.role.as_str(),
+                    &message.text,
+                    &message.tool_calls,
+                    &message.tool_call_id,
+                    &message.tool_name,
+                    message.tool_error,
+                )
+            )
+            .as_bytes(),
+        );
+        hashes.push(hash.clone().finalize().into());
+    }
+    hashes
 }
 
 /// Whether a user message is a previously produced compaction summary.
@@ -302,7 +410,8 @@ pub(crate) async fn plan(state: &SharedState, request: &CanonicalRequest) -> Com
         return Compaction::NotNeeded;
     }
 
-    let request_tokens = estimate_request_tokens(request) as u64;
+    let measured_tokens = state.usage_cache.estimate_tokens(request).await;
+    let request_tokens = measured_tokens.unwrap_or_else(|| estimate_request_tokens(request) as u64);
     let threshold = (window as f64 * AUTO_COMPACT_RATIO) as u64 - TRIGGER_MARGIN_TOKENS;
     if request_tokens < threshold {
         return Compaction::NotNeeded;
@@ -310,6 +419,7 @@ pub(crate) async fn plan(state: &SharedState, request: &CanonicalRequest) -> Com
     tracing::info!(
         model = %request.model,
         estimated_tokens = request_tokens,
+        token_source = if measured_tokens.is_some() { "usage+estimate" } else { "estimate" },
         threshold,
         window,
         "compact: threshold reached, evaluating turn boundary"
@@ -401,22 +511,30 @@ fn rebuild(messages: &[Message], summary_text: &str) -> Vec<Message> {
 /// Estimate the token footprint of a canonical request: every message text,
 /// tool-call arguments, the system prompt and the tool schemas.
 fn estimate_request_tokens(request: &CanonicalRequest) -> usize {
-    let mut chars: usize = 0;
+    let mut bytes = message_bytes(&request.messages);
     if let Some(system) = &request.system {
-        chars += system.len();
-    }
-    for message in &request.messages {
-        chars += message.text.len();
-        for call in &message.tool_calls {
-            chars += call.arguments.len() + call.name.len();
-        }
+        bytes += system.len();
     }
     for tool in &request.tools {
         // Schema shape via Debug formatting — ToolDef doesn't impl Serialize,
         // and an approximate footprint is all the estimator needs.
-        chars += format!("{tool:?}").len();
+        bytes += format!("{tool:?}").len();
     }
-    chars / 4
+    bytes / 4
+}
+
+fn message_bytes(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .map(|message| {
+            message.text.len()
+                + message
+                    .tool_calls
+                    .iter()
+                    .map(|call| call.arguments.len() + call.name.len())
+                    .sum::<usize>()
+        })
+        .sum()
 }
 
 /// Hash identifying the droppable prefix of a request (cache key basis).
@@ -510,6 +628,207 @@ mod tests {
         let tokens = estimate_request_tokens(&request);
         assert!(tokens > 4); // at least the two 2-token texts plus tool debug
     }
+
+    #[tokio::test]
+    async fn usage_counts_exact_prefix_plus_only_new_message_bytes() {
+        let cache = UsageCache::default();
+        let mut original = request(vec![Message::text(Role::User, "seed")]);
+        original.system = Some("system".repeat(100));
+        original.tools.push(ToolDef::Remote { name: "t".into() });
+        cache.record(UsageKey::new(&original), 46_690).await;
+        assert_eq!(cache.estimate_tokens(&original).await, Some(46_690));
+
+        let mut reply = Message::text(Role::Assistant, "reply");
+        reply.thinking = Some(crate::core::message::Thinking {
+            text: "thinking".repeat(1000),
+            signature: None,
+        });
+        reply.tool_calls.push(crate::core::message::ToolCall {
+            id: "call_1".into(),
+            name: "get".into(),
+            arguments: "{}".into(),
+        });
+        original.messages.extend([
+            reply,
+            Message::text(Role::Tool, "结果"),
+            Message::text(Role::User, "next"),
+        ]);
+        // 5 reply + 3 name + 2 arguments + 6 UTF-8 tool result + 4 user bytes.
+        assert_eq!(cache.estimate_tokens(&original).await, Some(46_695));
+        original.messages.last_mut().unwrap().text.push('!');
+        assert_eq!(cache.estimate_tokens(&original).await, Some(46_696));
+    }
+
+    #[tokio::test]
+    async fn usage_rejects_changed_prompt_configuration_or_history() {
+        let cache = UsageCache::default();
+        let mut original = request(vec![
+            Message::text(Role::User, "seed"),
+            Message::text(Role::Assistant, "calling"),
+            Message::text(Role::Tool, "result"),
+        ]);
+        original.messages[1]
+            .tool_calls
+            .push(crate::core::message::ToolCall {
+                id: "call_1".into(),
+                name: "get".into(),
+                arguments: "{}".into(),
+            });
+        cache.record(UsageKey::new(&original), 1000).await;
+        for field in [
+            "model",
+            "system",
+            "tools",
+            "tool_choice",
+            "effort",
+            "role",
+            "text",
+            "call_id",
+            "call_name",
+            "arguments",
+            "result_id",
+            "result_name",
+            "result_error",
+            "truncated",
+        ] {
+            let mut changed = original.clone();
+            match field {
+                "model" => changed.model.push('x'),
+                "system" => changed.system = Some("different system".into()),
+                "tools" => changed.tools.push(ToolDef::Remote { name: "t".into() }),
+                "tool_choice" => changed.tool_choice = Some(crate::core::tools::ToolChoice::None),
+                "effort" => {
+                    changed.reasoning_effort = Some(crate::core::request::ReasoningEffort::High)
+                }
+                "role" => changed.messages[0].role = Role::Assistant,
+                "text" => changed.messages[0].text.push('x'),
+                "call_id" => changed.messages[1].tool_calls[0].id.push('x'),
+                "call_name" => changed.messages[1].tool_calls[0].name.push('x'),
+                "arguments" => changed.messages[1].tool_calls[0].arguments.push('x'),
+                "result_id" => changed.messages[2].tool_call_id = Some("other".into()),
+                "result_name" => changed.messages[2].tool_name = Some("other".into()),
+                "result_error" => changed.messages[2].tool_error = true,
+                "truncated" => {
+                    changed.messages.pop();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(cache.estimate_tokens(&changed).await, None, "{field}");
+        }
+        // Changes the builder does not replay must not invalidate input usage.
+        original.messages[1].thinking = Some(crate::core::message::Thinking {
+            text: "private thinking".into(),
+            signature: None,
+        });
+        original.stream = true;
+        assert_eq!(cache.estimate_tokens(&original).await, Some(1000));
+    }
+
+    #[tokio::test]
+    async fn usage_selects_longest_matching_prefix_among_concurrent_branches() {
+        let cache = UsageCache::default();
+        let seed = request(vec![Message::text(Role::User, "seed")]);
+        let mut branch_a = seed.clone();
+        branch_a.messages.extend([
+            Message::text(Role::Assistant, "aaaa"),
+            Message::text(Role::User, "aaaa"),
+        ]);
+        let mut branch_b = branch_a.clone();
+        branch_b.messages[2].text = "bbbb".into();
+        tokio::join!(
+            cache.record(UsageKey::new(&branch_a), 2000),
+            cache.record(UsageKey::new(&branch_b), 3000),
+        );
+        // Even a newer short prefix must not replace the longer match.
+        cache.record(UsageKey::new(&seed), 1000).await;
+        branch_a
+            .messages
+            .push(Message::text(Role::Assistant, "next"));
+        assert_eq!(cache.estimate_tokens(&branch_a).await, Some(2001));
+        assert_eq!(cache.estimate_tokens(&branch_b).await, Some(3000));
+        cache.record(UsageKey::new(&branch_b), 3500).await;
+        assert_eq!(cache.estimate_tokens(&branch_b).await, Some(3500));
+    }
+
+    #[tokio::test]
+    async fn usage_cache_ignores_zero_expires_and_stays_bounded() {
+        let cache = UsageCache::default();
+        let original = request(vec![Message::text(Role::User, "seed")]);
+        let key = UsageKey::new(&original);
+        cache.record(key, 1000).await;
+        cache.record(key, 0).await;
+        assert_eq!(cache.estimate_tokens(&original).await, Some(1000));
+        cache.entries.lock().await[0].created_at = Instant::now() - USAGE_CACHE_TTL;
+        assert_eq!(cache.estimate_tokens(&original).await, None);
+
+        for i in 0..=USAGE_CACHE_CAPACITY {
+            let other = request(vec![Message::text(Role::User, i.to_string())]);
+            cache.record(UsageKey::new(&other), 1000).await;
+        }
+        assert_eq!(cache.entries.lock().await.len(), USAGE_CACHE_CAPACITY);
+        let evicted = request(vec![Message::text(Role::User, "0")]);
+        assert_eq!(cache.estimate_tokens(&evicted).await, None);
+    }
+
+    #[tokio::test]
+    async fn plan_uses_measured_usage_instead_of_full_request_estimate() {
+        let state = super::super::state::compact_test_state();
+        for (bytes, measured, should_compact) in [(90_000, 100, false), (8, 21_000, true)] {
+            let mut original = CanonicalRequest::new(Protocol::Responses, "test-model");
+            original.messages = vec![Message::text(Role::User, "x".repeat(bytes))];
+            state
+                .usage_cache
+                .record(UsageKey::new(&original), measured)
+                .await;
+            original.messages.extend([
+                Message::text(Role::Assistant, "done"),
+                Message::text(Role::User, "next"),
+            ]);
+            assert_eq!(
+                matches!(plan(&state, &original).await, Compaction::Summarize(_)),
+                should_compact,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn compacted_usage_does_not_calibrate_original_client_history() {
+        let state = super::super::state::compact_test_state();
+        let mut original = CanonicalRequest::new(Protocol::Responses, "test-model");
+        original.messages = vec![
+            Message::text(Role::User, "old"),
+            Message::text(Role::Assistant, "x".repeat(90_000)),
+            Message::text(Role::User, "CURRENT_TASK"),
+        ];
+        let compacted = maybe_compact(&state, original.clone(), |_| {
+            Box::pin(async { Ok("summary".into()) })
+        })
+        .await
+        .unwrap();
+        state
+            .usage_cache
+            .record(UsageKey::new(&compacted), 100)
+            .await;
+        assert_eq!(state.usage_cache.estimate_tokens(&original).await, None);
+        original.messages.extend([
+            Message::text(Role::Assistant, "done"),
+            Message::text(Role::User, "NEXT_TASK"),
+        ]);
+        assert!(matches!(
+            plan(&state, &original).await,
+            Compaction::Summarize(_)
+        ));
+        let mut continued = compacted;
+        continued.messages.extend([
+            Message::text(Role::Assistant, "done"),
+            Message::text(Role::User, "next"),
+        ]);
+        assert_eq!(
+            state.usage_cache.estimate_tokens(&continued).await,
+            Some(102)
+        );
+    }
+
     #[tokio::test]
     async fn compaction_preserves_current_task_and_reuses_exact_cache() {
         let state = super::super::state::compact_test_state();

@@ -12,7 +12,7 @@ use crate::log::store::RequestLogStore;
 use crate::raycast::client::RaycastClient;
 use crate::raycast::wire::RaycastRawModel;
 
-use super::compact::SummaryCache;
+use super::compact::{SummaryCache, UsageCache};
 use super::health::BackendHealth;
 
 /// How long a fetched model list stays fresh before it is re-fetched.
@@ -32,6 +32,8 @@ pub struct AppState {
     pub log: Arc<RequestLogStore>,
     /// auto-compact 摘要缓存(按模型 + 被压缩前缀 hash)。
     pub summary_cache: SummaryCache,
+    /// auto-compact 实测输入 token 缓存(按提示词配置 + 完整消息前缀)。
+    pub usage_cache: UsageCache,
     models_cache: RwLock<Option<ModelsCache>>,
     models_refresh: Mutex<()>,
     models_failed_at: Mutex<Option<Instant>>,
@@ -57,6 +59,7 @@ impl AppState {
             accounts,
             log,
             summary_cache: SummaryCache::default(),
+            usage_cache: UsageCache::default(),
             models_cache: RwLock::new(None),
             models_refresh: Mutex::new(()),
             models_failed_at: Mutex::new(None),

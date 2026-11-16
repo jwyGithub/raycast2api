@@ -23,6 +23,7 @@ use crate::protocol::OutboundAdapter;
 use crate::raycast::builder::build_chat_request;
 use crate::raycast::stream::canonical_events_with_retry;
 
+use super::compact::UsageKey;
 use super::state::SharedState;
 
 /// Drive one canonical request all the way to a response rendered in the
@@ -65,6 +66,7 @@ pub(crate) async fn events(
         "inference request"
     );
     let raycast_request = build_chat_request(request, &provider, &model);
+    let usage_key = UsageKey::new(request);
 
     let response = match state.client.send_chat(&raycast_request).await {
         Ok(response) => response,
@@ -74,21 +76,37 @@ pub(crate) async fn events(
         }
     };
 
-    let health_state = state.clone();
-    Ok(canonical_events_with_retry(
-        response,
-        state.client.clone(),
-        raycast_request,
-        state.log.clone(),
-    )
-    .map(move |event| {
-        match &event {
-            CanonicalEvent::Finish { .. } => health_state.health.mark_working(),
-            CanonicalEvent::Error { .. } => health_state.health.mark_failed(),
-            _ => {}
+    Ok(track_usage(
+        state.clone(),
+        usage_key,
+        canonical_events_with_retry(
+            response,
+            state.client.clone(),
+            raycast_request,
+            state.log.clone(),
+        ),
+    ))
+}
+
+fn track_usage(
+    state: SharedState,
+    key: UsageKey,
+    events: impl Stream<Item = CanonicalEvent> + Send + 'static,
+) -> impl Stream<Item = CanonicalEvent> + Send + 'static {
+    events.then(move |event| {
+        let state = state.clone();
+        async move {
+            match &event {
+                CanonicalEvent::Finish { usage, .. } => {
+                    state.health.mark_working();
+                    state.usage_cache.record(key, usage.input_tokens).await;
+                }
+                CanonicalEvent::Error { .. } => state.health.mark_failed(),
+                _ => {}
+            }
+            event
         }
-        event
-    }))
+    })
 }
 
 /// Consume the whole canonical event stream, folding it into a single
@@ -119,4 +137,83 @@ async fn aggregate(
     }
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{
+        message::{Message, Role},
+        protocol::Protocol,
+        response::FinishReason,
+        usage::Usage,
+    };
+
+    #[tokio::test]
+    async fn finish_records_input_usage_and_preserves_client_usage_for_both_paths() {
+        for streaming in [false, true] {
+            let state = super::super::state::compact_test_state();
+            let mut request = CanonicalRequest::new(Protocol::Responses, "test-model");
+            request.stream = streaming;
+            request.messages = vec![Message::text(Role::User, "seed")];
+            let usage = Usage {
+                input_tokens: 46_690,
+                output_tokens: 1411,
+                cached_tokens: 42_122,
+            };
+            let source = vec![
+                CanonicalEvent::TextDelta("done".into()),
+                CanonicalEvent::Finish {
+                    reason: FinishReason::Stop,
+                    usage,
+                },
+            ];
+            let events = track_usage(
+                state.clone(),
+                UsageKey::new(&request),
+                futures_util::stream::iter(source.clone()),
+            );
+            if streaming {
+                assert_eq!(events.collect::<Vec<_>>().await, source);
+            } else {
+                let response = aggregate(events).await.unwrap();
+                assert_eq!(response.text, "done");
+                assert_eq!(response.usage, usage);
+            }
+            request.messages.extend([
+                Message::text(Role::Assistant, "done"),
+                Message::text(Role::User, "next"),
+            ]);
+            assert_eq!(
+                state.usage_cache.estimate_tokens(&request).await,
+                Some(46_692)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn errors_and_missing_usage_do_not_create_measurements() {
+        for terminal in [
+            None,
+            Some(CanonicalEvent::Error {
+                status: 502,
+                message: "failed".into(),
+            }),
+            Some(CanonicalEvent::Finish {
+                reason: FinishReason::Stop,
+                usage: Usage::default(),
+            }),
+        ] {
+            let state = super::super::state::compact_test_state();
+            let mut request = CanonicalRequest::new(Protocol::Responses, "test-model");
+            request.messages = vec![Message::text(Role::User, "seed")];
+            let events = track_usage(
+                state.clone(),
+                UsageKey::new(&request),
+                futures_util::stream::iter(terminal),
+            );
+            let _: Vec<_> = events.collect().await;
+            assert_eq!(state.usage_cache.estimate_tokens(&request).await, None);
+        }
+    }
 }
