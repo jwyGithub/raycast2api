@@ -329,6 +329,11 @@ src/
   raycast/         上游客户端、请求构造、传输、首包检查、SSE 解析、模型解析
   account/         账号存储、token 续期、额度刷新
   server/          路由、中间件（鉴权 / 日志捕获）、handler、状态、pipeline
+    handlers/
+      management/  控制台登录、账号、请求日志、上游调用统计接口
+      inference/   Chat Completions / Messages / Responses 与模型列表接口
+      health.rs    公共健康与就绪探针
+      mod.rs       入口分类与公共兜底处理
   log/             请求日志存储与请求关联 ID
   statistics/      上游尝试统计存储、生命周期采集与查询结构
   page/            管理控制台前端文件（rust-embed 嵌入，新增文件无需改 Rust）
@@ -336,6 +341,8 @@ deploy/            device_id 推导脚本（Windows .ps1 / macOS .sh）
 doc/               架构、时序图、上游协议抓包说明
 tests/             契约测试与签名一致性测试
 ```
+
+HTTP 入口按管理与推理分类，各自的 `mod.rs` 负责组装路由，`server/mod.rs` 统一挂载 `/v1` 和公共中间件。控制台登录在 API-key 鉴权层外注册，健康探针保留鉴权豁免；接口地址、响应格式及请求体限制保持原有契约。
 
 ## 测试
 

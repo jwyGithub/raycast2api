@@ -147,7 +147,7 @@ async fn login_returns_api_key_for_management_requests() {
         let returned_key = login(&app, "password").await;
         assert_eq!(returned_key.as_deref(), api_key);
         let authorization = returned_key.map(|key| format!("Bearer {key}"));
-        for path in ["/v1/accounts/list", "/v1/logs/list"] {
+        for path in ["/v1/accounts/list", "/v1/logs/list", "/v1/statistics/list"] {
             let (status, body) = call(
                 &app,
                 path,
@@ -196,6 +196,7 @@ async fn dashboard_password_cannot_authorize_management_or_inference() {
     for path in [
         "/v1/accounts/list",
         "/v1/logs/list",
+        "/v1/statistics/list",
         "/v1/chat/completions",
         "/v1/messages",
         "/v1/responses",
@@ -223,6 +224,34 @@ async fn api_authentication_is_independent_of_dashboard_password_and_login() {
             };
             let (status, _) = call(&app, "/v1/accounts/list", json!({}), Some((name, value))).await;
             assert_eq!(status, StatusCode::OK);
+        }
+    }
+}
+
+#[tokio::test]
+async fn model_discovery_requires_api_key_while_health_probes_are_public() {
+    let app = app(Some("password"), Some("api-key"));
+    for (path, authenticated, expected) in [
+        ("/v1/models", false, StatusCode::UNAUTHORIZED),
+        ("/v1/models", true, StatusCode::SERVICE_UNAVAILABLE),
+        ("/health", false, StatusCode::OK),
+        ("/ready", false, StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        let mut request = Request::builder().uri(path);
+        if authenticated {
+            request = request.header("authorization", "Bearer api-key");
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{path}");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body.get("code").is_none(), "{path}: {body}");
+        if path == "/v1/models" {
+            assert!(body.get("error").is_some(), "{path}: {body}");
         }
     }
 }

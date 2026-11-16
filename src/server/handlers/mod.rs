@@ -1,14 +1,8 @@
-//! Route handlers for the gateway.
+//! Management and inference HTTP entry points, plus shared health and fallback handlers.
 
-pub mod accounts;
-pub mod chat;
 pub mod health;
-pub mod login;
-pub mod logs;
-pub mod messages;
-pub mod models;
-pub mod responses;
-pub mod statistics;
+pub mod inference;
+pub mod management;
 
 use crate::error::GatewayError;
 

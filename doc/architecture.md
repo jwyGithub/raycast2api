@@ -18,6 +18,8 @@
 
 三种路径均需同时支持 **流式(SSE)** 与 **非流式** 响应。协议判定**以路径为准**(而非请求头/字段探测)。
 
+HTTP 入口按职责分为 `server/handlers/inference/`（三种推理协议与模型列表）和 `server/handlers/management/`（控制台登录、账号、日志与统计）。各目录的 `mod.rs` 组装本组路由，`server/mod.rs` 统一挂载与配置中间件；登录在 API-key 鉴权层外单独注册，健康探针与兜底处理保留在公共位置。
+
 ---
 
 ## 2. 总体架构
@@ -186,7 +188,7 @@ flowchart TB
 | A1 | 账号存储 (`account/store`) | accounts 表 CRUD、轮询选号、可用性/冷却/额度字段 | 否 |
 | A2 | 额度刷新 (`account/quota_refresh`) | 定时/手动拉 /me + /ai/credits + trial_status,决策可用性 | 是 |
 | A3 | token 换新 (`account/token_renewal`) | 401 自动换新(rotation 原子落盘)、`invalid_grant` 判死 | 是(见协议文档 §6) |
-| A4 | 账号 API (`server/handlers/accounts`) | 列表/单账号(live)/upsert/删除/恢复/手动刷新 | 否 |
+| A4 | 账号 API (`server/handlers/management/accounts`) | 列表/单账号(live)/upsert/删除/恢复/手动刷新 | 否 |
 
 > 依赖方向:`A2/A3 → A1`,`A4 → A2/A3/A1`;`raycast/client` 在 send_chat 的 401
 > 分支调用 `A3`(经 `main` 装配注入,避免 raycast ↔ account 循环依赖)。
