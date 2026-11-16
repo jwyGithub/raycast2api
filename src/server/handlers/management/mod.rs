@@ -12,7 +12,7 @@ use axum::{
 
 use crate::server::state::SharedState;
 
-/// API-key-protected routes, relative to `/v1`; login is mounted outside auth.
+/// Session/API-key-protected routes, relative to /v1; login is public.
 pub(crate) fn routes() -> Router<SharedState> {
     Router::new()
         .route("/accounts/list", post(accounts::list))

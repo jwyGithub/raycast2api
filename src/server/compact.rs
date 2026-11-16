@@ -25,6 +25,8 @@
 //! Summaries are cached by the hash of the dropped prefix, so on the next turn
 //! — whose history is a superset — only the not-yet-summarized suffix needs a
 //! second pass. Cache entries expire after [`SUMMARY_CACHE_TTL`].
+//! Redis shares both caches across restarts; bounded local caches remain the
+//! fallback, and each remote operation has its own short timeout.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -35,7 +37,7 @@ use tokio::sync::Mutex;
 use crate::core::message::{Message, Role};
 use crate::core::request::CanonicalRequest;
 
-use super::state::SharedState;
+use super::state::{AppState, SharedState};
 
 /// Fraction of the model context window at which compaction triggers.
 /// Codex: `auto_compact_token_limit = context_window * 9 / 10`.
@@ -57,6 +59,72 @@ const TRIGGER_MARGIN_TOKENS: u64 = 8_000;
 const SUMMARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const USAGE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const USAGE_CACHE_CAPACITY: usize = 1_024;
+const REDIS_CACHE_TIMEOUT: Duration = Duration::from_millis(100);
+
+fn redis_cache_key(state: &AppState, kind: &str, hash: &[u8; 32]) -> String {
+    format!(
+        "{}:compact:v1:{kind}:{}",
+        state.redis_key_prefix,
+        hex::encode(hash)
+    )
+}
+
+async fn redis_cached_prefixes(
+    state: &AppState,
+    kind: &str,
+    hashes: &[[u8; 32]],
+) -> Vec<Option<Vec<u8>>> {
+    let Some(mut connection) = state.redis.clone().filter(|_| !hashes.is_empty()) else {
+        return Vec::new();
+    };
+    let keys: Vec<_> = hashes
+        .iter()
+        .map(|hash| redis_cache_key(state, kind, hash))
+        .collect();
+    let mut command = redis::cmd("MGET");
+    command.arg(keys);
+    match tokio::time::timeout(REDIS_CACHE_TIMEOUT, command.query_async(&mut connection)).await {
+        Ok(Ok(values)) => values,
+        _ => {
+            tracing::warn!(
+                kind,
+                "compact: Redis cache read unavailable; using local estimate/cache"
+            );
+            Vec::new()
+        }
+    }
+}
+
+async fn redis_record(
+    state: &AppState,
+    kind: &str,
+    hash: &[u8; 32],
+    value: impl redis::ToRedisArgs,
+    ttl: Duration,
+) {
+    let Some(mut connection) = state.redis.clone() else {
+        return;
+    };
+    let mut command = redis::cmd("SET");
+    command
+        .arg(redis_cache_key(state, kind, hash))
+        .arg(value)
+        .arg("EX")
+        .arg(ttl.as_secs());
+    if !matches!(
+        tokio::time::timeout(
+            REDIS_CACHE_TIMEOUT,
+            command.query_async::<()>(&mut connection)
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
+        tracing::warn!(
+            kind,
+            "compact: Redis cache write unavailable; kept local entry"
+        );
+    }
+}
 
 /// The verbatim Codex summarization template
 /// (`codex-rs/prompts/templates/compact/prompt.md`).
@@ -81,7 +149,7 @@ pub(crate) struct UsageKey {
 impl UsageKey {
     pub(crate) fn new(request: &CanonicalRequest) -> Self {
         Self {
-            prefix_hash: *usage_prefix_hashes(request).last().unwrap(),
+            prefix_hash: *prompt_prefix_hashes(request).last().unwrap(),
             covered_messages: request.messages.len(),
         }
     }
@@ -120,8 +188,7 @@ impl UsageCache {
         });
     }
 
-    pub(crate) async fn estimate_tokens(&self, request: &CanonicalRequest) -> Option<u64> {
-        let hashes = usage_prefix_hashes(request);
+    async fn lookup(&self, hashes: &[[u8; 32]]) -> Option<(usize, u32)> {
         let entries = self.entries.lock().await;
         let now = Instant::now();
         let entry = entries
@@ -131,45 +198,127 @@ impl UsageCache {
                     && hashes.get(entry.key.covered_messages) == Some(&entry.key.prefix_hash)
             })
             .max_by_key(|entry| entry.key.covered_messages)?;
-        let added_bytes = message_bytes(&request.messages[entry.key.covered_messages..]);
-        Some(u64::from(entry.input_tokens) + (added_bytes as u64).div_ceil(4))
+        Some((entry.key.covered_messages, entry.input_tokens))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn estimate_tokens(&self, request: &CanonicalRequest) -> Option<u64> {
+        self.lookup(&prompt_prefix_hashes(request))
+            .await
+            .map(|entry| tokens_with_suffix(request, entry))
+    }
+}
+
+fn tokens_with_suffix(request: &CanonicalRequest, (covered, tokens): (usize, u32)) -> u64 {
+    u64::from(tokens) + (message_bytes(&request.messages[covered..]) as u64).div_ceil(4)
+}
+
+impl AppState {
+    pub(crate) async fn record_usage(&self, key: UsageKey, input_tokens: u32) {
+        if input_tokens == 0 || key.covered_messages == 0 {
+            return;
+        }
+        self.usage_cache.record(key, input_tokens).await;
+        redis_record(
+            self,
+            "usage",
+            &key.prefix_hash,
+            input_tokens,
+            USAGE_CACHE_TTL,
+        )
+        .await;
+    }
+
+    async fn estimate_input_tokens(&self, request: &CanonicalRequest) -> Option<u64> {
+        let hashes = prompt_prefix_hashes(request);
+        let local = self.usage_cache.lookup(&hashes).await;
+        let start = local.map_or(1, |(covered, _)| covered + 1);
+        let remote = redis_cached_prefixes(self, "usage", &hashes[start..])
+            .await
+            .into_iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, value)| {
+                let tokens = std::str::from_utf8(value.as_deref()?)
+                    .ok()?
+                    .parse::<u32>()
+                    .ok()?;
+                (tokens > 0).then_some((start + index, tokens))
+            });
+        remote
+            .or(local)
+            .map(|entry| tokens_with_suffix(request, entry))
+    }
+
+    async fn record_summary(&self, request: &CanonicalRequest, summary: String) {
+        let covered = request.messages.len().saturating_sub(1);
+        if covered == 0 || summary.trim().is_empty() {
+            return;
+        }
+        let hash = prompt_prefix_hashes(request)[covered];
+        self.summary_cache
+            .record(&request.model, hash, covered, summary.clone())
+            .await;
+        redis_record(self, "summary", &hash, summary, SUMMARY_CACHE_TTL).await;
+    }
+
+    async fn cached_summary(&self, request: &CanonicalRequest) -> Option<(usize, String)> {
+        let total = request.messages.len().saturating_sub(1);
+        let hashes = prompt_prefix_hashes(request);
+        let local = self
+            .summary_cache
+            .lookup(&request.model, &hashes[..=total])
+            .await;
+        let start = local.as_ref().map_or(1, |(covered, _)| covered + 1);
+        if start > total {
+            return local;
+        }
+        let remote = redis_cached_prefixes(self, "summary", &hashes[start..=total])
+            .await
+            .into_iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, value)| {
+                let summary = String::from_utf8(value?).ok()?;
+                let body = summary.strip_prefix(SUMMARY_PREFIX)?.strip_prefix('\n')?;
+                (!body.trim().is_empty()).then_some((start + index, summary))
+            });
+        // Remote reads do not populate L1 or extend the original Redis TTL.
+        remote.or(local)
     }
 }
 
 /// Every prefix includes the prompt configuration, so unrelated inputs never
 /// share measurements merely because they use the same model or first message.
-fn usage_prefix_hashes(request: &CanonicalRequest) -> Vec<[u8; 32]> {
+fn prompt_prefix_hashes(request: &CanonicalRequest) -> Vec<[u8; 32]> {
+    // Bump compact:v1 when changing the serialized input or compaction recipe.
     let mut hash = Sha256::new();
     hash.update(
-        format!(
-            "{:?}",
-            (
-                &request.model,
-                &request.system,
-                &request.tools,
-                &request.tool_choice,
-                &request.reasoning_effort,
-            )
-        )
-        .as_bytes(),
+        serde_json::to_vec(&(
+            &request.model,
+            &request.system,
+            &request.tools,
+            &request.tool_choice,
+            request.reasoning_effort.map(|effort| effort.as_str()),
+            &request.requested_effort,
+            &request.requested_thinking,
+        ))
+        .expect("cache prompt fields are JSON serializable"),
     );
     let mut hashes = Vec::with_capacity(request.messages.len() + 1);
     hashes.push(hash.clone().finalize().into());
     for message in &request.messages {
         // The builder never replays thinking text; clients may omit it next turn.
         hash.update(
-            format!(
-                "{:?}",
-                (
-                    message.role.as_str(),
-                    &message.text,
-                    &message.tool_calls,
-                    &message.tool_call_id,
-                    &message.tool_name,
-                    message.tool_error,
-                )
-            )
-            .as_bytes(),
+            serde_json::to_vec(&(
+                message.role.as_str(),
+                &message.text,
+                &message.tool_calls,
+                &message.tool_call_id,
+                &message.tool_name,
+                message.tool_error,
+            ))
+            .expect("cache message fields are JSON serializable"),
         );
         hashes.push(hash.clone().finalize().into());
     }
@@ -185,8 +334,7 @@ fn is_summary(message: &Message) -> bool {
 
 /// A cached summary keyed by the hash of the dropped prefix it covers.
 struct CachedSummary {
-    /// FNV-1a hash of the summarized prefix (message index + text seeds).
-    prefix_hash: u64,
+    prefix_hash: [u8; 32],
     /// Number of leading messages the summary covers.
     covered_messages: usize,
     summary_text: String,
@@ -205,7 +353,7 @@ impl SummaryCache {
     async fn record(
         &self,
         model: &str,
-        prefix_hash: u64,
+        prefix_hash: [u8; 32],
         covered_messages: usize,
         summary_text: String,
     ) {
@@ -222,8 +370,7 @@ impl SummaryCache {
             entries.remove(&key);
         }
         let list = entries.entry(model.to_string()).or_default();
-        let now = Instant::now();
-        list.retain(|c| now.duration_since(c.created_at) < SUMMARY_CACHE_TTL);
+        list.retain(|c| c.prefix_hash != prefix_hash);
         if list.len() >= 128 {
             list.remove(0);
         }
@@ -236,53 +383,19 @@ impl SummaryCache {
     }
 
     /// Find the longest cached summary covering a prefix of this conversation.
-    /// `history_hash_at(n)` must return the same value recorded at
-    /// [`SummaryCache::record`] time for the first `n` messages.
-    async fn lookup(
-        &self,
-        model: &str,
-        history_hash_at: impl Fn(usize) -> u64,
-        total: usize,
-    ) -> Option<(usize, String)> {
+    async fn lookup(&self, model: &str, hashes: &[[u8; 32]]) -> Option<(usize, String)> {
         let entries = self.entries.lock().await;
         let list = entries.get(model)?;
         let now = Instant::now();
         list.iter()
             .filter(|c| {
                 now.duration_since(c.created_at) < SUMMARY_CACHE_TTL
-                    && c.covered_messages <= total
-                    && c.prefix_hash == history_hash_at(c.covered_messages)
+                    && hashes.get(c.covered_messages) == Some(&c.prefix_hash)
             })
             // Longest cover wins: the least leftover work for the delta pass.
             .max_by_key(|c| c.covered_messages)
             .map(|c| (c.covered_messages, c.summary_text.clone()))
     }
-}
-
-/// FNV-1a 64-bit over message texts — stable across turns for an unchanged
-/// prefix (no external hashing crate needed).
-fn hash_messages(messages: &[Message], upto: usize) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    fn feed(hash: &mut u64, bytes: &[u8]) {
-        for b in bytes {
-            *hash ^= u64::from(*b);
-            *hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
-    for message in &messages[..upto.min(messages.len())] {
-        feed(&mut hash, message.role.as_str().as_bytes());
-        feed(&mut hash, message.text.as_bytes());
-        for call in &message.tool_calls {
-            feed(&mut hash, call.id.as_bytes());
-            feed(&mut hash, call.name.as_bytes());
-            feed(&mut hash, call.arguments.as_bytes());
-        }
-        feed(
-            &mut hash,
-            message.thinking.as_ref().map_or("", |t| &t.text).as_bytes(),
-        );
-    }
-    hash
 }
 
 /// The outcome of a compaction attempt.
@@ -340,15 +453,7 @@ pub(crate) async fn apply(
                 "compact: summary completed — history rewritten"
             );
 
-            state
-                .summary_cache
-                .record(
-                    &request.model,
-                    request_compact_hash(&request),
-                    request.messages.len().saturating_sub(1),
-                    summary_text,
-                )
-                .await;
+            state.record_summary(&request, summary_text).await;
             request.messages = messages;
             Ok(request)
         }
@@ -426,7 +531,7 @@ pub(crate) async fn plan(state: &SharedState, request: &CanonicalRequest) -> Com
         return Compaction::NotNeeded;
     }
 
-    let measured_tokens = state.usage_cache.estimate_tokens(request).await;
+    let measured_tokens = state.estimate_input_tokens(request).await;
     let request_tokens = measured_tokens.unwrap_or_else(|| estimate_request_tokens(request) as u64);
     let threshold = (window as f64 * AUTO_COMPACT_RATIO) as u64 - TRIGGER_MARGIN_TOKENS;
     if request_tokens < threshold {
@@ -458,14 +563,7 @@ pub(crate) async fn plan(state: &SharedState, request: &CanonicalRequest) -> Com
     // the delta. The trailing user message is never summarized — it is the
     // turn we must answer.
     let droppable = request.messages.len() - 1;
-    let cache_hit = state
-        .summary_cache
-        .lookup(
-            &request.model,
-            |n| hash_messages(&request.messages, n),
-            droppable,
-        )
-        .await;
+    let cache_hit = state.cached_summary(request).await;
     let (covered, previous_summary) = cache_hit.unwrap_or((0, String::new()));
     tracing::info!(
         model = %request.model,
@@ -553,11 +651,6 @@ fn message_bytes(messages: &[Message]) -> usize {
         .sum()
 }
 
-/// Hash identifying the droppable prefix of a request (cache key basis).
-fn request_compact_hash(request: &CanonicalRequest) -> u64 {
-    hash_messages(&request.messages, request.messages.len().saturating_sub(1))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,12 +717,12 @@ mod tests {
 
     #[test]
     fn hash_is_prefix_stable() {
-        let mut messages = filler_messages(10, 100);
-        let h5 = hash_messages(&messages, 5);
-        messages.push(Message::text(Role::User, "more"));
+        let mut request = request(filler_messages(10, 100));
+        let h5 = prompt_prefix_hashes(&request)[5];
+        request.messages.push(Message::text(Role::User, "more"));
         // Appending later messages must not change the prefix hash.
-        assert_eq!(hash_messages(&messages, 5), h5);
-        assert_ne!(hash_messages(&messages, 6), h5);
+        assert_eq!(prompt_prefix_hashes(&request)[5], h5);
+        assert_ne!(prompt_prefix_hashes(&request)[6], h5);
     }
 
     #[test]
@@ -678,6 +771,7 @@ mod tests {
     #[tokio::test]
     async fn usage_rejects_changed_prompt_configuration_or_history() {
         let cache = UsageCache::default();
+        let summaries = SummaryCache::default();
         let mut original = request(vec![
             Message::text(Role::User, "seed"),
             Message::text(Role::Assistant, "calling"),
@@ -691,12 +785,22 @@ mod tests {
                 arguments: "{}".into(),
             });
         cache.record(UsageKey::new(&original), 1000).await;
+        summaries
+            .record(
+                &original.model,
+                UsageKey::new(&original).prefix_hash,
+                3,
+                "summary".into(),
+            )
+            .await;
         for field in [
             "model",
             "system",
             "tools",
             "tool_choice",
             "effort",
+            "requested_effort",
+            "requested_thinking",
             "role",
             "text",
             "call_id",
@@ -716,6 +820,10 @@ mod tests {
                 "effort" => {
                     changed.reasoning_effort = Some(crate::core::request::ReasoningEffort::High)
                 }
+                "requested_effort" => changed.requested_effort = Some("high".into()),
+                "requested_thinking" => {
+                    changed.requested_thinking = Some(serde_json::json!({"type": "adaptive"}))
+                }
                 "role" => changed.messages[0].role = Role::Assistant,
                 "text" => changed.messages[0].text.push('x'),
                 "call_id" => changed.messages[1].tool_calls[0].id.push('x'),
@@ -730,6 +838,13 @@ mod tests {
                 _ => unreachable!(),
             }
             assert_eq!(cache.estimate_tokens(&changed).await, None, "{field}");
+            assert_eq!(
+                summaries
+                    .lookup(&changed.model, &prompt_prefix_hashes(&changed))
+                    .await,
+                None,
+                "{field}"
+            );
         }
         // Changes the builder does not replay must not invalidate input usage.
         original.messages[1].thinking = Some(crate::core::message::Thinking {
@@ -738,6 +853,79 @@ mod tests {
         });
         original.stream = true;
         assert_eq!(cache.estimate_tokens(&original).await, Some(1000));
+    }
+
+    #[test]
+    fn prefix_hashes_preserve_message_and_field_boundaries() {
+        let first = request(vec![
+            Message::text(Role::User, "aassistant"),
+            Message::text(Role::Assistant, "b"),
+        ]);
+        let second = request(vec![
+            Message::text(Role::User, "a"),
+            Message::text(Role::Assistant, "assistantb"),
+        ]);
+        assert_ne!(
+            prompt_prefix_hashes(&first)[2],
+            prompt_prefix_hashes(&second)[2]
+        );
+        let mut tool_a = request(vec![Message::text(Role::Assistant, "")]);
+        tool_a.messages[0]
+            .tool_calls
+            .push(crate::core::message::ToolCall {
+                id: "ab".into(),
+                name: "c".into(),
+                arguments: "{}".into(),
+            });
+        let mut tool_b = tool_a.clone();
+        tool_b.messages[0].tool_calls[0].id = "a".into();
+        tool_b.messages[0].tool_calls[0].name = "bc".into();
+        assert_ne!(
+            prompt_prefix_hashes(&tool_a)[1],
+            prompt_prefix_hashes(&tool_b)[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_cache_deduplicates_expires_and_stays_bounded() {
+        let cache = SummaryCache::default();
+        let mut original = request(vec![Message::text(Role::User, "seed")]);
+        let hash = prompt_prefix_hashes(&original)[1];
+        cache.record(&original.model, hash, 1, "old".into()).await;
+        cache.record(&original.model, hash, 1, "new".into()).await;
+        assert_eq!(cache.entries.lock().await[&original.model].len(), 1);
+        assert_eq!(
+            cache
+                .lookup(&original.model, &prompt_prefix_hashes(&original))
+                .await,
+            Some((1, "new".into()))
+        );
+        cache.entries.lock().await.get_mut(&original.model).unwrap()[0].created_at =
+            Instant::now() - SUMMARY_CACHE_TTL;
+        assert_eq!(
+            cache
+                .lookup(&original.model, &prompt_prefix_hashes(&original))
+                .await,
+            None
+        );
+        for i in 0..=128 {
+            original.messages[0].text = i.to_string();
+            cache
+                .record(
+                    &original.model,
+                    prompt_prefix_hashes(&original)[1],
+                    1,
+                    "summary".into(),
+                )
+                .await;
+        }
+        assert_eq!(cache.entries.lock().await[&original.model].len(), 128);
+        for i in 0..=32 {
+            cache
+                .record(&i.to_string(), hash, 1, "summary".into())
+                .await;
+        }
+        assert_eq!(cache.entries.lock().await.len(), 32);
     }
 
     #[tokio::test]
@@ -911,7 +1099,7 @@ mod tests {
             .summary_cache
             .record(
                 &original.model,
-                hash_messages(&original.messages, 2),
+                prompt_prefix_hashes(&original)[2],
                 2,
                 "cached summary".into(),
             )
@@ -956,13 +1144,10 @@ mod tests {
             })
             .await;
             assert!(result.is_err());
-            assert!(
-                state
-                    .summary_cache
-                    .lookup(&original.model, |n| hash_messages(&original.messages, n), 1)
-                    .await
-                    .is_none()
-            );
+            assert!(state.cached_summary(&original).await.is_none());
         }
     }
 }
+
+#[cfg(test)]
+mod redis_tests;

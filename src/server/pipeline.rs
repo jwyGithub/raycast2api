@@ -102,7 +102,7 @@ fn track_usage(
             match &event {
                 CanonicalEvent::Finish { usage, .. } => {
                     state.health.mark_working();
-                    state.usage_cache.record(key, usage.input_tokens).await;
+                    state.record_usage(key, usage.input_tokens).await;
                 }
                 CanonicalEvent::Error { .. } => state.health.mark_failed(),
                 _ => {}

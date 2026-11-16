@@ -75,12 +75,29 @@ async fn main() {
         request_log.clone(),
         statistics,
     );
-    let state = Arc::new(AppState::new(
+    let redis = raycast2api::redis_store::connect_from_env()
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Redis configuration error: {error}");
+            std::process::exit(1);
+        });
+    if settings.dashboard_password.is_some() && redis.is_none() {
+        eprintln!("REDIS_HOST is required when dashboard_password is configured");
+        std::process::exit(1);
+    }
+    let mut state = AppState::new(
         settings.clone(),
         client.clone(),
         accounts.clone(),
         request_log,
-    ));
+    );
+    state.redis = redis;
+    if let Ok(prefix) = std::env::var("REDIS_KEY_PREFIX")
+        && !prefix.is_empty()
+    {
+        state.redis_key_prefix = prefix;
+    }
+    let state = Arc::new(state);
     state
         .statistics
         .interrupt_unfinished()
@@ -112,7 +129,9 @@ async fn main() {
     );
 
     if settings.api_key.is_none() {
-        tracing::warn!("api_key is not set — the gateway will accept unauthenticated requests");
+        tracing::warn!(
+            "api_key is not set — inference and model endpoints accept unauthenticated requests"
+        );
     }
 
     let app = build_router(state);

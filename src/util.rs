@@ -163,7 +163,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
+pub(crate) fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
     std::fs::File::open("/dev/urandom")?.read_exact(buf)
 }
 

@@ -2,6 +2,7 @@ import { LitElement, html } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/li
 import './views/accounts.js';
 import './views/logs.js';
 import './views/statistics.js';
+import { message } from './components/message.js';
 
 class AccountConsole extends LitElement {
     static properties = {
@@ -17,12 +18,11 @@ class AccountConsole extends LitElement {
             panel: 'accounts',
             authenticated: false,
             dashboardPassword: '',
-            apiKey: '',
             loginError: '',
             loggingIn: false
         });
         this.handlePageShow = event => {
-            if (event.persisted) this.lockConsole();
+            if (event.persisted) this.restoreSession();
         };
         this.handlePageHide = () => this.lockConsole();
     }
@@ -33,6 +33,7 @@ class AccountConsole extends LitElement {
         super.connectedCallback();
         window.addEventListener('pageshow', this.handlePageShow);
         window.addEventListener('pagehide', this.handlePageHide);
+        this.restoreSession();
     }
     disconnectedCallback() {
         super.disconnectedCallback();
@@ -50,7 +51,6 @@ class AccountConsole extends LitElement {
     lockConsole(error = '') {
         this.authenticated = false;
         this.dashboardPassword = '';
-        this.apiKey = '';
         this.loginAttempt = null;
         this.loggingIn = false;
         this.querySelector('logs-panel')?.closeDetail();
@@ -59,6 +59,29 @@ class AccountConsole extends LitElement {
         this.querySelectorAll('ui-tooltip').forEach(tooltip => tooltip.hide());
         this.loginError = error;
         this.panel = 'accounts';
+    }
+    async restoreSession() {
+        const attempt = (this.loginAttempt = {});
+        this.loggingIn = true;
+        try {
+            const response = await fetch('/v1/session', {
+                method: 'POST',
+                headers: { 'X-Dashboard-Request': '1' },
+                credentials: 'same-origin',
+                cache: 'no-store'
+            });
+            if (this.loginAttempt !== attempt || response.status === 401) return;
+            const result = await response.json();
+            if (this.loginAttempt !== attempt) return;
+            if (!response.ok) throw new Error(result.message || '会话验证失败，请稍后重试。');
+            this.authenticated = true;
+            await this.updateComplete;
+            await this.querySelector('accounts-panel').load();
+        } catch (error) {
+            if (this.loginAttempt === attempt) this.loginError = error.message || '会话验证失败。';
+        } finally {
+            if (this.loginAttempt === attempt) this.loggingIn = false;
+        }
     }
     async login(event) {
         event.preventDefault();
@@ -70,15 +93,15 @@ class AccountConsole extends LitElement {
             const response = await fetch('/v1/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
                 body: JSON.stringify({ dashboard_password: this.dashboardPassword }),
                 cache: 'no-store'
             });
             const result = await response.json().catch(() => ({}));
             if (this.loginAttempt !== attempt) return;
             if (!response.ok || result.code >= 400) throw new Error(result.message || '登录失败，请稍后重试。');
-            if (!result.data || (result.data.api_key !== null && typeof result.data.api_key !== 'string'))
+            if (!result.data || typeof result.data.expires_in !== 'number')
                 throw new Error('登录响应无效，请重试。');
-            this.apiKey = result.data.api_key || '';
             this.dashboardPassword = '';
             this.authenticated = true;
             await this.updateComplete;
@@ -97,11 +120,27 @@ class AccountConsole extends LitElement {
             }
         }
     }
+    async logout() {
+        try {
+            const response = await fetch('/v1/logout', {
+                method: 'POST',
+                headers: { 'X-Dashboard-Request': '1' },
+                credentials: 'same-origin',
+                cache: 'no-store'
+            });
+            if (!response.ok && response.status !== 401) throw new Error('退出失败，请稍后重试。');
+            this.lockConsole();
+        } catch (error) {
+            message(error.message || '退出失败，请检查网络。');
+        }
+    }
     async request(path, body, resource = 'accounts') {
         if (!this.authenticated) throw new Error('请先输入控制台密码登录。');
         const response = await fetch('/v1/' + resource + '/' + path, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...(this.apiKey ? { Authorization: 'Bearer ' + this.apiKey } : {}) },
+            headers: { 'Content-Type': 'application/json', 'X-Dashboard-Request': '1' },
+            credentials: 'same-origin',
+            cache: 'no-store',
             body: JSON.stringify(body)
         });
         const result = await response.json().catch(() => ({}));
@@ -190,6 +229,7 @@ class AccountConsole extends LitElement {
                                 </button>`
                         )}
                     </nav>
+                    <button class="justify-self-end text-xs text-muted hover:text-ink" @click=${this.logout}>退出登录</button>
                 </div>
             </header>
             <accounts-panel

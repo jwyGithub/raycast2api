@@ -7,7 +7,7 @@
 use serde_json::Value;
 
 /// A tool the model may call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum ToolDef {
     /// A locally-executed tool with a full JSON Schema for its parameters.
     Local {
@@ -31,7 +31,7 @@ pub enum ToolDef {
 }
 
 /// How the model should decide whether to call a tool.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum ToolChoice {
     /// Model decides freely (the default).
     Auto,

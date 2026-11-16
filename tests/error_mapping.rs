@@ -35,6 +35,10 @@ fn maps_variants_to_expected_status_codes() {
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert_eq!(
+        status_of(GatewayError::Unavailable("x".into())),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
         status_of(GatewayError::Upstream {
             status: 429,
             message: "rate limited".into(),

@@ -33,7 +33,7 @@ impl Role {
 ///
 /// `arguments` is the raw JSON **string** the model emitted, kept verbatim so
 /// adapters can forward it without a lossy re-encode.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,

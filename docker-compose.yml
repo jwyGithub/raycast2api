@@ -1,6 +1,6 @@
 # docker-compose.yml — 运行 raycast2api 网关
 #
-# 仅通过同目录的 config.json 配置，不提供环境变量配置入口。
+# 应用配置读取同目录 config.json；Redis 连接读取下方 REDIS_* 环境变量。
 # 首次运行前复制 config.example.json 为 config.json 并填写配置；
 # host 保持 0.0.0.0、port 保持 8787，与下方容器端口映射一致。
 #
@@ -20,6 +20,25 @@ services:
         user: '1000:1000'
         ports:
             - '8787:8787'
+
+        extra_hosts:
+            - 'host.docker.internal:host-gateway'
         volumes:
             - ./config.json:/app/config.json:ro
             - ./store:/app/store
+
+        environment:
+            - REDIS_HOST=host.docker.internal
+            - REDIS_PORT=6379
+            - REDIS_USERNAME=${REDIS_USERNAME:-}
+            - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+            - REDIS_DB=${REDIS_DB:-0}
+            - REDIS_KEY_PREFIX=raycast2api
+
+        healthcheck:
+            test: ['CMD', 'curl', '--fail', '--silent', '--show-error', '--noproxy', '*', '--max-time', '3', '--output', '/dev/null', 'http://127.0.0.1:8787/health']
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 30s
+

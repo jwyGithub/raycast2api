@@ -23,6 +23,8 @@ pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
     pub settings: Arc<Settings>,
+    pub redis: Option<redis::aio::ConnectionManager>,
+    pub redis_key_prefix: String,
     pub client: RaycastClient,
     pub health: BackendHealth,
     pub inference_slots: std::sync::Arc<tokio::sync::Semaphore>,
@@ -31,9 +33,9 @@ pub struct AppState {
     /// 请求日志存储(推理请求三体采集写入)。
     pub log: Arc<RequestLogStore>,
     pub statistics: Arc<crate::statistics::store::StatisticsStore>,
-    /// auto-compact 摘要缓存(按模型 + 被压缩前缀 hash)。
+    /// auto-compact 本地摘要缓存(Redis 不可用时保留)。
     pub summary_cache: SummaryCache,
-    /// auto-compact 实测输入 token 缓存(按提示词配置 + 完整消息前缀)。
+    /// auto-compact 本地实测输入 token 缓存(Redis 不可用时保留)。
     pub usage_cache: UsageCache,
     models_cache: RwLock<Option<ModelsCache>>,
     models_refresh: Mutex<()>,
@@ -55,6 +57,8 @@ impl AppState {
         Self {
             statistics: client.statistics.clone(),
             settings,
+            redis: None,
+            redis_key_prefix: "raycast2api".into(),
             client,
             health: BackendHealth::default(),
             inference_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
@@ -146,6 +150,7 @@ pub(crate) fn compact_test_state() -> SharedState {
         raycast_signature_secret: "secret".into(),
         api_key: None,
         dashboard_password: None,
+        dashboard_session_secret: None,
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,
         model_overrides: Default::default(),

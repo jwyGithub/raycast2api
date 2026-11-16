@@ -25,6 +25,7 @@ pub mod error;
 pub mod log;
 pub mod protocol;
 pub mod raycast;
+pub mod redis_store;
 pub mod schema;
 pub mod server;
 pub mod signature;

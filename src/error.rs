@@ -39,6 +39,8 @@ pub enum GatewayError {
     },
     /// Any other internal failure (500).
     Internal(String),
+    /// A required service, such as the dashboard session store, is unavailable (503).
+    Unavailable(String),
 }
 
 impl GatewayError {
@@ -87,6 +89,9 @@ impl GatewayError {
             }
             GatewayError::Internal(m) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "relay_error", m.clone())
+            }
+            GatewayError::Unavailable(m) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "server_error", m.clone())
             }
         }
     }

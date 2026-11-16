@@ -2,7 +2,7 @@
 //!
 //! Static values mirror the reference TypeScript implementation in
 //! `source/src/config.ts`. Runtime settings are read from `config.json` only;
-//! environment variables are not consulted.
+//! Redis connection settings are read separately from `REDIS_*` environment variables.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -65,6 +65,7 @@ pub struct ConfigFile {
     pub port: Option<u16>,
     pub api_key: Option<String>,
     pub dashboard_password: Option<String>,
+    pub dashboard_session_secret: Option<String>,
     pub raycast_device_id: Option<String>,
     pub raycast_signature_secret: Option<String>,
     /// SQLite 存储库路径,默认 `store/store.db`。
@@ -92,10 +93,12 @@ pub struct Settings {
     pub raycast_device_id: String,
     /// Signing secret for `X-Raycast-Signature-v2` (required, no built-in default).
     pub raycast_signature_secret: String,
-    /// Gateway's own API key. When `None`, the gateway accepts all callers.
+    /// Gateway's own API key. When absent, inference and models are public.
     pub api_key: Option<String>,
     /// Console login password. When absent, dashboard login is disabled.
     pub dashboard_password: Option<String>,
+    /// Signs dashboard session cookies independently of the gateway API key.
+    pub dashboard_session_secret: Option<String>,
     /// Primary address the HTTP server binds to (IPv4 or IPv6).
     pub bind_addr: SocketAddr,
     /// Dual-stack: secondary address for dual IPv4/IPv6 binding. `None` if single-stack.
@@ -165,12 +168,22 @@ impl Settings {
 
         let proxies = parse_proxies(config.proxies)?;
         let proxies_enabled = config.proxies_enabled.unwrap_or(false);
+        let dashboard_password = non_empty(config.dashboard_password);
+        let dashboard_session_secret = non_empty(config.dashboard_session_secret);
+        if dashboard_password.is_some()
+            && dashboard_session_secret
+                .as_ref()
+                .is_none_or(|secret| secret.len() < 32)
+        {
+            return Err("dashboard_session_secret must contain at least 32 bytes when dashboard_password is set".into());
+        }
 
         Ok(Self {
             raycast_device_id,
             raycast_signature_secret,
             api_key: non_empty(config.api_key),
-            dashboard_password: non_empty(config.dashboard_password),
+            dashboard_password,
+            dashboard_session_secret,
             bind_addr,
             bind_addr_dual,
             model_overrides: config.model_overrides.unwrap_or_default(),
@@ -216,6 +229,26 @@ mod proxy_tests {
     use super::*;
 
     #[test]
+    fn dashboard_sessions_require_a_secret_with_at_least_32_bytes() {
+        for secret in [
+            None,
+            Some("".into()),
+            Some("x".repeat(31)),
+            Some("x".repeat(32)),
+        ] {
+            let valid = secret.as_ref().is_some_and(|s: &String| s.len() >= 32);
+            let result = Settings::from_config_file(ConfigFile {
+                raycast_device_id: Some("device".into()),
+                raycast_signature_secret: Some("secret".into()),
+                dashboard_password: Some("password".into()),
+                dashboard_session_secret: secret,
+                ..Default::default()
+            });
+            assert_eq!(result.is_ok(), valid);
+        }
+    }
+
+    #[test]
     fn dashboard_password_preserves_exact_value_and_disables_login_when_empty() {
         for (password, expected) in [
             (None, None),
@@ -226,6 +259,7 @@ mod proxy_tests {
                 raycast_device_id: Some("device".into()),
                 raycast_signature_secret: Some("secret".into()),
                 dashboard_password: password.map(str::to_owned),
+                dashboard_session_secret: Some("s".repeat(32)),
                 ..Default::default()
             })
             .unwrap();

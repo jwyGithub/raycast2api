@@ -43,7 +43,7 @@ Claude Code、Codex 以及各类 OpenAI 兼容客户端，直接把请求打到�
 | 请求日志 | 入站体、上游请求体、上游 SSE 响应存入 SQLite，保留 7 天自动清理 |
 | 管理控制台 | 内置 Web 页面（`GET /`），管理账号池、查看请求日志与上游调用统计 |
 | 上游代理链 | 支持 http / https / socks5，可配置代理优先或直连优先 |
-| 访问鉴权 | `dashboard_password` 用于控制台页面登录，`api_key` 统一用于接口认证 |
+| 访问鉴权 | 控制台使用 Redis Session；管理接口支持 Session 或 API Key，推理接口使用 API Key |
 | 双栈监听 | 绑定 `0.0.0.0` 时自动同时监听 IPv6 `[::]` |
 
 ## 快速开始
@@ -72,14 +72,15 @@ device_id: 64 位十六进制字符串
 
 ### 方式一：Docker Compose（推荐）
 
-`docker-compose.yml` 默认拉取 CI 发布到 GHCR 的镜像 `ghcr.io/jwygithub/raycast2api:latest`，并且**只通过只读挂载的 `config.json` 配置**，不提供 `environment` / `env_file` 入口。
+`docker-compose.yml` 默认拉取 CI 发布到 GHCR 的镜像 `ghcr.io/jwygithub/raycast2api:latest`。应用配置通过只读挂载的 `config.json` 提供，Redis 连接通过 Compose 的 `REDIS_*` 环境变量提供，连接已有 Redis 服务。
 
 ```bash
 git clone https://github.com/jwyGithub/raycast2api.git
 cd raycast2api
 
 cp config.example.json config.json
-# 编辑 config.json，必须填写 raycast_device_id 和 raycast_signature_secret，设置 dashboard_password 以登录控制台，建议同时设置 api_key
+# 编辑 config.json，填写 Raycast 配置、dashboard_password 和 dashboard_session_secret，建议同时设置 api_key
+# 配置 Compose 中的 REDIS_HOST / REDIS_PORT；需要认证时在 .env 中填写 REDIS_USERNAME / REDIS_PASSWORD
 
 docker compose up -d
 ```
@@ -88,7 +89,9 @@ docker compose up -d
 * 账号池与请求日志持久化在 `./store`。
 * compose 里的 `user: '1000:1000'` 让容器以宿主机用户身份写入 `./store`；如果你的 uid / gid 不同（`id -u` / `id -g`），请按实际值修改，否则 SQLite 会报 `unable to open database file`。
 * 想用本地源码构建，把 `image:` 那一行注释掉，改用 `build: .`。
-* 修改配置后执行 `docker compose restart` 生效。
+* 默认 Redis 地址为 `host.docker.internal:6379`；已通过 `extra_hosts` 为 Linux Docker 添加宿主机地址映射，Redis 需要监听容器可达的地址。
+* 容器每 30 秒请求本地 `/health`，单次超时 5 秒，启动宽限期 30 秒，连续失败 3 次标记为 `unhealthy`；该检查仅验证网关存活，不检查上游账号或 Redis。镜像需包含本次新增的 `curl`，旧镜像请更新或用本地源码构建。健康状态本身不会触发 `restart: unless-stopped` 自动重启。
+* 修改 `config.json` 后执行 `docker compose restart`；修改 Compose 环境变量后执行 `docker compose up -d` 重建容器。镜像尚未包含此改动时需使用本地源码构建。
 
 ### 方式二：源码运行
 
@@ -97,10 +100,10 @@ docker compose up -d
 ```bash
 cp config.example.json config.json   # 填入配置
 
-cargo run --release                  # 默认监听 0.0.0.0:8787
+REDIS_HOST=127.0.0.1 cargo run --release  # 默认监听 0.0.0.0:8787
 ```
 
-启动后访问 `http://localhost:8787/` 打开[管理控制台](#管理控制台)，输入配置的 `dashboard_password` 后进入，或用下面的示例直接请求。若未设置 `api_key`，网关会接受**未鉴权**请求，并在启动日志里打印告警。
+启动后访问 `http://localhost:8787/` 打开[管理控制台](#管理控制台)，输入配置的 `dashboard_password` 后进入，或用下面的示例直接请求。若未设置 `api_key`，推理和模型接口接受未鉴权请求，管理接口仍要求有效 Session。
 
 ### 添加账号
 
@@ -193,7 +196,9 @@ curl http://localhost:8787/v1/models
 
 | 路径 | 说明 |
 | --- | --- |
-| `POST /v1/login` | 控制台页面登录（JSON body：`dashboard_password`），无需 API key；成功返回配置的 `data.api_key`（未配置时为 `null`），密码错误返回 HTTP 401 |
+| `POST /v1/login` | 校验 JSON body 中的 `dashboard_password`；签发 HttpOnly Cookie，返回 `data.expires_in: 86400`，密码错误返回 HTTP 401 |
+| `POST /v1/session` | 校验 Cookie Session；成功返回 `data.authenticated: true`，无效或过期返回 HTTP 401 |
+| `POST /v1/logout` | 校验并删除 Redis Session，同时清除 Cookie；成功返回 `data: null` |
 | `POST /v1/accounts/list` | 账号列表（body：`page`、`page_size`、`status`；默认每页 10 个，`page_size` 取值 1 到 100） |
 | `POST /v1/accounts/detail` | 单账号信息（body：`email`） |
 | `POST /v1/accounts/create` | 新增 / 更新账号（按 email upsert；支持单个对象或账号数组） |
@@ -212,7 +217,7 @@ curl http://localhost:8787/v1/models
 
 ## 配置
 
-配置只从项目根目录的 `config.json` 读取，**不再读取环境变量**。文件缺失、格式错误，或缺少必填项 `raycast_device_id` / `raycast_signature_secret` 时，网关会直接报错退出。
+应用配置从项目根目录的 `config.json` 读取；Redis 连接单独读取下表中的环境变量。文件缺失、格式错误，或缺少必填项 `raycast_device_id` / `raycast_signature_secret` 时，网关会报错退出。启用控制台还必须配置非空密码、至少 32 字节的 Session 密钥和可连接的 Redis。
 
 ```json
 {
@@ -220,6 +225,7 @@ curl http://localhost:8787/v1/models
   "port": 8787,
   "api_key": "your-api-key-here",
   "dashboard_password": "your-dashboard-password-here",
+  "dashboard_session_secret": "replace-with-a-random-secret-at-least-32-bytes",
   "raycast_device_id": "your-raycast-device-id",
   "raycast_signature_secret": "your-raycast-signature-secret",
   "proxies": [],
@@ -233,8 +239,9 @@ curl http://localhost:8787/v1/models
 | --- | --- | --- | --- |
 | `raycast_device_id` | 是 | — | Raycast 设备 ID，同时参与签名计算；获取方式见[获取 device_id](#获取-device_id) |
 | `raycast_signature_secret` | 是 | — | `X-Raycast-Signature-v2` 的 HMAC 签名密钥，网关不再内置默认值；空字符串视为未填写 |
-| `api_key` | 否 | 无 | 网关接口的认证凭据；未设置时接口不鉴权。页面登录成功后返回给前端，用于后续接口调用 |
+| `api_key` | 否 | 无 | 推理认证凭据，也可调用管理接口；未配置时仅推理和模型接口免鉴权；登录不返回此 Key |
 | `dashboard_password` | 否 | 无 | 控制台登录密码；未配置或为空时无法登录页面，原有 API key 调用仍可用；修改后重启生效 |
+| `dashboard_session_secret` | 启用控制台时必填 | 无 | 至少 32 字节的随机密钥，用于签名 Session Cookie；修改密码或密钥并重启后，旧 Session 失效 |
 | `accounts_db` | 否 | `store/store.db` | SQLite 存储库路径（账号、请求日志、统计共用） |
 | `host` | 否 | `0.0.0.0` | 监听地址（须为 IP） |
 | `port` | 否 | `8787` | 监听端口 |
@@ -244,6 +251,19 @@ curl http://localhost:8787/v1/models
 | `model_overrides` | 否 | `{}` | 客户端模型 ID 到网关模型 ID 的别名表，例如 `{"gpt-6-astra": "openai-gpt-6-astra"}`，在查找上游模型之前应用 |
 
 日志级别通过 `RUST_LOG` 控制（基于 `tracing-subscriber` 的 env-filter），默认 `info,tower_http=info`。
+
+| Redis 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `REDIS_HOST` | 无；Compose 为 `host.docker.internal` | Redis 主机；未配置时不连接 Redis，控制台不可启用 |
+| `REDIS_PORT` | `6379` | TCP 端口，范围 1 到 65535 |
+| `REDIS_USERNAME` | 无 | 可选 ACL 用户名 |
+| `REDIS_PASSWORD` | 无 | 可选认证密码，按原值传递，无需 URL 编码 |
+| `REDIS_DB` | `0` | 非负数据库编号 |
+| `REDIS_KEY_PREFIX` | `raycast2api` | Key 命名空间，多实例共享 Session 时需相同 |
+
+可用 `openssl rand -hex 32` 生成 Session 密钥。Redis 使用可自动重连的异步连接，单次连接和响应超时均为 3 秒；已配置 Redis 却无法连接时，启动失败。运行中故障时 Session 请求返回 HTTP 503；API Key 鉴权不依赖 Redis。Redis 暂未支持 TLS，当前连接应使用可信网络。
+
+自动压缩的摘要缓存与实测输入 Token 缓存也复用该 Redis，Key 为 `<prefix>:compact:v1:summary:<SHA256>` / `usage:<SHA256>`，TTL 均为 30 分钟。按提示词配置和消息历史批量匹配最长前缀，支持跨应用重启复用。每次缓存读写独立限制为 100 毫秒，运行中故障回退本地缓存或估算，不中断推理。Redis 中会保存摘要正文，请按对话数据保护其访问和备份；详细规则见 [Redis 使用说明](./doc/redis.md)。
 
 ## 推理强度（reasoning effort）
 
@@ -279,9 +299,10 @@ curl http://localhost:8787/v1/models
 
 浏览器访问网关根路径 `http://localhost:8787/` 即可打开内置的 **Raycast 管理控制台**，用于查看和管理账号池、翻阅请求日志及上游调用统计。
 
-* 每次打开或刷新页面先显示密码弹窗，向 `POST /v1/login` 提交 `{"dashboard_password":"你的控制台密码"}`，校验成功后才加载账号和日志。需先在 `config.json` 设置非空 `dashboard_password` 并重启服务。
-* 登录成功返回配置的 `data.api_key`，前端仅将其保存在当前页面内存中，后续接口请求通过 `Authorization: Bearer <api_key>` 携带；关闭、离开或刷新页面时清除，重新进入需再次登录。页面不会将密码或 API key 写入 localStorage / sessionStorage。
-* `dashboard_password` 只用于页面登录校验。管理与推理接口统一按 `api_key` 配置鉴权，与页面是否登录无关；未配置 `api_key` 时，登录返回 `api_key: null`，前端不发送认证头，接口保留原有免鉴权行为。
+* 页面启动和刷新时先调用 `POST /v1/session` 恢复会话；没有有效会话时输入控制台密码登录。登录成功后通过 HttpOnly Cookie 携带 Session，前端不会获得网关 API Key，也不向 localStorage / sessionStorage 写入凭据。
+* Session 固定有效 24 小时，不随请求续期，退出登录立即删除 Redis 记录。Session Key 使用 Token 的 SHA-256 摘要，值固定为 `1`；Cookie 使用 256 位安全随机数和 HMAC-SHA256 签名。更换密码或 Session 密钥并重启后，旧会话失效；Redis 记录丢失时需重新登录。
+* Cookie 设置 `HttpOnly; SameSite=Strict; Path=/v1`。HTTPS 反向代理需覆盖传入的 `X-Forwarded-Proto` 并设置为 `https`，网关据此添加 `Secure`。Cookie 调用管理接口、`/v1/session`、`/v1/logout` 时必须携带 `X-Dashboard-Request: 1`；页面已自动携带。
+* 管理接口接受有效 Session 或配置的 API Key；推理和模型接口沿用 API Key 规则，Session 不提供推理授权。账号导出仍要求配置 `api_key`。
 * 页面样式与脚本通过 CDN 加载（Tailwind、GSAP、flatpickr），需要浏览器能访问 jsDelivr。
 * 统计面板支持请求 ID、账号、请求 / 上游模型、完整 API Key、状态、调用类型与请求时间范围筛选。时间统一按北京时间选择和显示；详情显示脱敏 Key、错误原因、客户端推理配置及完整 Usage。客户端的 effort 与 thinking 参数合并展示，上游推理强度单独列出。列表底部的总调用次数覆盖全部匹配记录，不代表客户端请求数；上游未上报的用量显示为 `—`。
 
@@ -346,7 +367,7 @@ doc/               架构、时序图、上游协议抓包说明
 tests/             契约测试与签名一致性测试
 ```
 
-HTTP 入口按管理与推理分类，各自的 `mod.rs` 负责组装路由，`server/mod.rs` 统一挂载 `/v1` 和公共中间件。控制台登录在 API-key 鉴权层外注册，健康探针保留鉴权豁免；接口地址、响应格式及请求体限制保持原有契约。
+HTTP 入口按管理与推理分类，各自的 `mod.rs` 负责组装路由，`server/mod.rs` 统一挂载 `/v1` 和公共中间件。控制台登录、Session 校验和退出独立注册；后两者在 handler 内校验 Session。健康探针保留鉴权豁免。
 
 ## 测试
 
@@ -369,10 +390,11 @@ cargo test
 | [`doc/raycast-backend-protocol.md`](./doc/raycast-backend-protocol.md) | 上游 Raycast 后端接口的抓包协议 |
 | [`doc/model-degradation.md`](./doc/model-degradation.md) | 上游模型降级机制与断流排查 |
 | [`doc/architecture-optimization-2026-11-12.md`](./doc/architecture-optimization-2026-11-12.md) | 当前实现、修复 TODO 与部署限制 |
+| [`doc/redis.md`](./doc/redis.md) | Redis Session、压缩缓存、其他可用场景与多实例边界 |
 
 ## 安全提示
 
 * `bearer_token`、`device_id`、`api_key` 等属于敏感信息。`config.json`、`.env`、`account.json`、`accounts/`、`store/` 都已在 `.gitignore` 中忽略，请勿提交。
 * `store/store.db`（SQLite 存储库，含账号凭据与请求日志全文）包含明文凭据，切勿暴露。
 * `GET /v1/accounts/export` 会返回明文 token，只有配置了 `api_key` 才能调用，请妥善保管该 key。
-* 对公网暴露网关时，务必设置 `api_key`；未设置时网关接受任何未鉴权请求。
+* 对公网暴露网关时，务必设置 `api_key`；未设置时推理和模型接口接受未鉴权请求。

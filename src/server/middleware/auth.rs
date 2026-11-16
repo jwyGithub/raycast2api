@@ -6,8 +6,8 @@ use crate::error::GatewayError;
 
 use super::super::state::SharedState;
 
-/// Enforce the gateway's own API key (`api_key` in config.json) on all routes
-/// except the public health probes. When no `api_key` is configured, all callers pass.
+/// Management accepts a configured API key or a dashboard session. Inference
+/// keeps API-key authentication and never accepts a dashboard cookie.
 ///
 /// Two auth header styles are accepted, matching the client protocols the
 /// gateway fronts:
@@ -23,13 +23,23 @@ pub async fn auth(
         return Ok(next.run(request).await);
     }
 
-    if let Some(expected) = state.settings.api_key.as_deref() {
-        let provided = extract_api_key(request.headers());
-        if provided.as_deref() != Some(expected) {
-            return Err(GatewayError::Unauthorized(
-                "Invalid API key provided.".into(),
-            ));
-        }
+    let is_management = ["/v1/accounts/", "/v1/logs/", "/v1/statistics/"]
+        .iter()
+        .any(|prefix| path.starts_with(prefix));
+    if state
+        .settings
+        .api_key
+        .as_deref()
+        .is_some_and(|expected| extract_api_key(request.headers()).as_deref() == Some(expected))
+    {
+        return Ok(next.run(request).await);
+    }
+    if is_management {
+        crate::server::session::verify(&state, request.headers()).await?;
+    } else if state.settings.api_key.is_some() {
+        return Err(GatewayError::Unauthorized(
+            "Invalid API key provided.".into(),
+        ));
     }
 
     Ok(next.run(request).await)

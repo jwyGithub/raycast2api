@@ -1,12 +1,16 @@
-//! Console password login that returns the configured gateway API key.
+//! Dashboard login, session validation, and logout.
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::header::CACHE_CONTROL;
+use axum::http::{
+    HeaderMap, HeaderValue,
+    header::{CACHE_CONTROL, SET_COOKIE},
+};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
+use crate::server::session;
 use crate::server::state::SharedState;
 
 #[derive(Deserialize)]
@@ -17,12 +21,13 @@ pub struct LoginRequest {
 
 #[derive(Serialize)]
 struct LoginResponse {
-    api_key: Option<String>,
+    expires_in: u64,
 }
 
 /// `POST /v1/login` is public; only the configured console password is accepted.
 pub async fn login(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(request): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     let expected = state
@@ -41,10 +46,41 @@ pub async fn login(
         ));
     }
 
+    session::revoke(&state, &headers).await?;
+    let token = session::create(&state).await?;
+    Ok((
+        [
+            (CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (SET_COOKIE, session::cookie(&headers, &token)),
+        ],
+        Json(LoginResponse {
+            expires_in: session::SESSION_TTL_SECS,
+        }),
+    ))
+}
+
+pub async fn session(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, GatewayError> {
+    session::verify(&state, &headers).await?;
     Ok((
         [(CACHE_CONTROL, "no-store")],
-        Json(LoginResponse {
-            api_key: state.settings.api_key.clone(),
-        }),
+        Json(serde_json::json!({"authenticated": true})),
+    ))
+}
+
+pub async fn logout(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, GatewayError> {
+    session::verify(&state, &headers).await?;
+    session::revoke(&state, &headers).await?;
+    Ok((
+        [
+            (CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (SET_COOKIE, session::cookie(&headers, "")),
+        ],
+        Json(serde_json::Value::Null),
     ))
 }

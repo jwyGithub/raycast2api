@@ -45,7 +45,7 @@
 
 ## 查询接口
 
-两个接口都复用现有 `api_key` 鉴权和 `{code, message, data}` 管理接口包络。
+两个接口都支持 Dashboard Session 或 `api_key` 鉴权，响应使用 `{code, message, data}` 管理接口包络。
 
 ### 分页明细
 
