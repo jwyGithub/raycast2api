@@ -337,6 +337,10 @@ src/
   log/             请求日志存储与请求关联 ID
   statistics/      上游尝试统计存储、生命周期采集与查询结构
   page/            管理控制台前端文件（rust-embed 嵌入，新增文件无需改 Rust）
+    components.js  共享组件注册与 message 导出入口
+    components/    tooltip.js / message.js / button.js / select.js / date-picker.js
+    views.js       控制台登录、导航与公共请求入口
+    views/         accounts.js / logs.js / statistics.js 各自维护面板
 deploy/            device_id 推导脚本（Windows .ps1 / macOS .sh）
 doc/               架构、时序图、上游协议抓包说明
 tests/             契约测试与签名一致性测试

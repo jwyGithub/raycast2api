@@ -22,7 +22,7 @@
         class="m-0 h-full w-full overflow-hidden bg-[#f7f8fa] font-sans text-ink [&_button]:cursor-pointer [&_select]:cursor-pointer [&_button]:transition-colors [&_button]:duration-150 [&_button:disabled]:cursor-not-allowed [&_button:focus-visible]:outline-3 [&_input:focus-visible]:outline-3 [&_select:focus-visible]:outline-3 [&_textarea:focus-visible]:outline-3 [&_:focus-visible]:outline-offset-3 [&_:focus-visible]:outline-blue-500/35 motion-reduce:[&_*]:animate-none motion-reduce:[&_*]:transition-none"
     >
         <account-console class="block h-dvh overflow-hidden"></account-console>
-        <!-- 入口：views.js 依赖 components.js，后者依赖 utils.js -->
+        <!-- 入口：views.js 加载 views/ 下的各面板，共享组件和工具按需导入 -->
         <script type="module" src="/views.js"></script>
     </body>
 </html>

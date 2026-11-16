@@ -264,7 +264,15 @@ async fn console_page_and_assets_are_served_without_auth() {
         ("/style.css", "text/css"),
         ("/utils.js", "text/javascript"),
         ("/components.js", "text/javascript"),
+        ("/components/tooltip.js", "text/javascript"),
+        ("/components/message.js", "text/javascript"),
+        ("/components/button.js", "text/javascript"),
+        ("/components/select.js", "text/javascript"),
+        ("/components/date-picker.js", "text/javascript"),
         ("/views.js", "text/javascript"),
+        ("/views/accounts.js", "text/javascript"),
+        ("/views/logs.js", "text/javascript"),
+        ("/views/statistics.js", "text/javascript"),
     ] {
         let response = app
             .clone()

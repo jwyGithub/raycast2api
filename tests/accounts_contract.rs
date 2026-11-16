@@ -240,7 +240,7 @@ async fn root_serves_account_console_without_api_authentication() {
     assert!(html.contains("src=\"/views.js\""));
     assert!(html.contains("href=\"/style.css\""));
 
-    // The panels and request wiring live in the module entry, also unauthenticated.
+    // The entry wires shared requests to independently loaded panel modules.
     let response = app
         .oneshot(
             Request::builder()
@@ -255,7 +255,9 @@ async fn root_serves_account_console_without_api_authentication() {
     let js = String::from_utf8(body.to_vec()).unwrap();
     assert!(js.contains("async request(path, body, resource = 'accounts')"));
     assert!(js.contains("'/v1/' + resource + '/' + path"));
-    assert!(js.contains("customElements.define('logs-panel'"));
+    for panel in ["accounts", "logs", "statistics"] {
+        assert!(js.contains(&format!("import './views/{panel}.js'")));
+    }
 }
 
 #[tokio::test]
