@@ -14,6 +14,8 @@ pub struct LogEntry {
     pub model: Option<String>,
     /// 最终上游请求体中的模型名称（已应用模型映射）。
     pub upstream_model: Option<String>,
+    /// 形如 "请求effort(实际发往上游的effort)"。
+    pub effort: Option<String>,
     pub inbound_bytes: Option<i64>,
     pub upstream_bytes: Option<i64>,
     pub response_bytes: Option<i64>,
@@ -29,6 +31,8 @@ pub struct LogDetail {
     pub model: Option<String>,
     /// 最终上游请求体中的模型名称（已应用模型映射）。
     pub upstream_model: Option<String>,
+    /// 形如 "请求effort(实际发往上游的effort)"。
+    pub effort: Option<String>,
     pub inbound_json: Option<String>,
     pub upstream_json: Option<String>,
     pub response_text: Option<String>,

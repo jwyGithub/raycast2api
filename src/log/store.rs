@@ -10,10 +10,19 @@ use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 
 pub const RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS request_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, method TEXT, path TEXT, model TEXT, upstream_model TEXT, inbound_json TEXT, upstream_json TEXT, response_text TEXT); CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs(created_at);";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS request_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, method TEXT, path TEXT, model TEXT, upstream_model TEXT, effort TEXT, inbound_json TEXT, upstream_json TEXT, response_text TEXT); CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs(created_at);";
 /// 旧库补列;新库或已迁移的库会报 duplicate column,忽略即可。
 const ADD_MODEL: &str = "ALTER TABLE request_logs ADD COLUMN model TEXT";
 const ADD_UPSTREAM_MODEL: &str = "ALTER TABLE request_logs ADD COLUMN upstream_model TEXT";
+const ADD_EFFORT: &str = "ALTER TABLE request_logs ADD COLUMN effort TEXT";
+
+/// 客户端请求体里的 effort:chat `reasoning_effort` / messages `output_config.effort` / responses `reasoning.effort`。
+fn request_effort(body: &serde_json::Value) -> Option<&str> {
+    body.get("reasoning_effort")
+        .or_else(|| body.pointer("/output_config/effort"))
+        .or_else(|| body.pointer("/reasoning/effort"))
+        .and_then(|e| e.as_str())
+}
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = request_logs)]
@@ -25,6 +34,7 @@ struct StoredLog {
     path: Option<String>,
     model: Option<String>,
     upstream_model: Option<String>,
+    effort: Option<String>,
     inbound_json: Option<String>,
     upstream_json: Option<String>,
     response_text: Option<String>,
@@ -37,6 +47,7 @@ struct NewLog<'a> {
     method: Option<&'a str>,
     path: Option<&'a str>,
     model: Option<&'a str>,
+    effort: Option<&'a str>,
     inbound_json: Option<&'a str>,
 }
 impl StoredLog {
@@ -48,6 +59,7 @@ impl StoredLog {
             path: self.path,
             model: self.model,
             upstream_model: self.upstream_model,
+            effort: self.effort,
             inbound_json: self.inbound_json,
             upstream_json: self.upstream_json,
             response_text: self.response_text,
@@ -65,6 +77,7 @@ impl RequestLogStore {
             }
             let _ = db.lock().batch_execute(ADD_MODEL);
             let _ = db.lock().batch_execute(ADD_UPSTREAM_MODEL);
+            let _ = db.lock().batch_execute(ADD_EFFORT);
             let store = Self { db };
             if store.cleanup_expired() > 0 {
                 store.vacuum();
@@ -85,6 +98,7 @@ impl RequestLogStore {
     pub fn insert_request(&self, id: &str, method: &str, path: &str, body: &serde_json::Value) {
         crate::db::blocking(|| {
             let model = body.get("model").and_then(|m| m.as_str());
+            let effort = request_effort(body);
             let body = serde_json::to_string_pretty(body).unwrap_or_default();
             let mut c = self.db.lock();
             if let Err(e) = diesel::insert_into(request_logs::table)
@@ -94,6 +108,7 @@ impl RequestLogStore {
                     method: Some(method),
                     path: Some(path),
                     model,
+                    effort,
                     inbound_json: Some(&body),
                 })
                 .on_conflict(request_logs::request_id)
@@ -114,6 +129,7 @@ impl RequestLogStore {
                     method: Some(method),
                     path: Some(path),
                     model: None,
+                    effort: None,
                     inbound_json: None,
                 })
                 .on_conflict(request_logs::request_id)
@@ -128,13 +144,33 @@ impl RequestLogStore {
         crate::db::blocking(|| {
             // 从最终发送的请求体提取,避免记录成映射前的客户端模型。
             let upstream_model = body.get("model").and_then(|model| model.as_str());
+            let upstream_effort = body.get("reasoning_effort").and_then(|e| e.as_str());
             let body = serde_json::to_string_pretty(body).unwrap_or_default();
             let mut c = self.db.lock();
+            // effort 列形如 "请求(上游)";重试会多次调用,所以只取 '(' 之前的请求侧再重拼。
+            let stored: Option<String> = request_logs::table
+                .filter(request_logs::request_id.eq(id))
+                .select(request_logs::effort)
+                .first(&mut *c)
+                .ok()
+                .flatten();
+            let requested = stored
+                .as_deref()
+                .and_then(|e| e.split('(').next())
+                .filter(|e| !e.is_empty() && *e != "-");
+            let effort = (requested.is_some() || upstream_effort.is_some()).then(|| {
+                format!(
+                    "{}({})",
+                    requested.unwrap_or("-"),
+                    upstream_effort.unwrap_or("-")
+                )
+            });
             if let Err(e) =
                 diesel::update(request_logs::table.filter(request_logs::request_id.eq(id)))
                     .set((
                         request_logs::upstream_json.eq(Some(body)),
                         request_logs::upstream_model.eq(upstream_model),
+                        request_logs::effort.eq(effort),
                     ))
                     .execute(&mut *c)
             {
@@ -191,6 +227,7 @@ impl RequestLogStore {
                     request_logs::path,
                     request_logs::model,
                     request_logs::upstream_model,
+                    request_logs::effort,
                     diesel::dsl::sql::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>>(
                         "length(CAST(inbound_json AS BLOB))",
                     ),
@@ -205,6 +242,7 @@ impl RequestLogStore {
                     i64,
                     String,
                     i64,
+                    Option<String>,
                     Option<String>,
                     Option<String>,
                     Option<String>,
@@ -224,6 +262,7 @@ impl RequestLogStore {
                         path,
                         model,
                         upstream_model,
+                        effort,
                         inbound_bytes,
                         upstream_bytes,
                         response_bytes,
@@ -235,6 +274,7 @@ impl RequestLogStore {
                         path,
                         model,
                         upstream_model,
+                        effort,
                         inbound_bytes,
                         upstream_bytes,
                         response_bytes,
@@ -312,6 +352,26 @@ mod tests {
             rows.items[0].upstream_model.as_deref(),
             Some("mapped-model")
         );
+    }
+    #[test]
+    fn effort_combines_request_and_upstream_and_survives_retry() {
+        let s = store();
+        s.insert_request("a", "POST", "/v1/x", &json!({"reasoning":{"effort":"max"}}));
+        assert_eq!(s.detail("a").unwrap().effort.as_deref(), Some("max"));
+        for _ in 0..2 {
+            s.update_upstream("a", &json!({"reasoning_effort":"xhigh"}));
+            assert_eq!(s.detail("a").unwrap().effort.as_deref(), Some("max(xhigh)"));
+        }
+        s.insert_request_without_body("b", "POST", "/v1/x");
+        s.update_upstream("b", &json!({"reasoning_effort":"high"}));
+        assert_eq!(
+            s.list((1, 10), None, None).unwrap().items[0]
+                .effort
+                .as_deref(),
+            Some("-(high)")
+        );
+        s.update_upstream("b", &json!({}));
+        assert!(s.detail("b").unwrap().effort.is_none());
     }
     #[test]
     fn upstream_model_follows_final_body_even_without_inbound_capture() {

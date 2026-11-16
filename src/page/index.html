@@ -1085,7 +1085,7 @@
                                 </caption>
                                 <thead class="border-b border-line bg-slate-50 text-muted">
                                     <tr>
-                                        ${['请求 ID', '创建时间', '方法', '路径', '模型', '上游模型', '入站大小', '上游大小', '响应大小', '操作'].map(
+                                        ${['请求 ID', '创建时间', '方法', '路径', '模型', '上游模型', 'Effort', '入站大小', '上游大小', '响应大小', '操作'].map(
                                             label => html`<th scope="col" class="px-3 py-3 font-medium">${label}</th>`
                                         )}
                                     </tr>
@@ -1119,6 +1119,9 @@
                                                       <td class="max-w-48 truncate px-3 py-2 font-mono" title=${item.upstream_model || ''}>
                                                           ${item.upstream_model || '—'}
                                                       </td>
+                                                      <td class="max-w-40 truncate px-3 py-2 font-mono" title=${item.effort || ''}>
+                                                          ${item.effort || '—'}
+                                                      </td>
                                                       <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.inbound_bytes)}</td>
                                                       <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.upstream_bytes)}</td>
                                                       <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.response_bytes)}</td>
@@ -1133,7 +1136,7 @@
                                                   </tr>`
                                           )
                                         : html`<tr>
-                                              <td colspan="10" class="py-16 text-center text-muted" role="status">
+                                              <td colspan="11" class="py-16 text-center text-muted" role="status">
                                                   ${this.loading
                                                       ? '正在加载日志…'
                                                       : this.error
@@ -1202,6 +1205,9 @@
                                           </p>
                                           <p class="break-all">
                                               上游模型：<span class="font-mono text-ink">${this.detail.upstream_model || '—'}</span>
+                                          </p>
+                                          <p class="break-all">
+                                              Effort（请求(上游)）：<span class="font-mono text-ink">${this.detail.effort || '—'}</span>
                                           </p>`
                                         : ''}
                                 </div>
