@@ -61,10 +61,16 @@ impl InboundAdapter for ResponsesInbound {
         // merged with the top-level `tools` array below.
         let mut extra_tools: Vec<ToolDef> = Vec::new();
 
+        let mut compaction_trigger = false;
         let messages = match request.input {
             None => Vec::new(),
             Some(Input::Text(text)) => vec![Message::text(Role::User, text)],
-            Some(Input::Items(items)) => conversation(items, &mut system_parts, &mut extra_tools),
+            Some(Input::Items(items)) => conversation(
+                items,
+                &mut system_parts,
+                &mut extra_tools,
+                &mut compaction_trigger,
+            ),
         };
 
         // A request must carry at least one conversational turn.
@@ -76,6 +82,7 @@ impl InboundAdapter for ResponsesInbound {
 
         let mut canonical = CanonicalRequest::new(Protocol::Responses, model);
         canonical.stream = request.stream;
+        canonical.compaction_trigger = compaction_trigger;
         canonical.temperature = request.temperature;
         canonical.max_tokens = request.max_output_tokens;
         canonical.system = (!system_parts.is_empty()).then(|| system_parts.join("\n"));
@@ -83,6 +90,7 @@ impl InboundAdapter for ResponsesInbound {
         flatten_tools(request.tools, &mut canonical.tools);
         canonical.tools.extend(extra_tools);
         canonical.tool_choice = request.tool_choice.map(tool_choice);
+        canonical.requested_effort = request.reasoning.as_ref().and_then(|r| r.effort.clone());
         canonical.reasoning_effort = request.reasoning.map(reasoning_effort);
 
         Ok(canonical)
@@ -96,6 +104,7 @@ fn conversation(
     items: Vec<InputItem>,
     system_parts: &mut Vec<String>,
     extra_tools: &mut Vec<ToolDef>,
+    compaction_trigger: &mut bool,
 ) -> Vec<Message> {
     let mut out = Vec::with_capacity(items.len());
     // Maps each `function_call` id to its tool name, so the matching
@@ -186,6 +195,15 @@ fn conversation(
             }
             // Reasoning items are provider bookkeeping; they don't map to a turn.
             Some("reasoning") => {}
+            // Codex `responses_compaction_v2`: ask for a `compaction` output item.
+            Some("compaction_trigger") => *compaction_trigger = true,
+            // A summary this gateway issued earlier (already SUMMARY_PREFIX-ed),
+            // replayed by the client in place of the compacted history.
+            Some("compaction") => {
+                if let Some(text) = item.encrypted_content.filter(|t| !t.is_empty()) {
+                    out.push(Message::text(Role::User, text));
+                }
+            }
             // `message` or a bare `{ role, content }` item.
             _ => push_message(item, system_parts, &mut out),
         }

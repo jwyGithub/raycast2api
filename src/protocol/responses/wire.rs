@@ -84,6 +84,9 @@ pub struct InputItem {
     /// `tools` array.
     #[serde(default)]
     pub tools: Vec<InboundTool>,
+    /// For a `compaction` item: the opaque summary this gateway issued earlier.
+    #[serde(default)]
+    pub encrypted_content: Option<String>,
 }
 
 /// A message's `content` (or a function-call `output`): a plain string or an

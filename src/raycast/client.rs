@@ -18,6 +18,7 @@ use crate::error::GatewayError;
 use crate::log::context as debug;
 use crate::log::store::RequestLogStore;
 use crate::signature::calculate_signature_v2;
+use crate::statistics::{Attempt, CallContext, store::StatisticsStore};
 use crate::util::unix_secs;
 
 use super::parser::content_policy_hint;
@@ -38,6 +39,9 @@ pub struct RaycastClient {
     accounts: Arc<AccountStore>,
     /// 请求日志存储:补写发给上游的请求体。
     log: Arc<RequestLogStore>,
+    pub(crate) statistics: Arc<StatisticsStore>,
+    #[cfg(test)]
+    pub(crate) chat_url: Option<String>,
 }
 
 impl RaycastClient {
@@ -46,6 +50,7 @@ impl RaycastClient {
         settings: Arc<Settings>,
         accounts: Arc<AccountStore>,
         log: Arc<RequestLogStore>,
+        statistics: Arc<StatisticsStore>,
     ) -> Self {
         // 每个代理一个共享客户端(连接池复用);构造失败视为配置错误,启动即崩。
         let proxies = settings
@@ -69,6 +74,9 @@ impl RaycastClient {
             settings,
             accounts,
             log,
+            statistics,
+            #[cfg(test)]
+            chat_url: None,
         }
     }
 
@@ -115,9 +123,10 @@ impl RaycastClient {
     /// 账号故障切换:401 摘号换下一个重试;200 但流内首 payload 是限额错误
     /// 时给账号设冷却期(取上游 `retry_after`)再换号重试。池内全部不可用
     /// 时把最后一个真实错误透传给客户端。
-    pub async fn send_chat(
+    pub(crate) async fn send_chat(
         &self,
         request: &RaycastChatRequest,
+        call: &CallContext,
     ) -> Result<reqwest::Response, GatewayError> {
         let body = serde_json::to_string(request)?;
         let attempts = self.accounts.count_available().max(1);
@@ -135,14 +144,14 @@ impl RaycastClient {
                 }
             };
             tracing::info!(account = %account.email, tag = ?account.tag, "→ using account");
-            let result = self.try_chat(&account, &body).await;
+            let result = self.try_chat(&account, &body, call).await;
             let result = if matches!(result, Err(GatewayError::TokenInvalid { .. })) {
                 match crate::account::token_renewal::auto_renew(&self.accounts, self, &account)
                     .await
                 {
                     Ok(token) => {
                         account.access_token = token;
-                        self.try_chat(&account, &body).await
+                        self.try_chat(&account, &body, call).await
                     }
                     Err(error) => Err(error),
                 }
@@ -157,6 +166,10 @@ impl RaycastClient {
                         peek_first_payload(response, self.settings.upstream_timeout).await;
                     if let Some(err) = peeked {
                         let message = err.message();
+                        if let Some(attempt) = response.extensions().get::<Attempt>() {
+                            attempt.observe_payload(&err.raw);
+                            attempt.finish("failed", Some(&message));
+                        }
                         let status = if err.parsed.http_status != 0 {
                             err.parsed.http_status
                         } else {
@@ -313,6 +326,7 @@ impl RaycastClient {
         &self,
         account: &AccountRow,
         body: &str,
+        call: &CallContext,
     ) -> Result<reqwest::Response, GatewayError> {
         let timestamp = unix_secs().to_string();
         let signature = calculate_signature_v2(
@@ -335,16 +349,23 @@ impl RaycastClient {
             &debug::body_to_value(body.as_bytes()),
         );
 
+        #[cfg(test)]
+        let url = self.chat_url.as_deref().unwrap_or(RAYCAST_API_URL);
+        #[cfg(not(test))]
+        let url = RAYCAST_API_URL;
         let request = self
             .http
-            .post(RAYCAST_API_URL)
+            .post(url)
             .headers(headers)
             .body(body.to_owned())
             .build()?;
-        let response = self.send(request).await?;
-
-        let response = ensure_success(response).await?;
-        Ok(response)
+        let response = self.send(request, Some((call, &account.email))).await?;
+        let attempt = response.extensions().get::<Attempt>().cloned();
+        let result = ensure_success(response).await;
+        if let (Err(error), Some(attempt)) = (&result, attempt) {
+            attempt.fail(error);
+        }
+        result
     }
 
     /// Fetch the raw list of models available to the account.
@@ -403,7 +424,7 @@ impl RaycastClient {
             .headers(headers)
             .timeout(self.settings.upstream_timeout)
             .build()?;
-        let response = self.send(request).await?;
+        let response = self.send(request, None).await?;
         let response = ensure_success(response).await?;
         Ok(response.json().await?)
     }
@@ -416,7 +437,11 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
         return Ok(response);
     }
     let status = response.status().as_u16();
+    let attempt = response.extensions().get::<Attempt>().cloned();
     let mut message = response.text().await.unwrap_or_default();
+    if let Some(attempt) = attempt {
+        attempt.observe_payload(&message);
+    }
     // 内容策略拦截可能以 HTTP 错误(而非流内 payload)形式出现:同样附上
     // 排查提示,并识别为"非账号故障",让上层不摘号不轮换。
     let hint = RaycastSseError {
@@ -501,6 +526,109 @@ fn encode_query_value(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn statistics_follow_account_rotation_http_failures_and_sse_rejections() {
+        for failure in ["quota", "http", "token", "policy", "other"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, axum::Router::new().route("/", axum::routing::post(
+                    move |headers: axum::http::HeaderMap| async move {
+                        if headers.get("authorization").unwrap() == "Bearer first" {
+                            let (status, payload) = match failure {
+                                "quota" => (200, json!({"error":{"http_status":429,"message":"quota"},"usage":{"total_cost":0.1}})),
+                                "http" => (402, json!({"error":"subscription is required"})),
+                                "token" => (401, json!({"error":"invalid token"})),
+                                "policy" => (200, json!({"error":{"http_status":403,"code":"content_policy_blocked","message":"blocked"}})),
+                                _ => (200, json!({"error":{"http_status":502,"message":"other"}})),
+                            };
+                            (axum::http::StatusCode::from_u16(status).unwrap(), format!("data: {payload}\n\n"))
+                        } else {
+                            (axum::http::StatusCode::OK, "data: {\"finish_reason\":\"stop\",\"usage\":{\"input_tokens\":3,\"total_credits\":2.5}}\n\n".into())
+                        }
+                    }
+                ))).await.unwrap();
+            });
+            let state = crate::server::state::compact_test_state();
+            for (email, token) in [("a@example.com", "first"), ("b@example.com", "second")] {
+                state
+                    .accounts
+                    .upsert(
+                        &serde_json::from_value(
+                            json!({"user":{"email":email},"access_token":token}),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+            let mut client = state.client.clone();
+            client.http = reqwest::Client::builder().no_proxy().build().unwrap();
+            client.chat_url = Some(format!("http://{address}/"));
+            let request = crate::core::request::CanonicalRequest::new(
+                crate::core::protocol::Protocol::Responses,
+                "client",
+            );
+            let upstream =
+                crate::raycast::builder::build_chat_request(&request, "openai", "upstream");
+            let call = CallContext::new(&request, &upstream, "inference");
+            let result = client.send_chat(&upstream, &call).await;
+            if failure == "policy" {
+                assert!(result.is_err());
+            } else {
+                let stream = crate::raycast::stream::canonical_events_with_retry(
+                    result.unwrap(),
+                    client,
+                    upstream,
+                    state.log.clone(),
+                    call,
+                );
+                let _: Vec<_> = stream.collect().await;
+            }
+            let rows = state.statistics.list(&Default::default()).unwrap().items;
+            let rotated = matches!(failure, "quota" | "http" | "token");
+            assert_eq!(rows.len(), if rotated { 2 } else { 1 }, "{failure}");
+            let failed = rows
+                .iter()
+                .find(|row| row.account_email == "a@example.com")
+                .unwrap();
+            assert_eq!(failed.status, "failed", "{failure}");
+            assert!(failed.finished_at.is_some());
+            assert_eq!(
+                failed.http_status,
+                Some(match failure {
+                    "http" => 402,
+                    "token" => 401,
+                    _ => 200,
+                })
+            );
+            if failure == "quota" {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(failed.usage_json.as_ref().unwrap())
+                        .unwrap()["total_cost"],
+                    0.1
+                );
+            }
+            if rotated {
+                let completed = rows
+                    .iter()
+                    .find(|row| row.account_email == "b@example.com")
+                    .unwrap();
+                assert_eq!(completed.status, "completed");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        completed.usage_json.as_ref().unwrap()
+                    )
+                    .unwrap()["total_credits"],
+                    2.5
+                );
+                assert_eq!(failed.request_id, completed.request_id);
+            }
+            server.abort();
+        }
+    }
 
     #[test]
     fn cooldown_clamps_to_configured_bounds() {

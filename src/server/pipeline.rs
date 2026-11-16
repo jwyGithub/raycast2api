@@ -32,7 +32,7 @@ pub async fn run<O: OutboundAdapter>(
     state: &SharedState,
     request: CanonicalRequest,
 ) -> Result<Response, GatewayError> {
-    let events = events(state, &request).await?;
+    let events = events(state, &request, "inference").await?;
     let client_model = request.model.clone();
 
     if request.stream {
@@ -55,6 +55,7 @@ pub async fn run<O: OutboundAdapter>(
 pub(crate) async fn events(
     state: &SharedState,
     request: &CanonicalRequest,
+    call_type: &'static str,
 ) -> Result<impl Stream<Item = CanonicalEvent> + Send + 'static, GatewayError> {
     let (provider, model) = state.resolve_model(&request.model).await?;
     tracing::info!(
@@ -66,9 +67,10 @@ pub(crate) async fn events(
         "inference request"
     );
     let raycast_request = build_chat_request(request, &provider, &model);
+    let call = crate::statistics::CallContext::new(request, &raycast_request, call_type);
     let usage_key = UsageKey::new(request);
 
-    let response = match state.client.send_chat(&raycast_request).await {
+    let response = match state.client.send_chat(&raycast_request, &call).await {
         Ok(response) => response,
         Err(error) => {
             state.health.mark_failed();
@@ -84,6 +86,7 @@ pub(crate) async fn events(
             state.client.clone(),
             raycast_request,
             state.log.clone(),
+            call,
         ),
     ))
 }

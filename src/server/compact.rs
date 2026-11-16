@@ -330,43 +330,11 @@ pub(crate) async fn apply(
             Ok(request)
         }
         Compaction::Summarize(messages) => {
-            // The summarization prompt replaces the client's system prompt and
-            // tools; the summary call is a plain completion.
-            let summary_request = CanonicalRequest {
-                stream: false,
-                temperature: None,
-                max_tokens: None,
-                tools: Vec::new(),
-                tool_choice: None,
-                messages: messages
-                    .into_iter()
-                    .chain(std::iter::once(Message::text(
-                        Role::User,
-                        SUMMARIZATION_PROMPT,
-                    )))
-                    .collect(),
-                ..CanonicalRequest::new(request.protocol, request.model.clone())
-            };
-            let summary = send(summary_request).await.map_err(|error| {
-                tracing::error!(
-                    model = %request.model,
-                    messages = request.messages.len(),
-                    %error,
-                    "compact: summarization call failed — request aborted"
-                );
-                error
-            })?;
-            if summary.trim().is_empty() {
-                return Err(crate::error::GatewayError::Upstream {
-                    status: 502,
-                    message: "Compaction returned an empty summary".into(),
-                });
-            }
-            let summary_text = format!("{SUMMARY_PREFIX}\n{summary}");
+            let summary_text = summarize_messages(&request, messages, send).await?;
             let messages = rebuild(&request.messages, &summary_text);
             tracing::info!(
                 model = %request.model,
-                summary_chars = summary.len(),
+                summary_chars = summary_text.len(),
                 original_messages = request.messages.len(),
                 compacted_messages = messages.len(),
                 "compact: summary completed — history rewritten"
@@ -385,6 +353,54 @@ pub(crate) async fn apply(
             Ok(request)
         }
     }
+}
+
+/// Run the summarization completion over `messages` and return the
+/// [`SUMMARY_PREFIX`]-prefixed summary. The summarization prompt replaces the
+/// client's system prompt and tools; the call is a plain completion.
+pub(crate) async fn summarize_messages(
+    request: &CanonicalRequest,
+    messages: Vec<Message>,
+    send: impl FnOnce(
+        CanonicalRequest,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<String, crate::error::GatewayError>,
+    >,
+) -> Result<String, crate::error::GatewayError> {
+    let summary_request = CanonicalRequest {
+        requested_effort: request.requested_effort.clone(),
+        requested_thinking: request.requested_thinking.clone(),
+        stream: false,
+        temperature: None,
+        max_tokens: None,
+        tools: Vec::new(),
+        tool_choice: None,
+        messages: messages
+            .into_iter()
+            .chain(std::iter::once(Message::text(
+                Role::User,
+                SUMMARIZATION_PROMPT,
+            )))
+            .collect(),
+        ..CanonicalRequest::new(request.protocol, request.model.clone())
+    };
+    let summary = send(summary_request).await.map_err(|error| {
+        tracing::error!(
+            model = %request.model,
+            messages = request.messages.len(),
+            %error,
+            "compact: summarization call failed — request aborted"
+        );
+        error
+    })?;
+    if summary.trim().is_empty() {
+        return Err(crate::error::GatewayError::Upstream {
+            status: 502,
+            message: "Compaction returned an empty summary".into(),
+        });
+    }
+    Ok(format!("{SUMMARY_PREFIX}\n{summary}"))
 }
 
 /// Decide whether the request needs compaction, and compute the rewritten

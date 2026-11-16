@@ -28,4 +28,5 @@ pub mod raycast;
 pub mod schema;
 pub mod server;
 pub mod signature;
+pub mod statistics;
 pub mod util;

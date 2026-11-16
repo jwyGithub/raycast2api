@@ -8,6 +8,7 @@ pub mod logs;
 pub mod messages;
 pub mod models;
 pub mod responses;
+pub mod statistics;
 
 use crate::error::GatewayError;
 

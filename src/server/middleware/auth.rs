@@ -38,7 +38,7 @@ pub async fn auth(
 /// Extract the caller's API key from either auth header style. OpenAI-style
 /// `Authorization: Bearer` wins if both are present (it is the more explicit
 /// form); Anthropic-style `x-api-key` is the fallback.
-fn extract_api_key(headers: &axum::http::HeaderMap) -> Option<String> {
+pub(super) fn extract_api_key(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())

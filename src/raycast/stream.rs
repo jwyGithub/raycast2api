@@ -27,18 +27,19 @@ use super::sse::SseDecoder;
 use std::sync::Arc;
 
 /// Retry only unexpected SSE truncation, using the exact same upstream body.
-pub fn canonical_events_with_retry(
+pub(crate) fn canonical_events_with_retry(
     response: reqwest::Response,
     client: RaycastClient,
     request: RaycastChatRequest,
     log: Arc<RequestLogStore>,
+    call: crate::statistics::CallContext,
 ) -> impl Stream<Item = CanonicalEvent> + Send + 'static {
     let id = debug::current_request_id();
     let timeout = client.upstream_timeout();
     retry_once(response, log, timeout, move || {
         Box::pin(async move {
             debug::REQUEST_ID
-                .scope(id, client.send_chat(&request))
+                .scope(id, client.send_chat(&request, &call))
                 .await
         })
     })
@@ -189,7 +190,7 @@ fn skip_delivered(
 
 /// Err(()) marks missing Finish/Error, distinct from an explicit upstream error.
 fn decode_events(
-    response: reqwest::Response,
+    mut response: reqwest::Response,
     log: Arc<RequestLogStore>,
     timeout: std::time::Duration,
 ) -> impl Stream<Item = Result<CanonicalEvent, ()>> + Send + 'static {
@@ -197,6 +198,9 @@ fn decode_events(
     // valid inside the handler, while the stream below is polled outside it.
     // The stream! block is an async move, so both are moved into it.
     let id = debug::current_request_id();
+    let attempt = response
+        .extensions_mut()
+        .remove::<crate::statistics::Attempt>();
 
     stream! {
         let mut payloads: Vec<String> = Vec::new();
@@ -234,6 +238,7 @@ fn decode_events(
                 }
                 // ponytail: 打印原始 SSE 数据用于调试
                 tracing::debug!("upstream SSE payload: {}", payload);
+                if let Some(attempt) = &attempt { attempt.observe_payload(&payload); }
 
                 // 上游通知(降级/限额提示等)挂在 notifications 里,只在
                 // 出错时才被拼进错误消息。这里把新增的捞出来打到终端,
@@ -245,7 +250,18 @@ fn decode_events(
                     seen_notifications = notifications.len();
                 }
 
-                for event in parse_events(&payload, &mut notifications) {
+                let events = parse_events(&payload, &mut notifications);
+                // Settle before yielding any delta from a payload that also carries Finish.
+                if let Some(attempt) = &attempt {
+                    for event in &events {
+                        match event {
+                            CanonicalEvent::Finish { .. } => attempt.finish("completed", None),
+                            CanonicalEvent::Error { message, .. } => attempt.finish("failed", Some(message)),
+                            _ => {}
+                        }
+                    }
+                }
+                for event in events {
                     // The outbound adapters stop polling the stream at `Finish`,
                     // so this generator's tail code never runs on the streaming
                     // path — record as soon as the terminating payload is seen.
@@ -294,6 +310,9 @@ fn decode_events(
         // 下游适配器能如实把失败传给客户端(Responses 会发
         // `response.failed` 而不是谎报 completed)。
         if !stream_terminated {
+            if let Some(attempt) = &attempt {
+                attempt.finish("interrupted", Some("upstream stream ended without a terminal event (EOF, transport error or read timeout)"));
+            }
             tracing::error!(
                 "⇈ upstream stream ended without finish [{id}] — synthesizing \
                  error event (payloads={})",
@@ -356,6 +375,56 @@ mod tests {
 
     fn text(s: &str) -> CanonicalEvent {
         CanonicalEvent::TextDelta(s.into())
+    }
+
+    #[tokio::test]
+    async fn statistics_keep_truncated_attempt_separate_from_successful_retry() {
+        let state = crate::server::state::compact_test_state();
+        let request = crate::core::request::CanonicalRequest::new(
+            crate::core::protocol::Protocol::Responses,
+            "client",
+        );
+        let upstream = crate::raycast::builder::build_chat_request(&request, "openai", "upstream");
+        let call = crate::statistics::CallContext::new(&request, &upstream, "compact");
+        let first =
+            crate::statistics::Attempt::start(state.statistics.clone(), &call, "first@example.com")
+                .unwrap();
+        let mut first_response = response(&[json!({"text":"partial"})]);
+        first.set_http_status(200);
+        first_response.extensions_mut().insert(first);
+        let second =
+            crate::statistics::Attempt::start(state.statistics.clone(), &call, "retry@example.com")
+                .unwrap();
+        let mut second_response = response(&[json!({"text":"partial done"}), finish()]);
+        second.set_http_status(200);
+        second_response.extensions_mut().insert(second);
+        let events: Vec<_> = retry_once(
+            first_response,
+            state.log.clone(),
+            std::time::Duration::from_secs(1),
+            move || Box::pin(async move { Ok(second_response) }),
+        )
+        .collect()
+        .await;
+        assert!(matches!(events.last(), Some(CanonicalEvent::Finish { .. })));
+        let page = state.statistics.list(&Default::default()).unwrap();
+        assert_eq!(page.total, 2);
+        let interrupted = page
+            .items
+            .iter()
+            .find(|row| row.account_email == "first@example.com")
+            .unwrap();
+        assert_eq!(interrupted.status, "interrupted");
+        assert!(interrupted.usage_json.is_none());
+        let completed = page
+            .items
+            .iter()
+            .find(|row| row.account_email == "retry@example.com")
+            .unwrap();
+        assert_eq!(completed.status, "completed");
+        assert!(completed.usage_json.is_some());
+        assert_eq!(interrupted.request_id, completed.request_id);
+        assert_eq!(completed.call_type, "compact");
     }
 
     #[tokio::test]

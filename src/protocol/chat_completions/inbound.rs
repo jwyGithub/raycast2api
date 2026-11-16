@@ -36,6 +36,9 @@ impl InboundAdapter for ChatCompletionsInbound {
             .unwrap_or_else(|| DEFAULT_MODEL_ID.to_string());
         let mut canonical = CanonicalRequest::new(Protocol::ChatCompletions, model);
         canonical.stream = request.stream;
+        canonical.requested_effort = request
+            .reasoning_effort
+            .and_then(|v| v.as_str().map(str::to_owned));
         canonical.temperature = request.temperature;
         canonical.system = system_instructions(&request.messages);
         canonical.messages = conversation(&request.messages);

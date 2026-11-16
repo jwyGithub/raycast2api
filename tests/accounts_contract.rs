@@ -17,7 +17,11 @@ fn app() -> (axum::Router, Arc<AccountStore>) {
 }
 
 fn app_with_api_key(api_key: Option<&str>) -> (axum::Router, Arc<AccountStore>) {
-    let store = Arc::new(AccountStore::new(Db::open(":memory:").unwrap()));
+    let db = Db::open(":memory:").unwrap();
+    let store = Arc::new(AccountStore::new(db.clone()));
+    let statistics = Arc::new(raycast2api::statistics::store::StatisticsStore::new(
+        db.clone(),
+    ));
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
@@ -31,14 +35,13 @@ fn app_with_api_key(api_key: Option<&str>) -> (axum::Router, Arc<AccountStore>) 
         proxies: Vec::new(),
         proxies_enabled: false,
     });
-    let log_store = Arc::new(raycast2api::log::store::RequestLogStore::new(
-        Db::open(":memory:").unwrap(),
-    ));
+    let log_store = Arc::new(raycast2api::log::store::RequestLogStore::new(db));
     let client = raycast2api::raycast::client::RaycastClient::new(
         reqwest::Client::new(),
         settings.clone(),
         store.clone(),
         log_store.clone(),
+        statistics,
     );
     let state = Arc::new(raycast2api::server::state::AppState::new(
         settings,

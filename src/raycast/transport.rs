@@ -6,6 +6,7 @@ impl RaycastClient {
     pub(super) async fn send(
         &self,
         request: reqwest::Request,
+        context: Option<(&crate::statistics::CallContext, &str)>,
     ) -> Result<reqwest::Response, GatewayError> {
         let direct = std::iter::once(("direct", &self.http));
         let proxies = self
@@ -22,11 +23,18 @@ impl RaycastClient {
             let replay = request
                 .try_clone()
                 .ok_or_else(|| GatewayError::Internal("upstream body is not replayable".into()))?;
+            let attempt = context.and_then(|(call, email)| {
+                crate::statistics::Attempt::start(self.statistics.clone(), call, email)
+            });
             match tokio::time::timeout(self.settings.upstream_timeout, client.execute(replay)).await
             {
-                Ok(Ok(response)) => {
+                Ok(Ok(mut response)) => {
+                    if let Some(attempt) = attempt {
+                        attempt.set_http_status(response.status().as_u16());
+                        response.extensions_mut().insert(attempt);
+                    }
                     let id = debug::current_request_id();
-                    if id != "-" && !self.proxies.is_empty() {
+                    if id != "-" {
                         debug::record_channel(&id, channel);
                     }
                     return Ok(response);
@@ -40,6 +48,9 @@ impl RaycastClient {
                         message: "upstream response header timeout".into(),
                     });
                 }
+            }
+            if let (Some(attempt), Some(error)) = (attempt, &last) {
+                attempt.fail(error);
             }
         }
         Err(last.expect("direct channel always exists"))
@@ -71,6 +82,83 @@ impl RaycastClient {
 mod tests {
     use axum::{Router, routing::get};
     #[tokio::test]
+    async fn statistics_record_each_network_channel_and_pending_header_cancellation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/", get(|| async { "ok" })).route(
+                    "/pending",
+                    get(|| async { std::future::pending::<&'static str>().await }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let state = crate::server::state::compact_test_state();
+        let mut client = state.client.clone();
+        client.http = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .build()
+            .unwrap();
+        client.proxies = vec![(
+            "fallback".into(),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        )];
+        let canonical = crate::core::request::CanonicalRequest::new(
+            crate::core::protocol::Protocol::Responses,
+            "client",
+        );
+        let upstream =
+            crate::raycast::builder::build_chat_request(&canonical, "openai", "upstream");
+        let call = crate::statistics::CallContext::new(&canonical, &upstream, "inference");
+        let request = client
+            .http
+            .get(format!("http://{address}/"))
+            .build()
+            .unwrap();
+        let response = client
+            .send(request, Some((&call, "a@example.com")))
+            .await
+            .unwrap();
+        assert_eq!(state.statistics.list(&Default::default()).unwrap().total, 2);
+        drop(response);
+        client.http = reqwest::Client::builder().no_proxy().build().unwrap();
+        client.proxies.clear();
+        let request = client
+            .http
+            .get(format!("http://{address}/pending"))
+            .build()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                client.send(request, Some((&call, "b@example.com")))
+            )
+            .await
+            .is_err()
+        );
+        let page = state.statistics.list(&Default::default()).unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(
+            page.items
+                .iter()
+                .filter(|row| row.status == "failed")
+                .count(),
+            1
+        );
+        assert_eq!(
+            page.items
+                .iter()
+                .filter(|row| row.status == "cancelled")
+                .count(),
+            2
+        );
+        assert!(page.items.iter().all(|row| row.usage_json.is_none()));
+        server.abort();
+    }
+    #[tokio::test]
     async fn configured_timeout_limits_response_header_wait() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -98,9 +186,12 @@ mod tests {
             .get(format!("http://{address}/"))
             .build()
             .unwrap();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), client.send(request))
-            .await
-            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.send(request, None),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             result,
             Err(crate::error::GatewayError::Upstream { status: 504, .. })
@@ -138,7 +229,7 @@ mod tests {
             .get(format!("http://{address}/"))
             .build()
             .unwrap();
-        assert_eq!(client.send(request).await.unwrap().status(), 429);
+        assert_eq!(client.send(request, None).await.unwrap().status(), 429);
         client.http = reqwest::Client::builder().no_proxy().build().unwrap();
         client.proxies = vec![(
             "unreachable".into(),
@@ -152,7 +243,7 @@ mod tests {
             .get(format!("http://{address}/"))
             .build()
             .unwrap();
-        assert_eq!(client.send(request).await.unwrap().status(), 429);
+        assert_eq!(client.send(request, None).await.unwrap().status(), 429);
         server.abort();
     }
 }

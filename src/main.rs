@@ -37,6 +37,9 @@ async fn main() {
     });
     let accounts = Arc::new(raycast2api::account::store::AccountStore::new(db.clone()));
 
+    let statistics = Arc::new(raycast2api::statistics::store::StatisticsStore::new(
+        db.clone(),
+    ));
     let request_log = Arc::new(raycast2api::log::store::RequestLogStore::new(db));
 
     // 启动后每小时清理一次,避免服务空闲时过期日志滞留。
@@ -70,6 +73,7 @@ async fn main() {
         settings.clone(),
         accounts.clone(),
         request_log.clone(),
+        statistics,
     );
     let state = Arc::new(AppState::new(
         settings.clone(),
@@ -77,6 +81,10 @@ async fn main() {
         accounts.clone(),
         request_log,
     ));
+    state
+        .statistics
+        .interrupt_unfinished()
+        .expect("failed to recover unfinished statistics");
 
     // 启动立即刷新一遍账号额度,之后每 6 小时一遍;失败只记日志。
     {
@@ -118,18 +126,24 @@ async fn main() {
                 // Serve both listeners concurrently
                 let app_clone = app.clone();
                 let primary_handle = tokio::spawn(async move {
-                    if let Err(err) = axum::serve(listener, app)
-                        .with_graceful_shutdown(shutdown_signal())
-                        .await
+                    if let Err(err) = axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(shutdown_signal())
+                    .await
                     {
                         tracing::error!("primary server error: {err}");
                     }
                 });
 
                 let dual_handle = tokio::spawn(async move {
-                    if let Err(err) = axum::serve(dual_listener, app_clone)
-                        .with_graceful_shutdown(shutdown_signal())
-                        .await
+                    if let Err(err) = axum::serve(
+                        dual_listener,
+                        app_clone.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(shutdown_signal())
+                    .await
                     {
                         tracing::error!("dual-stack server error: {err}");
                     }
@@ -144,9 +158,12 @@ async fn main() {
             Err(err) => {
                 tracing::warn!("failed to bind dual-stack {}: {err}", dual_addr);
                 // Fall back to primary listener only
-                if let Err(err) = axum::serve(listener, app)
-                    .with_graceful_shutdown(shutdown_signal())
-                    .await
+                if let Err(err) = axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(shutdown_signal())
+                .await
                 {
                     tracing::error!("server error: {err}");
                     std::process::exit(1);
@@ -155,9 +172,12 @@ async fn main() {
         }
     } else {
         // Single-stack mode
-        if let Err(err) = axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
+        if let Err(err) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await
         {
             tracing::error!("server error: {err}");
             std::process::exit(1);

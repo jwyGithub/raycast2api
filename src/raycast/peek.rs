@@ -40,8 +40,23 @@ impl PeekedError {
 /// payload carries an `error` object. Without an error the response is rebuilt
 /// with every byte back in place, byte-identical to not peeking at all.
 pub async fn peek_first_payload(
+    mut response: reqwest::Response,
+    timeout: std::time::Duration,
+) -> (Option<PeekedError>, reqwest::Response) {
+    let attempt = response
+        .extensions_mut()
+        .remove::<crate::statistics::Attempt>();
+    let (error, mut response) = peek_payload(response, timeout, attempt.as_ref()).await;
+    if let Some(attempt) = attempt {
+        response.extensions_mut().insert(attempt);
+    }
+    (error, response)
+}
+
+async fn peek_payload(
     response: reqwest::Response,
     timeout: std::time::Duration,
+    attempt: Option<&crate::statistics::Attempt>,
 ) -> (Option<PeekedError>, reqwest::Response) {
     let status = response.status();
     let mut bytes = response.bytes_stream();
@@ -59,6 +74,20 @@ pub async fn peek_first_payload(
                     break;
                 }
                 if let Some(payload) = decoder.push_bytes(&chunk).into_iter().next() {
+                    if let Some(attempt) = attempt {
+                        attempt.observe_payload(&payload);
+                        for event in super::parser::parse_events(&payload, &mut Vec::new()) {
+                            match event {
+                                crate::core::event::CanonicalEvent::Finish { .. } => {
+                                    attempt.finish("completed", None)
+                                }
+                                crate::core::event::CanonicalEvent::Error { message, .. } => {
+                                    attempt.finish("failed", Some(&message))
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     if let Ok(parsed) = serde_json::from_str::<RaycastSsePayload>(&payload) {
                         error = parsed.error;
                         error_raw = payload;
@@ -121,11 +150,18 @@ pub async fn peek_first_payload(
 /// errors that are *not* handled by account rotation.
 ///
 /// [`CanonicalEvent::Error`]: crate::core::event::CanonicalEvent::Error
-pub fn restore_payload(response: reqwest::Response, raw: &str) -> reqwest::Response {
+pub fn restore_payload(mut response: reqwest::Response, raw: &str) -> reqwest::Response {
+    let attempt = response
+        .extensions_mut()
+        .remove::<crate::statistics::Attempt>();
     let status = response.status();
     // 拼回完整 `data:` 行 —— 下游 SseDecoder 只认带前缀的 payload。
     let prefix = ByteChunk::from(format!("data: {raw}\n").into_bytes());
-    rebuild(status, response.bytes_stream().boxed(), Some(prefix))
+    let mut response = rebuild(status, response.bytes_stream().boxed(), Some(prefix));
+    if let Some(attempt) = attempt {
+        response.extensions_mut().insert(attempt);
+    }
+    response
 }
 
 /// Rebuild a [`reqwest::Response`] over a replaced byte stream, keeping the

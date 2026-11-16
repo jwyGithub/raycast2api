@@ -187,9 +187,9 @@ curl http://localhost:8787/v1/models
 
 三个推理接口的请求体上限为 16 MiB。
 
-### 账号与日志管理
+### 账号、日志与统计管理
 
-登录接口和管理接口（`/v1/login`、`/v1/accounts/*`、`/v1/logs/*`）统一返回 `{ code, message, data }`：列表与分页对象放在 `data` 中；删除成功返回 HTTP 200 和 `data: null`；错误响应也使用此包络，错误原因位于 `message`，`data` 为 `null`。模型列表、三种推理接口以及 `/health`、`/ready` 保持各自协议的响应格式。
+登录接口和管理接口（`/v1/login`、`/v1/accounts/*`、`/v1/logs/*`、`/v1/statistics/*`）统一返回 `{ code, message, data }`：列表与分页对象放在 `data` 中；删除成功返回 HTTP 200 和 `data: null`；错误响应也使用此包络，错误原因位于 `message`，`data` 为 `null`。模型列表、三种推理接口以及 `/health`、`/ready` 保持各自协议的响应格式。
 
 | 路径 | 说明 |
 | --- | --- |
@@ -203,8 +203,12 @@ curl http://localhost:8787/v1/models
 | `GET /v1/accounts/export` | 导出可直接提交给 `create` 的账号 JSON 数组（含明文 token；**必须配置 `api_key`** 才可用） |
 | `POST /v1/logs/list` | 请求日志列表（body：`page`、`page_size`、`created_at`、`request_id`；默认每页 10 条，不含请求体） |
 | `POST /v1/logs/detail` | 请求日志详情（body：`request_id`；返回入站 / 上游 / 响应全文） |
+| `POST /v1/statistics/list` | 上游调用统计分页明细，默认每页 10 条，支持时间、请求 ID、账号、模型、key 指纹等精确筛选；见[统计接口](doc/statistics.md) |
+| `POST /v1/statistics/detail` | 单次上游尝试的详情（body：`id`，由统计列表返回），包含完整 usage |
 
 日志列表与详情中的 `model` 为客户端请求的模型，`upstream_model` 为应用映射后实际发给上游的请求体中的模型。未发送上游请求、上游请求体不含模型或升级前的历史日志，该字段为 `null`。已有数据库启动时会自动补列。
+
+统计独立存储在同一个 SQLite 库的 `statistics` 表中，启动时自动建表，不受日志 7 天清理影响。每次实际上游尝试独占一条记录；摘要、换号、token 续期后重发、代理切换及断流重试通过同一个 `request_id` 关联。第一版提供采集与明细接口，仪表盘和聚合留待后续实现。
 
 ## 配置
 
@@ -231,7 +235,7 @@ curl http://localhost:8787/v1/models
 | `raycast_signature_secret` | 是 | — | `X-Raycast-Signature-v2` 的 HMAC 签名密钥，网关不再内置默认值；空字符串视为未填写 |
 | `api_key` | 否 | 无 | 网关接口的认证凭据；未设置时接口不鉴权。页面登录成功后返回给前端，用于后续接口调用 |
 | `dashboard_password` | 否 | 无 | 控制台登录密码；未配置或为空时无法登录页面，原有 API key 调用仍可用；修改后重启生效 |
-| `accounts_db` | 否 | `store/store.db` | SQLite 存储库路径（账号表与请求日志共用） |
+| `accounts_db` | 否 | `store/store.db` | SQLite 存储库路径（账号、请求日志、统计共用） |
 | `host` | 否 | `0.0.0.0` | 监听地址（须为 IP） |
 | `port` | 否 | `8787` | 监听端口 |
 | `upstream_timeout_secs` | 否 | `20` | 上游超时秒数，必须为正整数；用于连接、响应头、首包、SSE 空闲及普通查询 / OAuth。修改后重启生效，流式任务只要持续有输出，总时长可以超过此值 |
@@ -309,6 +313,7 @@ flowchart LR
 | `signature` | `X-Raycast-Signature-v2` 计算 |
 | `server` | HTTP 层：状态、中间件、路由、handler、共享推理 pipeline、Responses 上下文压缩 |
 | `log` | 请求日志：SQLite 存储（7 天保留）与请求关联 ID |
+| `statistics` | 独立记录每次上游尝试的账号、模型、状态及完整 usage，提供分页明细与详情 |
 
 ### 项目结构
 
@@ -324,6 +329,7 @@ src/
   account/         账号存储、token 续期、额度刷新
   server/          路由、中间件（鉴权 / 日志捕获）、handler、状态、pipeline
   log/             请求日志存储与请求关联 ID
+  statistics/      上游尝试统计存储、生命周期采集与查询结构
   page/            管理控制台（单文件 HTML）
 deploy/            device_id 推导脚本（Windows .ps1 / macOS .sh）
 doc/               架构、时序图、上游协议抓包说明

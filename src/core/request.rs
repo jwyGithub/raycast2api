@@ -59,11 +59,17 @@ pub struct CanonicalRequest {
     pub tool_choice: Option<ToolChoice>,
     /// Reasoning depth when the client requested a "think" completion.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Original client signals, retained separately from normalized upstream effort.
+    pub requested_effort: Option<String>,
+    pub requested_thinking: Option<serde_json::Value>,
     /// The client asked for server-side tool-use classification (Claude Code
     /// auto mode's `safeguards` field). The gateway cannot classify, but the
     /// outbound adapter must still acknowledge: it answers `unsupported`
     /// so the client falls back to its local classifier.
     pub server_safety_check: bool,
+    /// Responses `compaction_trigger` input item (Codex `responses_compaction_v2`):
+    /// the client wants a single `compaction` output item, not an inference.
+    pub compaction_trigger: bool,
 }
 
 impl CanonicalRequest {
@@ -81,7 +87,10 @@ impl CanonicalRequest {
             tools: Vec::new(),
             tool_choice: None,
             reasoning_effort: None,
+            requested_effort: None,
+            requested_thinking: None,
             server_safety_check: false,
+            compaction_trigger: false,
         }
     }
 }

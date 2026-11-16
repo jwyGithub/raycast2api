@@ -34,7 +34,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/accounts/export", get(handlers::accounts::export))
         .route("/accounts/refresh", post(handlers::accounts::refresh))
         .route("/logs/list", post(handlers::logs::list))
-        .route("/logs/detail", post(handlers::logs::detail));
+        .route("/logs/detail", post(handlers::logs::detail))
+        .route("/statistics/list", post(handlers::statistics::list))
+        .route("/statistics/detail", post(handlers::statistics::detail));
 
     // The authenticated API surface: shared management routes plus inference
     // and health endpoints. The debug-capture layer sits inside the auth layer.

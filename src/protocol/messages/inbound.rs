@@ -59,6 +59,15 @@ impl InboundAdapter for MessagesInbound {
 
         let mut canonical = CanonicalRequest::new(Protocol::Messages, model);
         canonical.stream = request.stream;
+        canonical.requested_effort = request
+            .output_config
+            .as_ref()
+            .and_then(|o| o.effort.clone());
+        canonical.requested_thinking = request.thinking.as_ref().map(|t| {
+            serde_json::json!({
+                "type": t.kind, "budget_tokens": t.budget_tokens,
+            })
+        });
         canonical.temperature = request.temperature;
         canonical.max_tokens = request.max_tokens;
         canonical.system = system_prompt(request.system);

@@ -359,6 +359,29 @@ impl StreamEncoder {
         }
     }
 
+    /// Emit one whole `compaction` item (Codex `responses_compaction_v2`
+    /// expects exactly one) carrying the summary as `encrypted_content`.
+    pub fn compaction(&mut self, summary: String) -> Vec<SseFrame> {
+        let mut frames = self.close_current();
+        let index = self.next_index;
+        self.next_index += 1;
+        let item = json!({
+            "id": format!("cmp_{}", new_uuid()),
+            "type": "compaction",
+            "encrypted_content": summary,
+        });
+        frames.push(self.frame(
+            "response.output_item.added",
+            json!({ "type": "response.output_item.added", "output_index": index, "item": item }),
+        ));
+        self.items.push(item.clone());
+        frames.push(self.frame(
+            "response.output_item.done",
+            json!({ "type": "response.output_item.done", "output_index": index, "item": item }),
+        ));
+        frames
+    }
+
     /// Close any open item and emit the terminating `response.completed`
     /// (carrying the assembled `output[]` and usage). Idempotent.
     pub fn finalize(&mut self) -> Vec<SseFrame> {

@@ -53,7 +53,11 @@ fn stream_response(state: SharedState, request: CanonicalRequest) -> Response {
         request,
         move |request| Box::pin(async move { summarize(&summary_state, request).await }),
         move |request| {
-            Box::pin(async move { Ok(pipeline::events(&inference_state, &request).await?.boxed()) })
+            Box::pin(async move {
+                Ok(pipeline::events(&inference_state, &request, "inference")
+                    .await?
+                    .boxed())
+            })
         },
     )
 }
@@ -77,9 +81,29 @@ fn stream_response_with(
         unix_secs(),
     );
     encoder.set_custom(custom_names(&request.tools));
-    let channel = RequestChannel(debug::current_request_id());
+    let channel = RequestChannel::new(debug::current_request_id());
+    let statistics_context = crate::statistics::REQUEST_CONTEXT
+        .try_with(Clone::clone)
+        .ok();
     let frames = stream! {
         yield to_event(&encoder.created());
+        if request.compaction_trigger {
+            // Codex-driven compaction: summarize the whole history into one
+            // `compaction` item; no inference follows.
+            let messages = request.messages.clone();
+            match compact::summarize_messages(&request, messages, summarize).await {
+                Ok(summary) => {
+                    for frame in encoder.compaction(summary) {
+                        yield to_event(&frame);
+                    }
+                }
+                Err(error) => { encoder.push(stream_error(error)); }
+            }
+            for frame in encoder.finalize() {
+                yield to_event(&frame);
+            }
+            return;
+        }
         let plan = compact::plan(&state, &request).await;
         let compacting = !matches!(plan, compact::Compaction::NotNeeded);
         if compacting {
@@ -121,7 +145,13 @@ fn stream_response_with(
     let scoped = stream! {
         let mut frames = std::pin::pin!(frames);
         // Body polling happens after the middleware's task-local scope has ended.
-        while let Some(frame) = REQUEST_ID.scope(channel.0.clone(), frames.next()).await {
+        loop {
+            let next = REQUEST_ID.scope(channel.0.clone(), frames.next());
+            let frame = match &statistics_context {
+                Some(context) => crate::statistics::REQUEST_CONTEXT.scope(context.clone(), next).await,
+                None => next.await,
+            };
+            let Some(frame) = frame else { break; };
             yield frame;
         }
     };
@@ -139,11 +169,24 @@ fn stream_error(error: GatewayError) -> CanonicalEvent {
 }
 
 // The middleware returns before deferred upstream calls register their channel.
-struct RequestChannel(String);
+// 中间件的 `←` 日志此时读不到通道,所以流结束时在这里补打一行。
+struct RequestChannel(String, std::time::Instant);
+
+impl RequestChannel {
+    fn new(id: String) -> Self {
+        Self(id, std::time::Instant::now())
+    }
+}
 
 impl Drop for RequestChannel {
     fn drop(&mut self) {
-        debug::take_channel(&self.0);
+        if let Some(channel) = debug::take_channel(&self.0) {
+            tracing::info!(
+                "← stream done [{}] via {channel} in {:?}",
+                self.0,
+                self.1.elapsed()
+            );
+        }
     }
 }
 
@@ -153,7 +196,7 @@ async fn summarize(
     state: &SharedState,
     request: crate::core::request::CanonicalRequest,
 ) -> Result<String, GatewayError> {
-    let events = pipeline::events(state, &request).await?;
+    let events = pipeline::events(state, &request, "compact").await?;
     let mut events = std::pin::pin!(events);
     let mut text = String::new();
     while let Some(event) = events.next().await {
@@ -469,5 +512,35 @@ mod tests {
                     .as_str()
                     .is_some_and(|s| s.contains("上下文压缩完成"))
         }));
+    }
+
+    #[tokio::test]
+    async fn compaction_trigger_emits_single_compaction_item_without_inference() {
+        let state = crate::server::state::compact_test_state();
+        let mut request = request();
+        request.compaction_trigger = true;
+        let response = stream_response_with(
+            state,
+            request,
+            |_| Box::pin(async { Ok(format!("{}\nSUMMARY", compact::SUMMARY_PREFIX)) }),
+            |_| panic!("no inference for a compaction trigger"),
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let frames = decode(&bytes);
+        let output = frames.last().unwrap()["response"]["output"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(frames.last().unwrap()["type"], "response.completed");
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"], "compaction");
+        assert!(
+            output[0]["encrypted_content"]
+                .as_str()
+                .unwrap()
+                .ends_with("SUMMARY")
+        );
     }
 }

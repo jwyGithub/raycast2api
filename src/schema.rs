@@ -42,4 +42,29 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(accounts, request_logs);
+diesel::table! {
+    statistics (id) {
+        id -> Text,
+        request_id -> Text,
+        api_key -> Nullable<Text>,
+        api_key_masked -> Nullable<Text>,
+        requested_at -> BigInt,
+        started_at -> BigInt,
+        finished_at -> Nullable<BigInt>,
+        request_ip -> Nullable<Text>,
+        account_email -> Text,
+        requested_model -> Text,
+        upstream_provider -> Text,
+        upstream_model -> Text,
+        requested_effort -> Nullable<Text>,
+        requested_thinking_json -> Nullable<Text>,
+        upstream_effort -> Nullable<Text>,
+        call_type -> Text,
+        status -> Text,
+        http_status -> Nullable<Integer>,
+        error_message -> Nullable<Text>,
+        usage_json -> Nullable<Text>,
+    }
+}
+
+diesel::allow_tables_to_appear_in_same_query!(accounts, request_logs, statistics);

@@ -21,6 +21,8 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f64>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub reasoning_effort: Option<serde_json::Value>,
 }
 
 /// A chat message. `content` is a plain string (the common case); richer

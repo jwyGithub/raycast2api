@@ -30,6 +30,7 @@ pub struct AppState {
     pub accounts: Arc<AccountStore>,
     /// 请求日志存储(推理请求三体采集写入)。
     pub log: Arc<RequestLogStore>,
+    pub statistics: Arc<crate::statistics::store::StatisticsStore>,
     /// auto-compact 摘要缓存(按模型 + 被压缩前缀 hash)。
     pub summary_cache: SummaryCache,
     /// auto-compact 实测输入 token 缓存(按提示词配置 + 完整消息前缀)。
@@ -52,6 +53,7 @@ impl AppState {
         log: Arc<RequestLogStore>,
     ) -> Self {
         Self {
+            statistics: client.statistics.clone(),
             settings,
             client,
             health: BackendHealth::default(),
@@ -137,6 +139,7 @@ impl AppState {
 pub(crate) fn compact_test_state() -> SharedState {
     let db = crate::db::Db::open(":memory:").unwrap();
     let accounts = Arc::new(AccountStore::new(db.clone()));
+    let statistics = Arc::new(crate::statistics::store::StatisticsStore::new(db.clone()));
     let log = Arc::new(RequestLogStore::new(db));
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
@@ -156,6 +159,7 @@ pub(crate) fn compact_test_state() -> SharedState {
         settings.clone(),
         accounts.clone(),
         log.clone(),
+        statistics,
     );
     let mut state = AppState::new(settings, client, accounts, log);
     state.models_cache = RwLock::new(Some(ModelsCache {

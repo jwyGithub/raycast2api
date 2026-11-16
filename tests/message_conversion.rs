@@ -25,6 +25,7 @@ fn request(messages: Vec<ChatMessage>) -> ChatCompletionRequest {
         model: None,
         temperature: None,
         stream: false,
+        reasoning_effort: None,
     }
 }
 

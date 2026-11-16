@@ -17,6 +17,9 @@ use tower::ServiceExt;
 fn app() -> (axum::Router, Arc<RequestLogStore>) {
     let db = Db::open(":memory:").unwrap();
     let store = Arc::new(AccountStore::new(db.clone()));
+    let statistics = Arc::new(raycast2api::statistics::store::StatisticsStore::new(
+        db.clone(),
+    ));
     let log_store = Arc::new(RequestLogStore::new(db));
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
@@ -36,6 +39,7 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
         settings.clone(),
         store.clone(),
         log_store.clone(),
+        statistics,
     );
     let state = Arc::new(AppState::new(settings, client, store, log_store.clone()));
     (build_router(state), log_store)

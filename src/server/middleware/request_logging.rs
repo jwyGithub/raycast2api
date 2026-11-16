@@ -1,14 +1,17 @@
 use axum::body::{Body, Bytes};
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::header::CONTENT_LENGTH;
 use axum::middleware::Next;
 use axum::response::Response;
 use futures_util::StreamExt;
+use std::net::SocketAddr;
 
 use crate::log::context::{self as debug, REQUEST_ID};
+use crate::statistics::{REQUEST_CONTEXT, RequestContext};
 use crate::util;
 
 use super::super::state::SharedState;
+use super::auth::extract_api_key;
 
 /// Largest request body buffered for request-log capture; larger bodies still pass through.
 const MAX_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
@@ -44,7 +47,10 @@ pub async fn request_logging(
             return (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({"error":{"message":"gateway concurrency limit reached","type":"overloaded_error"}}))).into_response();
         }
     };
-    let response = capture(state, request, next).await;
+    let context = request_context(&request);
+    let response = REQUEST_CONTEXT
+        .scope(context, capture(state, request, next))
+        .await;
     let (parts, body) = response.into_parts();
     let stream = async_stream::stream! {
         let _permit = permit;
@@ -52,6 +58,32 @@ pub async fn request_logging(
         while let Some(chunk) = chunks.next().await { yield chunk; }
     };
     Response::from_parts(parts, Body::from_stream(stream))
+}
+
+fn request_context(request: &Request) -> RequestContext {
+    let key = extract_api_key(request.headers());
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|peer| peer.0.ip());
+    RequestContext {
+        request_id: String::new(),
+        requested_at: util::unix_secs() as i64,
+        api_key: key.clone(),
+        api_key_masked: key.as_ref().map(|key| {
+            let chars: Vec<_> = key.chars().collect();
+            if chars.len() <= 8 {
+                "****".into()
+            } else {
+                format!(
+                    "{}****{}",
+                    chars[..4].iter().collect::<String>(),
+                    chars[chars.len() - 4..].iter().collect::<String>()
+                )
+            }
+        }),
+        request_ip: peer.map(|ip| ip.to_string()),
+    }
 }
 
 async fn capture(state: SharedState, request: Request, next: Next) -> Response {
@@ -121,7 +153,11 @@ async fn capture(state: SharedState, request: Request, next: Next) -> Response {
 async fn run_with_request_id(id: String, request: Request, next: Next) -> Response {
     let started = std::time::Instant::now();
     // handler 的 Err(GatewayError) 已由 axum 渲染为错误响应,这里只看状态码。
-    let response = REQUEST_ID.scope(id.clone(), next.run(request)).await;
+    let mut context = REQUEST_CONTEXT.with(Clone::clone);
+    context.request_id = id.clone();
+    let response = REQUEST_CONTEXT
+        .scope(context, REQUEST_ID.scope(id.clone(), next.run(request)))
+        .await;
 
     // 请求/响应配对的完成日志:状态码 + 耗时,与 stream 层的 `[id]` 前缀
     // 和 client 层的账号日志对得上。配置了代理时,上游客户端会登记实际
@@ -170,6 +206,33 @@ mod tests {
         Json(json!({"payload_len": body["payload"].as_str().unwrap().len()}))
     }
 
+    #[test]
+    fn bearer_fingerprint_and_forwarded_header_ignored() {
+        let mut request = Request::builder()
+            .header("authorization", "Bearer abcdefghijklmnop")
+            .header("x-api-key", "ignored-key")
+            .header("x-forwarded-for", "192.0.2.99, 198.51.100.7, 10.0.0.2")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo("10.0.0.1:1234".parse::<SocketAddr>().unwrap()));
+        let direct = request_context(&request);
+        assert_eq!(direct.request_ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(direct.api_key_masked.as_deref(), Some("abcd****mnop"));
+        assert_eq!(direct.api_key.as_deref(), Some("abcdefghijklmnop"));
+        request
+            .headers_mut()
+            .insert("x-forwarded-for", "spoofed".parse().unwrap());
+        request.headers_mut().remove("authorization");
+        request
+            .headers_mut()
+            .insert("x-api-key", "tiny".parse().unwrap());
+        let invalid = request_context(&request);
+        assert_eq!(invalid.request_ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(invalid.api_key_masked.as_deref(), Some("****"));
+    }
+
     #[tokio::test]
     async fn admission_permit_lives_until_response_body_is_dropped() {
         let state = crate::server::state::compact_test_state();
@@ -207,6 +270,7 @@ mod tests {
     async fn oversized_inference_body_reaches_handler_without_payload_logging() {
         let db = Db::open(":memory:").unwrap();
         let accounts = Arc::new(AccountStore::new(db.clone()));
+        let statistics = Arc::new(crate::statistics::store::StatisticsStore::new(db.clone()));
         let log = Arc::new(RequestLogStore::new(db));
         let settings = Arc::new(Settings {
             raycast_device_id: "device".into(),
@@ -226,6 +290,7 @@ mod tests {
             settings.clone(),
             accounts.clone(),
             log.clone(),
+            statistics,
         );
         let state = Arc::new(AppState::new(settings, client, accounts, log.clone()));
         let app = Router::new()
