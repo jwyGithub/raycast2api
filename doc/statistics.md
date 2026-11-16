@@ -17,7 +17,8 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| `id`、`request_id` | 尝试 ID、所属客户端请求 ID；详情按 `id` 查询 |
+| `id` | 上游调用 ID：网关每次实际向上游发送调用时生成，唯一标识一条统计记录；详情按此字段查询 |
+| `request_id` | 客户端请求 ID：网关收到客户端推理请求时生成，同一次请求的摘要、重试等上游调用共享此 ID，可用于关联请求日志 |
 | `api_key`、`api_key_masked` | 请求时使用的原始 key 与脱敏值；Bearer 优先，`x-api-key` 次之；无 key 时为 `null`。长度大于 8 时保留前后各 4 个字符，否则显示 `****` |
 | `requested_at`、`started_at`、`finished_at` | 客户端到达、尝试开始、尝试完成时间；数据库为 UTC 秒级整数，接口为 `Asia/Shanghai` 的 `YYYY-MM-DD HH:mm:ss` 字符串；未完成时 `finished_at` 为 `null` |
 | `request_ip` | 连接 IP；配置可信反向代理后可解析转发链。缺少连接信息时为 `null` |
@@ -25,7 +26,7 @@
 | `requested_model` | 客户端模型 ID（省略时为网关默认值），模型别名应用前的值 |
 | `upstream_provider`、`upstream_model` | 最终发送的请求体中的 provider 和模型，不代表上游内部降级后的实际执行模型 |
 | `requested_effort` | 客户端原始 effort 字符串，例如 `max`；缺省为 `null` |
-| `requested_thinking_json` | Messages 的原始 thinking 类型与 budget_tokens，接口返回 JSON 对象；其他情况为 `null` |
+| `requested_thinking_json` | 仅记录 Messages 请求显式传入的 thinking 类型与 budget_tokens，接口返回 JSON 对象；未传或使用其他协议时为 `null`。不记录模型返回的思考内容，推理强度另见 `requested_effort` 和 `upstream_effort` |
 | `upstream_effort` | 实际发送的 reasoning_effort，例如 `xhigh`；不发送时为 `null`。摘要会保留所属客户端原始配置，并单独记录摘要的上游配置 |
 | `call_type`、`status` | 调用类型与状态，见下表 |
 | `http_status` | 实际上游 HTTP 状态；收到 HTTP 响应前失败为 `null`。HTTP 200 流内失败仍记 200，`status` 为 `failed`，原因保存在 `error_message` |
@@ -40,7 +41,7 @@
 | `cancelled` | 调用任务、响应或流在终止事件前被丢弃，例如客户端断开 |
 | `interrupted` | SSE 没有终止事件就结束，包括 EOF、读超时、传输错误；或服务重启时发现上次未完成记录 |
 
-结算以尝试 ID 幂等更新；已完成行不会被重复回调或流释放覆盖。完整 usage 在上游解析边界采集，终止事件在交给客户端协议适配器前结算，不依赖日志内容或其截断上限。
+结算以上游调用 ID 幂等更新；已完成行不会被重复回调或流释放覆盖。完整 usage 在上游解析边界采集，终止事件在交给客户端协议适配器前结算，不依赖日志内容或其截断上限。
 
 ## 查询接口
 

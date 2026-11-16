@@ -1045,11 +1045,11 @@
                     return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5">
                         <form class="mb-4 flex shrink-0 flex-wrap items-end gap-3" @submit=${this.search}>
                             <div class="min-w-48 flex-1">
-                                <label for="log-request-id" class="mb-1 block text-xs text-muted">请求 ID</label
+                                <label for="log-request-id" class="mb-1 block text-xs text-muted">客户端请求 ID</label
                                 ><input
                                     id="log-request-id"
                                     class="h-9 w-full rounded-lg border border-line bg-white px-3 text-[13px]"
-                                    placeholder="输入完整请求 ID"
+                                    placeholder="输入完整客户端请求 ID"
                                     .value=${this.requestId}
                                     @input=${e => (this.requestId = e.target.value)}
                                 />
@@ -1085,7 +1085,7 @@
                                 </caption>
                                 <thead class="border-b border-line bg-slate-50 text-muted">
                                     <tr>
-                                        ${['请求 ID', '创建时间', '方法', '路径', '模型', '上游模型', '推理强度', '入站大小', '上游大小', '响应大小', '操作'].map(
+                                        ${['客户端请求 ID', '创建时间', '方法', '路径', '模型', '上游模型', '推理强度', '入站大小', '上游大小', '响应大小', '操作'].map(
                                             label => html`<th scope="col" class="px-3 py-3 font-medium">${label}</th>`
                                         )}
                                     </tr>
@@ -1262,7 +1262,7 @@ ${this.formatBody(this.detail?.[this.detailTab])}</pre
                 ['interrupted', '已中断', 'bg-amber-50 text-amber-700']
             ];
             const statisticFields = [
-                ['request_id', '请求 ID'],
+                ['request_id', '客户端请求 ID'],
                 ['account_email', '账号邮箱'],
                 ['requested_model', '请求模型'],
                 ['upstream_model', '上游模型'],
@@ -1427,6 +1427,10 @@ ${this.formatBody(this.detail?.[this.detailTab])}</pre
                 }
                 render() {
                     const detail = this.detail;
+                    const requestedReasoning = [
+                        detail?.requested_effort,
+                        detail?.requested_thinking_json == null ? null : JSON.stringify(detail.requested_thinking_json)
+                    ].filter(Boolean).join(' · ');
                     return html`<section class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5" aria-label="上游调用统计">
                         <form class="mb-4 shrink-0 rounded-xl border border-line bg-white p-4" @submit=${this.search}>
                             <div class="grid grid-cols-4 gap-3 max-[1100px]:grid-cols-2 max-[500px]:grid-cols-1">
@@ -1520,7 +1524,7 @@ ${this.formatBody(this.detail?.[this.detailTab])}</pre
                                     <tr>
                                         ${[
                                             '请求时间',
-                                            '请求 ID',
+                                            '客户端请求 ID',
                                             '账号',
                                             '请求模型 / 上游模型',
                                             '类型',
@@ -1627,7 +1631,7 @@ ${this.formatBody(this.detail?.[this.detailTab])}</pre
                             </div>
                         </footer>
                         <dialog
-                            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-4xl overflow-auto rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
+                            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-5xl overflow-auto rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
                             aria-labelledby="statistic-detail-title"
                             @close=${this.closeDetail}
                         >
@@ -1654,62 +1658,77 @@ ${this.formatBody(this.detail?.[this.detailTab])}</pre
                                     </div>`
                                   : detail
                                     ? html`<div class="p-5 text-xs">
-                                          <dl class="grid grid-cols-2 gap-x-6 gap-y-4 max-[600px]:grid-cols-1">
+                                          <p class="mb-4 leading-5 text-muted">一次客户端请求可能触发多次上游调用，例如重试或压缩摘要；这些调用共享客户端请求 ID，各自拥有独立的上游调用 ID。</p>
+                                          <div class="space-y-5">
                                               ${[
-                                                  ['尝试 ID', detail.id],
-                                                  ['请求 ID', detail.request_id],
-                                                  ['请求时间（北京）', detail.requested_at],
-                                                  ['开始时间（北京）', detail.started_at],
-                                                  ['完成时间（北京）', detail.finished_at],
-                                                  ['来源 IP', detail.request_ip],
-                                                  ['账号邮箱', detail.account_email],
-                                                  ['API Key（脱敏）', detail.api_key_masked],
-                                                  ['请求模型', detail.requested_model],
-                                                  ['上游模型', detail.upstream_model],
-                                                  ['上游提供方', detail.upstream_provider],
-                                                  ['HTTP 状态', detail.http_status],
-                                                  ['请求推理强度', detail.requested_effort],
-                                                  ['上游推理强度', detail.upstream_effort],
                                                   [
-                                                      '调用类型',
-                                                      detail.call_type === 'inference'
-                                                          ? '正式推理'
-                                                          : detail.call_type === 'compact'
-                                                            ? '压缩摘要'
-                                                            : detail.call_type
+                                                      '请求与来源',
+                                                      [
+                                                          ['上游调用 ID', detail.id],
+                                                          ['客户端请求 ID', detail.request_id],
+                                                          ['来源 IP', detail.request_ip],
+                                                          ['API Key（脱敏）', detail.api_key_masked]
+                                                      ]
+                                                  ],
+                                                  [
+                                                      '模型与推理',
+                                                      [
+                                                          ['请求模型', detail.requested_model],
+                                                          ['上游模型', detail.upstream_model],
+                                                          ['上游提供方', detail.upstream_provider],
+                                                          ['账号邮箱', detail.account_email],
+                                                          ['客户端推理配置', requestedReasoning || null],
+                                                          ['上游推理强度', detail.upstream_effort]
+                                                      ]
+                                                  ],
+                                                  [
+                                                      '调用结果与时间',
+                                                      [
+                                                          [
+                                                              '调用类型',
+                                                              detail.call_type === 'inference'
+                                                                  ? '正式推理'
+                                                                  : detail.call_type === 'compact'
+                                                                    ? '压缩摘要'
+                                                                    : detail.call_type
+                                                          ],
+                                                          ['调用状态', this.statusBadge(detail.status)],
+                                                          ['HTTP 状态', detail.http_status],
+                                                          ['请求时间', detail.requested_at],
+                                                          ['开始时间', detail.started_at],
+                                                          ['完成时间', detail.finished_at]
+                                                      ]
                                                   ]
                                               ].map(
-                                                  ([label, value]) =>
-                                                      html`<div>
-                                                          <dt class="text-muted">${label}</dt>
-                                                          <dd class="mt-1 break-all font-mono leading-5">${value ?? '—'}</dd>
-                                                      </div>`
+                                                  ([title, fields]) =>
+                                                      html`<section class="border-t border-line pt-4">
+                                                          <h3 class="mb-3 font-medium">${title}</h3>
+                                                          <dl class="grid grid-cols-4 gap-x-6 gap-y-4 max-[1100px]:grid-cols-3 max-[800px]:grid-cols-2 max-[500px]:grid-cols-1">
+                                                              ${fields.map(
+                                                                  ([label, value]) =>
+                                                                      html`<div class="min-w-0">
+                                                                          <dt class="text-muted">${label}</dt>
+                                                                          <dd class="mt-1 break-all font-mono leading-5">${value ?? '—'}</dd>
+                                                                      </div>`
+                                                              )}
+                                                          </dl>
+                                                      </section>`
                                               )}
-                                              <div>
-                                                  <dt class="mb-1 text-muted">调用状态</dt>
-                                                  <dd>${this.statusBadge(detail.status)}</dd>
-                                              </div>
-                                          </dl>
+                                          </div>
                                           ${detail.error_message
                                               ? html`<div class="mt-5 rounded-lg bg-red-50 p-3 text-red-700">
                                                     <h3 class="font-medium">错误 / 中断原因</h3>
                                                     <p class="mt-1 whitespace-pre-wrap break-words leading-5">${detail.error_message}</p>
                                                 </div>`
                                               : ''}
-                                          ${[
-                                              ['原始 Thinking 配置', detail.requested_thinking_json],
-                                              ['完整 Usage', detail.usage_json]
-                                          ].map(
-                                              ([label, value]) =>
-                                                  html`<h3 class="mb-2 mt-5 font-medium">${label}</h3>
-                                                      <pre
-                                                          class="overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-50 p-3 font-mono leading-5"
-                                                          tabindex="0"
-                                                          aria-label=${label}
-                                                      >
-${value == null ? '暂无记录' : JSON.stringify(value, null, 2)}</pre
-                                                      >`
-                                          )}
+                                          <h3 class="mb-2 mt-5 font-medium">完整 Usage</h3>
+                                          <pre
+                                              class="overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-50 p-3 font-mono leading-5"
+                                              tabindex="0"
+                                              aria-label="完整 Usage"
+                                          >
+${detail.usage_json == null ? '暂无记录' : JSON.stringify(detail.usage_json, null, 2)}</pre
+                                          >
                                       </div>`
                                     : ''}
                         </dialog>

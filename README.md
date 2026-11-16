@@ -283,7 +283,7 @@ curl http://localhost:8787/v1/models
 * 登录成功返回配置的 `data.api_key`，前端仅将其保存在当前页面内存中，后续接口请求通过 `Authorization: Bearer <api_key>` 携带；关闭、离开或刷新页面时清除，重新进入需再次登录。页面不会将密码或 API key 写入 localStorage / sessionStorage。
 * `dashboard_password` 只用于页面登录校验。管理与推理接口统一按 `api_key` 配置鉴权，与页面是否登录无关；未配置 `api_key` 时，登录返回 `api_key: null`，前端不发送认证头，接口保留原有免鉴权行为。
 * 页面样式与脚本通过 CDN 加载（Tailwind、GSAP、flatpickr），需要浏览器能访问 jsDelivr。
-* 统计面板支持请求 ID、账号、请求 / 上游模型、完整 API Key、状态、调用类型与请求时间范围筛选。时间统一按北京时间选择和显示；详情显示脱敏 Key、错误原因、Thinking 配置及完整 Usage。列表底部的总调用次数覆盖全部匹配记录，不代表客户端请求数；上游未上报的用量显示为 `—`。
+* 统计面板支持请求 ID、账号、请求 / 上游模型、完整 API Key、状态、调用类型与请求时间范围筛选。时间统一按北京时间选择和显示；详情显示脱敏 Key、错误原因、客户端推理配置及完整 Usage。客户端的 effort 与 thinking 参数合并展示，上游推理强度单独列出。列表底部的总调用次数覆盖全部匹配记录，不代表客户端请求数；上游未上报的用量显示为 `—`。
 
 ## 架构
 
