@@ -41,7 +41,7 @@ Claude Code、Codex 以及各类 OpenAI 兼容客户端，直接把请求打到�
 | 模型直通 | `GET /v1/models` 透出账号可用模型，并补充 Sub2API 可读取的通用元数据 |
 | 推理强度映射 | Messages 的 `output_config.effort` / `thinking`、Responses 的 `reasoning.effort` 映射到 Raycast 的 effort |
 | 请求日志 | 入站体、上游请求体、上游 SSE 响应存入 SQLite，保留 7 天自动清理 |
-| 管理控制台 | 内置 Web 页面（`GET /`），管理账号池并查看请求日志 |
+| 管理控制台 | 内置 Web 页面（`GET /`），管理账号池、查看请求日志与上游调用统计 |
 | 上游代理链 | 支持 http / https / socks5，可配置代理优先或直连优先 |
 | 访问鉴权 | `dashboard_password` 用于控制台页面登录，`api_key` 统一用于接口认证 |
 | 双栈监听 | 绑定 `0.0.0.0` 时自动同时监听 IPv6 `[::]` |
@@ -208,7 +208,7 @@ curl http://localhost:8787/v1/models
 
 日志列表与详情中的 `model` 为客户端请求的模型，`upstream_model` 为应用映射后实际发给上游的请求体中的模型。未发送上游请求、上游请求体不含模型或升级前的历史日志，该字段为 `null`。已有数据库启动时会自动补列。
 
-统计独立存储在同一个 SQLite 库的 `statistics` 表中，启动时自动建表，不受日志 7 天清理影响。每次实际上游尝试独占一条记录；摘要、换号、token 续期后重发、代理切换及断流重试通过同一个 `request_id` 关联。第一版提供采集与明细接口，仪表盘和聚合留待后续实现。
+统计独立存储在同一个 SQLite 库的 `statistics` 表中，启动时自动建表，不受日志 7 天清理影响。每次实际上游尝试独占一条记录；摘要、换号、token 续期后重发、代理切换及断流重试通过同一个 `request_id` 关联。控制台统计面板提供筛选、分页与详情；跨页聚合尚未实现。
 
 ## 配置
 
@@ -277,12 +277,13 @@ curl http://localhost:8787/v1/models
 
 ## 管理控制台
 
-浏览器访问网关根路径 `http://localhost:8787/` 即可打开内置的 **Raycast 管理控制台**，用于查看和管理账号池、翻阅请求日志。
+浏览器访问网关根路径 `http://localhost:8787/` 即可打开内置的 **Raycast 管理控制台**，用于查看和管理账号池、翻阅请求日志及上游调用统计。
 
 * 每次打开或刷新页面先显示密码弹窗，向 `POST /v1/login` 提交 `{"dashboard_password":"你的控制台密码"}`，校验成功后才加载账号和日志。需先在 `config.json` 设置非空 `dashboard_password` 并重启服务。
 * 登录成功返回配置的 `data.api_key`，前端仅将其保存在当前页面内存中，后续接口请求通过 `Authorization: Bearer <api_key>` 携带；关闭、离开或刷新页面时清除，重新进入需再次登录。页面不会将密码或 API key 写入 localStorage / sessionStorage。
 * `dashboard_password` 只用于页面登录校验。管理与推理接口统一按 `api_key` 配置鉴权，与页面是否登录无关；未配置 `api_key` 时，登录返回 `api_key: null`，前端不发送认证头，接口保留原有免鉴权行为。
 * 页面样式与脚本通过 CDN 加载（Tailwind、GSAP、flatpickr），需要浏览器能访问 jsDelivr。
+* 统计面板支持请求 ID、账号、请求 / 上游模型、完整 API Key、状态、调用类型与请求时间范围筛选。时间统一按北京时间选择和显示；详情显示脱敏 Key、错误原因、Thinking 配置及完整 Usage。列表底部的总调用次数覆盖全部匹配记录，不代表客户端请求数；上游未上报的用量显示为 `—`。
 
 ## 架构
 
