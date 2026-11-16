@@ -30,6 +30,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 time = { version = "0.3", features = ["formatting"] }
 
+# Embeds src/page/ (the management console) into the binary: files are baked in
+# for release builds and read from disk in debug builds, so adding a console
+# file needs no Rust change. `mime-guess` supplies Content-Type, `include-exclude`
+# keeps stray files such as .DS_Store out of the binary.
+rust-embed = { version = "8", features = ["mime-guess", "include-exclude"] }
+
 # Shared SQLite storage for the account store (and future modules).
 diesel = { version = "2.2", features = ["sqlite"] }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }

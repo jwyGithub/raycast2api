@@ -5,12 +5,12 @@ pub mod compact;
 pub mod handlers;
 pub mod health;
 pub mod middleware;
+pub mod page;
 pub mod pipeline;
 pub mod state;
 
 use axum::Router;
 use axum::http::Method;
-use axum::response::Html;
 use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -75,8 +75,7 @@ pub fn build_router(state: SharedState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
-        .route(
-            "/",
-            get(|| async { Html(include_str!("../page/index.html")) }),
-        )
+        // Added after the layers on purpose: console files stay outside auth,
+        // CORS, and the JSON response wrapper.
+        .fallback(page::serve)
 }

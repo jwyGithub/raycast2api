@@ -226,3 +226,70 @@ async fn api_authentication_is_independent_of_dashboard_password_and_login() {
         }
     }
 }
+
+#[tokio::test]
+async fn console_page_and_assets_are_served_without_auth() {
+    let app = app(Some("password"), Some("api-key"));
+    for (path, content_type) in [
+        ("/", "text/html"),
+        ("/style.css", "text/css"),
+        ("/utils.js", "text/javascript"),
+        ("/components.js", "text/javascript"),
+        ("/views.js", "text/javascript"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let actual = response.headers()["content-type"].to_str().unwrap();
+        assert!(actual.starts_with(content_type), "{path}: {actual}");
+        assert_eq!(response.headers()["cache-control"], "no-cache", "{path}");
+        let etag = response.headers()["etag"].clone();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(!body.is_empty(), "{path}");
+
+        // Revalidation with the ETag yields an empty 304 that keeps the cache headers.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("if-none-match", &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{path}");
+        assert_eq!(response.headers()["etag"], etag, "{path}");
+        assert_eq!(response.headers()["cache-control"], "no-cache", "{path}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty(), "{path}");
+
+        // A stale ETag still gets the full body.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("if-none-match", "\"stale\"")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+    }
+
+    // Only files under src/page are reachable; everything else falls through to 404.
+    for path in ["/missing.js", "/../Cargo.toml", "/.DS_Store"] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+}

@@ -218,6 +218,7 @@ async fn account_routes_follow_api_contract_paths_and_methods() {
 async fn root_serves_account_console_without_api_authentication() {
     let (app, _) = app();
     let response = app
+        .clone()
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -236,9 +237,25 @@ async fn root_serves_account_console_without_api_authentication() {
     let html = String::from_utf8(body.to_vec()).unwrap();
     assert!(html.contains("<title>Raycast 管理控制台</title>"));
     assert!(html.contains("<account-console"));
-    assert!(html.contains("<logs-panel"));
-    assert!(html.contains("async request(path, body, resource = 'accounts')"));
-    assert!(html.contains("'/v1/' + resource + '/' + path"));
+    assert!(html.contains("src=\"/views.js\""));
+    assert!(html.contains("href=\"/style.css\""));
+
+    // The panels and request wiring live in the module entry, also unauthenticated.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/views.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let js = String::from_utf8(body.to_vec()).unwrap();
+    assert!(js.contains("async request(path, body, resource = 'accounts')"));
+    assert!(js.contains("'/v1/' + resource + '/' + path"));
+    assert!(js.contains("customElements.define('logs-panel'"));
 }
 
 #[tokio::test]

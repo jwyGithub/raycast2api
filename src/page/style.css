@@ -1,0 +1,59 @@
+.flatpickr-calendar.raycast-calendar {
+    position: fixed;
+    margin: 0;
+    padding: 6px;
+    border: 1px solid #e4e7ec;
+    border-radius: 12px;
+    background: white;
+    color: #242933;
+    font:
+        13px/1.5 system-ui,
+        sans-serif;
+    box-shadow: 0 8px 24px #1018281a;
+    z-index: 60;
+}
+.raycast-calendar::before,
+.raycast-calendar::after {
+    display: none;
+}
+.raycast-calendar .flatpickr-day {
+    border-radius: 8px;
+}
+.raycast-calendar .flatpickr-day.selected {
+    background: #262b33;
+    border-color: #262b33;
+}
+.raycast-calendar .flatpickr-day:hover {
+    background: #f1f5f9;
+    border-color: #f1f5f9;
+    color: #242933;
+}
+.raycast-calendar .flatpickr-day:focus-visible,
+.raycast-calendar button:focus-visible {
+    outline: 2px solid #3b82f6;
+    outline-offset: -2px;
+}
+.raycast-calendar .flatpickr-time {
+    border-color: #e4e7ec;
+    margin-top: 6px;
+}
+.raycast-calendar .picker-actions {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    border-top: 1px solid #e4e7ec;
+    padding: 8px 4px 2px;
+}
+.raycast-calendar .picker-actions button {
+    cursor: pointer;
+    border: 1px solid #e4e7ec;
+    border-radius: 8px;
+    background: white;
+    padding: 6px 12px;
+    font: inherit;
+}
+.raycast-calendar .picker-actions button:last-child {
+    background: #262b33;
+    border-color: #262b33;
+    color: white;
+}

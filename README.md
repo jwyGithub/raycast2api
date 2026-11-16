@@ -331,7 +331,7 @@ src/
   server/          路由、中间件（鉴权 / 日志捕获）、handler、状态、pipeline
   log/             请求日志存储与请求关联 ID
   statistics/      上游尝试统计存储、生命周期采集与查询结构
-  page/            管理控制台（单文件 HTML）
+  page/            管理控制台前端文件（rust-embed 嵌入，新增文件无需改 Rust）
 deploy/            device_id 推导脚本（Windows .ps1 / macOS .sh）
 doc/               架构、时序图、上游协议抓包说明
 tests/             契约测试与签名一致性测试
