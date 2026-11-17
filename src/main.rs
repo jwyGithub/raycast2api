@@ -28,6 +28,7 @@ async fn main() {
     let http = reqwest::Client::builder()
         .connect_timeout(settings.upstream_timeout)
         .read_timeout(settings.upstream_timeout)
+        .pool_idle_timeout(raycast2api::config::UPSTREAM_POOL_IDLE_TIMEOUT)
         .build()
         .expect("failed to build HTTP client");
 

@@ -40,6 +40,11 @@ pub const OAUTH_CLIENT_ID: &str = "FRsHICIAlyPB_v2m4tfVqHtVUS40Ieco_da0Y6zBwgA";
 /// doc/model-degradation.md 的隔离测试)。
 pub const USER_AGENT: &str = "Raycast/2.11.0.0 (x-Windows-amd64 10.0.26100.9711)";
 
+/// 上游连接池空闲回收时间。reqwest 默认 90s,偏长:边缘/NAT 常在更早时
+/// 悄悄关掉空闲连接,复用到死连接会报 "connection closed before message
+/// completed"。取短一点,宁可多建几次连接。
+pub const UPSTREAM_POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Default model id for Messages / Responses when a request omits `model`.
 pub const DEFAULT_MODEL_ID: &str = "openai-gpt-6.1-sol";
 

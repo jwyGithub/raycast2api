@@ -63,6 +63,7 @@ impl RaycastClient {
                     .proxy(proxy)
                     .connect_timeout(settings.upstream_timeout)
                     .read_timeout(settings.upstream_timeout)
+                    .pool_idle_timeout(crate::config::UPSTREAM_POOL_IDLE_TIMEOUT)
                     .build()
                     .unwrap_or_else(|e| panic!("failed to build proxy client '{url}': {e}"));
                 (url.clone(), client)
