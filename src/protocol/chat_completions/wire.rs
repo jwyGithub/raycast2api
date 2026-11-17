@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 
 // --- Requests ------------------------------------------------------------
 
-/// Incoming `POST /v1/chat/completions` body. Unmapped fields are validated
-/// by the inbound adapter instead of silently discarding generation options.
+/// Incoming `POST /v1/chat/completions` body. Unmapped fields are captured in
+/// `extra` but not validated or forwarded: the upstream has no slot for them.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
     #[serde(default)]
@@ -71,7 +71,9 @@ pub struct InboundToolCall {
 pub struct InboundTool {
     #[serde(rename = "type")]
     pub kind: String,
-    pub function: FunctionDefinition,
+    /// Absent on non-function tools (e.g. `custom`), which the adapter skips.
+    #[serde(default)]
+    pub function: Option<FunctionDefinition>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +96,8 @@ pub enum InboundToolChoice {
         kind: String,
         function: NamedFunction,
     },
+    /// Any other shape (e.g. `custom` / `allowed_tools`); not forwarded.
+    Other(Value),
 }
 
 #[derive(Debug, Deserialize)]

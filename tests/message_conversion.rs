@@ -96,49 +96,19 @@ fn assistant_content_can_be_omitted_on_tool_turns() {
 }
 
 #[test]
-fn rejects_invalid_roles_content_and_tool_history() {
-    for messages in [
-        json!([]),
-        json!([{"role":"function","content":"hi"}]),
-        json!([{"role":"user","content":null}]),
-        json!([{"role":"assistant","content":null}]),
-        json!([{"role":"assistant","content":"hello","tool_calls":[]}]),
-        json!([{"role":"user","content":[]}]),
-        json!([{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}]),
-        json!([{"role":"user","content":[{"type":"text"}]}]),
-        json!([{"role":"tool","content":"x"}]),
-        json!([{"role":"tool","tool_call_id":"unknown","content":"x"}]),
-        json!([{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"run","arguments":"{}"}}]}]),
-        json!([
-            {"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"run","arguments":"{}"}}]},
-            {"role":"user","content":"skip"}
-        ]),
-        json!([
-            {"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"run","arguments":"{}"}}]},
-            {"role":"tool","tool_call_id":"a","name":"wrong","content":"x"}
-        ]),
-        json!([
-            {"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"run","arguments":"{}"}}]},
-            {"role":"tool","tool_call_id":"a","content":"x"},
-            {"role":"tool","tool_call_id":"a","content":"x"}
-        ]),
-    ] {
-        assert!(
-            parse(json!({"model":"m","messages":messages})).is_err(),
-            "accepted {messages}"
-        );
-    }
+fn only_unroutable_requests_are_rejected_locally() {
+    // `model` and a known role are the only things the gateway itself needs.
+    assert!(parse(json!({"messages":[{"role":"user","content":"hi"}]})).is_err());
+    assert!(parse(json!({"model":" ","messages":[{"role":"user","content":"hi"}]})).is_err());
+    assert!(parse(json!({"model":"m","messages":[{"role":"function","content":"hi"}]})).is_err());
 }
 
 #[test]
-fn rejects_missing_model_and_unsupported_parameters_instead_of_ignoring_them() {
-    assert!(parse(json!({"messages":[{"role":"user","content":"hi"}]})).is_err());
+fn passes_requests_through_without_validating_options_or_history() {
     for (key, value) in [
-        ("model", json!(" ")),
         ("temperature", json!(2.1)),
         ("reasoning_effort", json!("invalid")),
         ("max_tokens", json!(10)),
-        ("max_completion_tokens", json!(10)),
         ("stop", json!(["END"])),
         ("top_p", json!(0.9)),
         ("n", json!(2)),
@@ -146,6 +116,7 @@ fn rejects_missing_model_and_unsupported_parameters_instead_of_ignoring_them() {
         ("parallel_tool_calls", json!(false)),
         ("stream_options", json!({"include_usage":true})),
         ("tool_choice", json!("required")),
+        ("tool_choice", json!({"type":"custom","custom":{"name":"x"}})),
         (
             "tool_choice",
             json!({"type":"function","function":{"name":"missing"}}),
@@ -158,15 +129,49 @@ fn rejects_missing_model_and_unsupported_parameters_instead_of_ignoring_them() {
             "tools",
             json!([{"type":"function","function":{"name":"bad name"}}]),
         ),
-        (
-            "tools",
-            json!([{"type":"function","function":{"name":"run","parameters":[]}}]),
-        ),
+        ("tools", json!([{"type":"custom","custom":{"name":"x"}}])),
     ] {
         let mut body = json!({"model":"m","messages":[{"role":"user","content":"hi"}]});
         body[key] = value;
-        assert!(parse(body.clone()).is_err(), "accepted {body}");
+        assert!(parse(body.clone()).is_ok(), "rejected {body}");
     }
+    for messages in [
+        json!([]),
+        json!([{"role":"user","content":null}]),
+        json!([{"role":"assistant","content":"hello","tool_calls":[]}]),
+        json!([{"role":"user","content":[]}]),
+        json!([{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}]),
+        json!([{"role":"tool","content":"x"}]),
+        json!([{"role":"tool","tool_call_id":"unknown","content":"x"}]),
+        json!([{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"run","arguments":"{}"}}]}]),
+        json!([{"role":"user","content":"hi","metadata":{"k":"v"}}]),
+    ] {
+        assert!(
+            parse(json!({"model":"m","messages":messages})).is_ok(),
+            "rejected {messages}"
+        );
+    }
+}
+
+#[test]
+fn non_text_parts_are_dropped_and_text_parts_kept() {
+    let canonical = parse(json!({"model":"m","messages":[{"role":"user","content":[
+        {"type":"text","text":"look: "},
+        {"type":"image_url","image_url":{"url":"https://example.com/a.png"}},
+        {"type":"text","text":"ok"}
+    ]}]}))
+    .unwrap();
+    assert_eq!(canonical.messages[0].text, "look: ok");
+}
+
+#[test]
+fn tool_result_name_falls_back_to_the_matching_call() {
+    let canonical = parse(json!({"model":"m","messages":[
+        {"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"run","arguments":"{}"}}]},
+        {"role":"tool","tool_call_id":"a","content":"done"}
+    ]}))
+    .unwrap();
+    assert_eq!(canonical.messages[1].tool_name.as_deref(), Some("run"));
 }
 
 #[test]
