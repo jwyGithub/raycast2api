@@ -186,7 +186,36 @@ impl std::error::Error for GatewayError {}
 
 impl From<reqwest::Error> for GatewayError {
     fn from(e: reqwest::Error) -> Self {
-        GatewayError::Internal(format!("upstream request error: {e}"))
+        use std::error::Error as _;
+        // reqwest 的 Display 只给最外层("error sending request for url ..."),
+        // 沿 source() 走到底,才能看到 dns / tcp connect / tls 等真实根因。
+        let mut message = format!("upstream request error: {e}");
+        let mut source = e.source();
+        while let Some(cause) = source {
+            message.push_str(&format!(": {cause}"));
+            source = cause.source();
+        }
+        GatewayError::Internal(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GatewayError;
+
+    #[tokio::test]
+    async fn reqwest_error_keeps_source_chain() {
+        let e = reqwest::Client::new()
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .unwrap_err();
+        let head = format!("upstream request error: {e}");
+        let GatewayError::Internal(message) = GatewayError::from(e) else {
+            panic!("expected Internal");
+        };
+        assert!(message.len() > head.len(), "chain missing: {message}");
+        println!("{message}");
     }
 }
 
