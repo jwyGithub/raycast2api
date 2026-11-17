@@ -184,18 +184,21 @@ impl std::fmt::Display for GatewayError {
 
 impl std::error::Error for GatewayError {}
 
+/// reqwest 的 Display 只给最外层("error sending request for url ..."),
+/// 沿 `source()` 走到底,才能看到 dns / tcp connect / tls 等真实根因。
+pub(crate) fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        message.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    message
+}
+
 impl From<reqwest::Error> for GatewayError {
     fn from(e: reqwest::Error) -> Self {
-        use std::error::Error as _;
-        // reqwest 的 Display 只给最外层("error sending request for url ..."),
-        // 沿 source() 走到底,才能看到 dns / tcp connect / tls 等真实根因。
-        let mut message = format!("upstream request error: {e}");
-        let mut source = e.source();
-        while let Some(cause) = source {
-            message.push_str(&format!(": {cause}"));
-            source = cause.source();
-        }
-        GatewayError::Internal(message)
+        GatewayError::Internal(format!("upstream request error: {}", error_chain(&e)))
     }
 }
 

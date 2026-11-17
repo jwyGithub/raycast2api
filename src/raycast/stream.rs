@@ -152,17 +152,28 @@ fn decode_events(
         // 已打印过的通知数:每次增量打印新通知,避免重复刷屏。
         let mut seen_notifications = 0;
 
-        while let Ok(Some(chunk)) = tokio::time::timeout(timeout, bytes.next()).await {
+        // 读循环的退出原因:EOF / 读超时 / 传输错误,断流时写进日志和 attempt。
+        let mut exit_reason = String::from("EOF (upstream closed the connection)");
+        loop {
+            let chunk = match tokio::time::timeout(timeout, bytes.next()).await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(_) => {
+                    exit_reason = format!("read timeout (no data for {}s)", timeout.as_secs());
+                    break;
+                }
+            };
             let Ok(chunk) = chunk else {
                 // 上游传输层断连(连接重置/代理掐断):流没有 error payload、
                 // 没有 finish 就直接没了。必须留痕,否则排查时终端日志
                 // 看起来像"正常结束但没内容"。
-                let err = chunk.unwrap_err();
+                let err = crate::error::error_chain(&chunk.unwrap_err());
                 tracing::error!(
                     "⇈ upstream transport error [{id}]: {err} — stream ended \
                      prematurely after {} payloads (no finish_reason seen)",
                     payloads.len()
                 );
+                exit_reason = format!("transport error: {err}");
                 break;
             };
             for payload in decoder.push_bytes(&chunk) {
@@ -248,11 +259,14 @@ fn decode_events(
         // `response.failed` 而不是谎报 completed)。
         if !stream_terminated {
             if let Some(attempt) = &attempt {
-                attempt.finish("interrupted", Some("upstream stream ended without a terminal event (EOF, transport error or read timeout)"));
+                attempt.finish(
+                    "interrupted",
+                    Some(&format!("upstream stream ended without a terminal event: {exit_reason}")),
+                );
             }
             tracing::error!(
-                "⇈ upstream stream ended without finish [{id}] — synthesizing \
-                 error event (payloads={})",
+                "⇈ upstream stream ended without finish [{id}]: {exit_reason} — \
+                 synthesizing error event (payloads={})",
                 payloads.len()
             );
             log.update_response(&id, &payloads.join("\n"));
@@ -350,6 +364,11 @@ mod tests {
             .find(|row| row.account_email == "first@example.com")
             .unwrap();
         assert_eq!(interrupted.status, "interrupted");
+        assert!(
+            interrupted.error_message.as_deref().unwrap().contains("EOF"),
+            "{:?}",
+            interrupted.error_message
+        );
         assert!(interrupted.usage_json.is_none());
         let completed = page
             .items
@@ -360,6 +379,43 @@ mod tests {
         assert!(completed.usage_json.is_some());
         assert_eq!(interrupted.request_id, completed.request_id);
         assert_eq!(completed.call_type, "compact");
+    }
+
+    #[tokio::test]
+    async fn read_timeout_is_reported_as_exit_reason() {
+        let state = crate::server::state::compact_test_state();
+        let request = crate::core::request::CanonicalRequest::new(
+            crate::core::protocol::Protocol::Responses,
+            "client",
+        );
+        let upstream = crate::raycast::builder::build_chat_request(&request, "openai", "upstream");
+        let call = crate::statistics::CallContext::new(&request, &upstream, "inference");
+        let attempt =
+            crate::statistics::Attempt::start(state.statistics.clone(), &call, "slow@example.com")
+                .unwrap();
+        let mut stalled = reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(200)
+                .body(reqwest::Body::wrap_stream(futures_util::stream::pending::<
+                    Result<axum::body::Bytes, std::io::Error>,
+                >()))
+                .unwrap(),
+        );
+        attempt.set_http_status(200);
+        stalled.extensions_mut().insert(attempt);
+        // 超时后会重发一次;让重发返回 Err,保持测试只关心首个 attempt。
+        let events: Vec<_> = retry_once(
+            stalled,
+            state.log.clone(),
+            std::time::Duration::from_millis(50),
+            || Box::pin(async { Err(GatewayError::Internal("no retry".into())) }),
+        )
+        .collect()
+        .await;
+        assert!(matches!(events.last(), Some(CanonicalEvent::Error { .. })));
+        let page = state.statistics.list(&Default::default()).unwrap();
+        let message = page.items[0].error_message.as_deref().unwrap();
+        assert!(message.contains("read timeout"), "{message}");
     }
 
     #[tokio::test]
