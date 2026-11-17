@@ -87,7 +87,7 @@
 ### 5.2 网关的感知与处理(`src/raycast/stream.rs`)
 
 1. **传输错误留痕**:`bytes_stream()` 报错时打 `ERROR ⇈ upstream transport error [id]`,带具体错误与已收 payload 数(此前为静默 break,排查时无迹可循);
-2. **断流合成错误**:流结束但从未出现 Finish/Error 事件时,打 `ERROR ⇈ upstream stream ended without finish`,并合成 `CanonicalEvent::Error { status: 502 }` 下发;
+2. **断流恢复与报错**:流结束但从未出现 Finish/Error 事件时,打 `ERROR ⇈ upstream stream ended without finish`。仅在尚未输出正文、思考、签名或工具调用时原样重试一次;空 payload 与 ping 不算有效输出。已有输出则保留部分内容并下发 `CanonicalEvent::Error { status: 502 }`,提示客户端发起新请求继续;第二次仍断流也报错。
 3. **通知上终端**:SSE 通知增量以 WARN 打印:`⇈ upstream notification [id]: No valid Advanced AI subscription...`。
 
 ### 5.3 客户端可见性
@@ -101,6 +101,21 @@
 | `POST /v1/chat/completions` | `data: {"error": {...}}` 帧 |
 
 (修复前的行为:断流被当作正常结束,Responses 端发出 `response.completed`,客户端拿到半截内容且空 usage,连重试都不会触发。)
+
+### 5.4 2026-11-17 Gemini 长回复中断
+
+通过 `/v1/logs/detail` 与 `/v1/statistics/list` 核对以下请求,时间为 Asia/Shanghai:
+
+| 请求 ID | 首次上游调用 | 后续自动重试 |
+| --- | --- | --- |
+| `01M7KN2F5XJNGBHFN06QQADWMA` | 10:23:43—10:28:44,301 秒,interrupted | 10:28:44—10:28:49,5 秒,cancelled |
+| `01M7KNDRXMEXN3GQDMFC3BCR3X` | 10:29:53—10:34:55,302 秒,interrupted | 10:34:55—10:35:06,11 秒,cancelled |
+
+两次均为 `gemini-4-carbon`、high effort,响应包含部分代码且无 `finish_reason`、流内 error 或模型降级通知。第二个入站请求包含上一轮部分代码及用户的继续指令,说明客户端续写历史已传到上游。两次原始 SSE 均记录了 59 个 ping。
+
+旧网关遇到断流后原样重发整个请求,再逐字比较已经下发的所有事件。重新生成的正文、思考、签名或工具调用不保证一致,因此会触发 `upstream SSE retry prefix differs`。这条消息是恢复失败的次生错误,首次断流发生在它之前;自动重试被网关终止后统计会显示 cancelled,不能据此认定客户端主动取消。
+
+两次首次调用均在约 300 秒后结束,提示上游服务或中间代理可能有总时长限制;日志接口只记录了统一的 EOF/传输错误/读超时原因,不足以确定具体节点。当前网关没有 300 秒流式总时长设置,`upstream_timeout_secs` 限制的是等待下一个 chunk 的空闲时间。修复仅移除已输出内容后的自动重放及前缀比较,不会消除外部链路的中断。
 
 ## 6. 如何复测
 

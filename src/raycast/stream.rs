@@ -8,13 +8,12 @@
 //! non-streaming aggregation alike — observes exactly the same event sequence.
 //!
 //! Missing terminal events are distinguished from explicit upstream errors so
-//! callers can retry a truncated response once without replaying delivered output.
+//! callers can retry a truncated response once, but only before any output is delivered.
 
 use super::{client::RaycastClient, wire::RaycastChatRequest};
 use crate::error::GatewayError;
 use async_stream::stream;
 use futures_util::{Stream, StreamExt, future::BoxFuture};
-use std::collections::VecDeque;
 
 use crate::core::event::CanonicalEvent;
 use crate::log::context as debug;
@@ -26,7 +25,7 @@ use super::sse::SseDecoder;
 
 use std::sync::Arc;
 
-/// Retry only unexpected SSE truncation, using the exact same upstream body.
+/// Retry unexpected SSE truncation once only if no output has been delivered.
 pub(crate) fn canonical_events_with_retry(
     response: reqwest::Response,
     client: RaycastClient,
@@ -48,7 +47,7 @@ pub(crate) fn canonical_events_with_retry(
 fn premature_error() -> CanonicalEvent {
     CanonicalEvent::Error {
         status: 502,
-        message: "upstream stream ended prematurely (connection closed without finish_reason; likely dropped by proxy or upstream)".into(),
+        message: "upstream stream ended prematurely without finish_reason; any partial output has been preserved. Send a new request to continue.".into(),
     }
 }
 
@@ -63,22 +62,14 @@ fn retry_once(
     let id = debug::current_request_id();
     let first = decode_events(response, log.clone(), timeout);
     stream! {
-        let mut delivered = VecDeque::new();
-        let mut delivered_bytes = 0usize;
-        let mut can_retry = true;
+        let mut output_started = false;
         let mut first = std::pin::pin!(first);
         let mut truncated = false;
         while let Some(result) = first.next().await {
             match result {
                 Ok(event) => {
                     let terminal = matches!(event, CanonicalEvent::Finish { .. } | CanonicalEvent::Error { .. });
-                    delivered_bytes += match &event {
-                        CanonicalEvent::TextDelta(s) | CanonicalEvent::ReasoningDelta(s) | CanonicalEvent::ThoughtSignature(s) => s.len(),
-                        CanonicalEvent::ToolCall(call) => call.id.len() + call.name.len() + call.arguments.len(),
-                        _ => 0,
-                    };
-                    if delivered_bytes > 2 * 1024 * 1024 || delivered.len() >= 16_384 { can_retry = false; delivered.clear(); }
-                    if can_retry { delivered.push_back(event.clone()); }
+                    output_started = true;
                     yield event;
                     if terminal { return; }
                 }
@@ -86,13 +77,18 @@ fn retry_once(
             }
         }
         if !truncated { return; }
-        if !can_retry { yield premature_error(); return; }
-        tracing::warn!("upstream SSE truncated [{id}] — retrying identical request once");
+        // Replaying generation cannot reliably reproduce text, reasoning, signatures or tool calls.
+        if output_started {
+            tracing::warn!("upstream SSE truncated after output started [{id}] — preserving partial output, not retrying");
+            yield premature_error();
+            return;
+        }
+        tracing::warn!("upstream SSE truncated before output [{id}] — retrying identical request once");
         let retry_started = std::time::Instant::now();
-        tracing::trace!(request_id = %id, attempt = 1, max_retries = 1, delivered_events = delivered.len(), "SSE retry: sending identical request");
+        tracing::trace!(request_id = %id, attempt = 1, max_retries = 1, "SSE retry: sending identical request before any output");
         let response = match resend().await {
             Ok(response) => {
-                tracing::trace!(request_id = %id, attempt = 1, status = %response.status(), elapsed_ms = retry_started.elapsed().as_millis(), "SSE retry: response received, checking delivered prefix");
+                tracing::trace!(request_id = %id, attempt = 1, status = %response.status(), elapsed_ms = retry_started.elapsed().as_millis(), "SSE retry: response received");
                 response
             }
             Err(error) => {
@@ -119,71 +115,12 @@ fn retry_once(
                 yield event;
                 return;
             }
-            let checking_prefix = !delivered.is_empty();
-            match skip_delivered(&mut delivered, event) {
-                Ok(Some(event)) => {
-                    if checking_prefix {
-                        tracing::trace!(request_id = %id, attempt = 1, "SSE retry: delivered prefix matched, forwarding new output");
-                    }
-                    let terminal = matches!(event, CanonicalEvent::Finish { .. });
-                    if terminal {
-                        tracing::trace!(request_id = %id, attempt = 1, elapsed_ms = retry_started.elapsed().as_millis(), "SSE retry: completed successfully");
-                    }
-                    yield event;
-                    if terminal { return; }
-                }
-                Ok(None) => {
-                    tracing::trace!(request_id = %id, attempt = 1, remaining_events = delivered.len(), "SSE retry: skipped matching prefix chunk");
-                    if checking_prefix && delivered.is_empty() {
-                        tracing::trace!(request_id = %id, attempt = 1, "SSE retry: delivered prefix matched, waiting for new output");
-                    }
-                }
-                Err(()) => {
-                    tracing::trace!(request_id = %id, attempt = 1, remaining_events = delivered.len(), elapsed_ms = retry_started.elapsed().as_millis(), "SSE retry: prefix mismatch, no retries remaining");
-                    tracing::error!("upstream SSE retry prefix differs [{id}] — request failed");
-                    yield CanonicalEvent::Error {
-                        status: 502,
-                        message: "upstream SSE retry differed from output already delivered; cannot safely resume".into(),
-                    };
-                    return;
-                }
+            let terminal = matches!(event, CanonicalEvent::Finish { .. });
+            if terminal {
+                tracing::trace!(request_id = %id, attempt = 1, elapsed_ms = retry_started.elapsed().as_millis(), "SSE retry: completed successfully");
             }
-        }
-    }
-}
-
-/// Compare ordered events while allowing different text/reasoning chunk sizes.
-fn skip_delivered(
-    delivered: &mut VecDeque<CanonicalEvent>,
-    mut event: CanonicalEvent,
-) -> Result<Option<CanonicalEvent>, ()> {
-    loop {
-        let Some(expected) = delivered.front_mut() else {
-            return Ok(Some(event));
-        };
-        match (expected, &mut event) {
-            (CanonicalEvent::TextDelta(expected), CanonicalEvent::TextDelta(actual))
-            | (CanonicalEvent::ReasoningDelta(expected), CanonicalEvent::ReasoningDelta(actual)) => {
-                let matched = expected.len().min(actual.len());
-                if expected.as_bytes()[..matched] != actual.as_bytes()[..matched] {
-                    return Err(());
-                }
-                expected.drain(..matched);
-                actual.drain(..matched);
-                let consumed = expected.is_empty();
-                let exhausted = actual.is_empty();
-                if consumed {
-                    delivered.pop_front();
-                }
-                if exhausted {
-                    return Ok(None);
-                }
-            }
-            (expected, actual) if expected == actual => {
-                delivered.pop_front();
-                return Ok(None);
-            }
-            _ => return Err(()),
+            yield event;
+            if terminal { return; }
         }
     }
 }
@@ -331,15 +268,12 @@ fn decode_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        core::{message::ToolCall, response::FinishReason, usage::Usage},
-        db::Db,
-    };
+    use crate::{core::message::ToolCall, db::Db};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
-    async fn output_over_retry_budget_never_replays_request() {
+    async fn large_output_is_preserved_without_retry() {
         let text = "x".repeat(2 * 1024 * 1024 + 1);
         let events: Vec<_> = retry_once(
             response(&[json!({"text":text})]),
@@ -349,6 +283,7 @@ mod tests {
         )
         .collect()
         .await;
+        assert_eq!(events[0], CanonicalEvent::TextDelta(text));
         assert!(matches!(
             events.last(),
             Some(CanonicalEvent::Error { status: 502, .. })
@@ -389,7 +324,7 @@ mod tests {
         let first =
             crate::statistics::Attempt::start(state.statistics.clone(), &call, "first@example.com")
                 .unwrap();
-        let mut first_response = response(&[json!({"text":"partial"})]);
+        let mut first_response = response(&[]);
         first.set_http_status(200);
         first_response.extensions_mut().insert(first);
         let second =
@@ -428,14 +363,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_truncation_once_and_skips_prefix_across_chunk_boundaries() {
+    async fn retries_truncation_before_output_once_ignoring_empty_payloads_and_pings() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let retried = attempts.clone();
         let events: Vec<_> = retry_once(
             response(&[
-                json!({"reasoning":"思考"}),
-                json!({"text":"你好"}),
-                json!({"text":"世界"}),
+                json!({"reasoning":"", "text":""}),
+                json!({"notification_type":"ping", "text":""}),
             ]),
             log(),
             std::time::Duration::from_secs(20),
@@ -458,10 +392,10 @@ mod tests {
         assert_eq!(
             &events[..4],
             &[
-                CanonicalEvent::ReasoningDelta("思考".into()),
-                text("你好"),
-                text("世界"),
-                text("！")
+                CanonicalEvent::ReasoningDelta("思".into()),
+                CanonicalEvent::ReasoningDelta("考".into()),
+                text("你"),
+                text("好世界！")
             ]
         );
         assert!(
@@ -493,35 +427,53 @@ mod tests {
     #[tokio::test]
     async fn second_truncation_is_failure_without_third_attempt() {
         let events: Vec<_> = retry_once(
-            response(&[json!({"text":"A"})]),
+            response(&[]),
             log(),
             std::time::Duration::from_secs(20),
             || Box::pin(async { Ok(response(&[json!({"text":"AB"})])) }),
         )
         .collect()
         .await;
-        assert_eq!(&events[..2], &[text("A"), text("B")]);
+        assert_eq!(events[0], text("AB"));
         assert!(
             matches!(events.last(), Some(CanonicalEvent::Error { status: 502, message }) if message.contains("prematurely"))
         );
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 2);
     }
 
     #[tokio::test]
-    async fn retry_divergence_or_shorter_answer_fails_before_emitting_bad_content() {
-        for payload in ["AX", "A"] {
+    async fn any_delivered_content_prevents_retry_and_preserves_partial_output() {
+        for (payload, expected) in [
+            (json!({"text":"半截代码"}), text("半截代码")),
+            (
+                json!({"reasoning":"thinking"}),
+                CanonicalEvent::ReasoningDelta("thinking".into()),
+            ),
+            (
+                json!({"extra_content":{"anthropic":{"thought_signature":"sig"}}}),
+                CanonicalEvent::ThoughtSignature("sig".into()),
+            ),
+            (
+                json!({"tool_calls":[{"id":"call_1","name":"edit","arguments":"{}"}]}),
+                CanonicalEvent::ToolCall(ToolCall {
+                    id: "call_1".into(),
+                    name: "edit".into(),
+                    arguments: "{}".into(),
+                }),
+            ),
+        ] {
             let events: Vec<_> = retry_once(
-                response(&[json!({"text":"AB"})]),
+                response(&[payload]),
                 log(),
                 std::time::Duration::from_secs(20),
-                move || Box::pin(async move { Ok(response(&[json!({"text":payload}), finish()])) }),
+                || panic!("delivered content must never be replayed"),
             )
             .collect()
             .await;
             assert_eq!(events.len(), 2);
-            assert_eq!(events[0], text("AB"));
+            assert_eq!(events[0], expected);
             assert!(
-                matches!(&events[1], CanonicalEvent::Error { status: 502, message } if message.contains("differed"))
+                matches!(&events[1], CanonicalEvent::Error { status: 502, message } if message.contains("prematurely") && message.contains("continue"))
             );
         }
     }
@@ -551,39 +503,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tools_signatures_and_event_order_must_match_exactly() {
-        let call = CanonicalEvent::ToolCall(ToolCall {
-            id: "call_1".into(),
-            name: "edit".into(),
-            arguments: "{}".into(),
-        });
-        let signature = CanonicalEvent::ThoughtSignature("signature".into());
-        let mut delivered = VecDeque::from([signature.clone(), call.clone()]);
-        assert_eq!(skip_delivered(&mut delivered, signature), Ok(None));
-        assert_eq!(skip_delivered(&mut delivered, call.clone()), Ok(None));
-        assert!(delivered.is_empty());
-        let mut delivered = VecDeque::from([call]);
-        assert_eq!(
-            skip_delivered(
-                &mut delivered,
-                CanonicalEvent::ToolCall(ToolCall {
-                    id: "different".into(),
-                    name: "edit".into(),
-                    arguments: "{}".into()
-                })
-            ),
-            Err(())
-        );
-        let mut delivered = VecDeque::from([text("A")]);
-        assert_eq!(
-            skip_delivered(&mut delivered, CanonicalEvent::ReasoningDelta("A".into())),
-            Err(())
-        );
-    }
-
     #[tokio::test]
-    async fn transport_error_is_retried_and_request_id_is_preserved() {
+    async fn transport_error_after_output_preserves_partial_log_and_request_id_without_retry() {
         let bytes = futures_util::stream::iter(vec![
             Ok(axum::body::Bytes::from_static(
                 b"data: {\"text\":\"A\"}\n\n",
@@ -607,15 +528,71 @@ mod tests {
                     first,
                     store.clone(),
                     std::time::Duration::from_secs(20),
-                    || Box::pin(async { Ok(response(&[json!({"text":"AB"}), finish()])) }),
+                    || panic!("transport errors after output must not replay the request"),
                 )
             })
             .await;
         let events: Vec<_> = events.collect().await;
-        assert_eq!(&events[..2], &[text("A"), text("B")]);
-        assert!(matches!(events.last(), Some(CanonicalEvent::Finish { .. })));
+        assert_eq!(events, vec![text("A"), premature_error()]);
         let detail = store.detail("retry-id").unwrap();
-        assert!(detail.response_text.unwrap().contains("AB"));
+        assert_eq!(detail.response_text.unwrap(), r#"{"text":"A"}"#);
+    }
+
+    #[tokio::test]
+    async fn read_timeout_retries_only_before_output_and_preserves_request_id() {
+        for partial in [false, true] {
+            let chunk = if partial {
+                "data: {\"text\":\"A\"}\n\n"
+            } else {
+                "data: {\"notification_type\":\"ping\"}\n\n"
+            };
+            let bytes = futures_util::stream::iter([Ok::<_, std::io::Error>(
+                axum::body::Bytes::from(chunk),
+            )])
+            .chain(futures_util::stream::pending());
+            let first = reqwest::Response::from(
+                axum::http::Response::builder()
+                    .status(200)
+                    .body(reqwest::Body::wrap_stream(bytes))
+                    .unwrap(),
+            );
+            let store = log();
+            store.insert_request("timeout-id", "POST", "/v1/responses", &json!({}));
+            let events = debug::REQUEST_ID
+                .scope("timeout-id".into(), async {
+                    retry_once(
+                        first,
+                        store.clone(),
+                        std::time::Duration::from_millis(5),
+                        move || {
+                            Box::pin(async move {
+                                assert!(!partial, "read timeout after output must not retry");
+                                Ok(response(&[json!({"text":"recovered"}), finish()]))
+                            })
+                        },
+                    )
+                })
+                .await;
+            let events: Vec<_> = events.collect().await;
+            if partial {
+                assert_eq!(events, vec![text("A"), premature_error()]);
+                assert_eq!(
+                    store.detail("timeout-id").unwrap().response_text.unwrap(),
+                    r#"{"text":"A"}"#
+                );
+            } else {
+                assert_eq!(events[0], text("recovered"));
+                assert!(matches!(events.last(), Some(CanonicalEvent::Finish { .. })));
+                assert!(
+                    store
+                        .detail("timeout-id")
+                        .unwrap()
+                        .response_text
+                        .unwrap()
+                        .contains("recovered")
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -631,33 +608,22 @@ mod tests {
         drop(events);
     }
 
-    #[test]
-    fn matching_complete_prefix_allows_finish() {
-        let mut delivered = VecDeque::from([text("A")]);
-        assert_eq!(skip_delivered(&mut delivered, text("A")), Ok(None));
-        let finish = CanonicalEvent::Finish {
-            reason: FinishReason::Stop,
-            usage: Usage::default(),
-        };
-        assert_eq!(
-            skip_delivered(&mut delivered, finish.clone()),
-            Ok(Some(finish))
-        );
-    }
     #[tokio::test]
-    async fn responses_adapter_completes_recovered_stream_and_fails_diverged_stream() {
+    async fn responses_adapter_completes_retry_before_output_and_reports_partial_stream_failure() {
         use crate::protocol::{OutboundAdapter, responses::ResponsesOutbound};
-        for divergent in [false, true] {
+        for partial in [false, true] {
             let events = retry_once(
-                response(&[json!({"text":"A"})]),
+                response(&if partial {
+                    vec![json!({"text":"A"})]
+                } else {
+                    vec![]
+                }),
                 log(),
                 std::time::Duration::from_secs(20),
                 move || {
                     Box::pin(async move {
-                        Ok(response(&[
-                            json!({"text": if divergent { "X" } else { "AB" }}),
-                            finish(),
-                        ]))
+                        assert!(!partial, "partial output must not be replayed");
+                        Ok(response(&[json!({"text":"AB"}), finish()]))
                     })
                 },
             );
@@ -672,9 +638,20 @@ mod tests {
                 .map(|s| serde_json::from_str(s).unwrap())
                 .collect();
             let terminal = frames.last().unwrap();
-            if divergent {
+            if partial {
                 assert_eq!(terminal["type"], "response.failed");
                 assert!(!frames.iter().any(|f| f["type"] == "response.completed"));
+                assert!(
+                    frames
+                        .iter()
+                        .any(|f| f["type"] == "response.output_text.delta" && f["delta"] == "A")
+                );
+                assert!(
+                    terminal["response"]["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("continue")
+                );
             } else {
                 assert_eq!(terminal["type"], "response.completed");
                 assert_eq!(
