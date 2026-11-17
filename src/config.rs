@@ -40,14 +40,8 @@ pub const OAUTH_CLIENT_ID: &str = "FRsHICIAlyPB_v2m4tfVqHtVUS40Ieco_da0Y6zBwgA";
 /// doc/model-degradation.md 的隔离测试)。
 pub const USER_AGENT: &str = "Raycast/2.11.0.0 (x-Windows-amd64 10.0.26100.9711)";
 
-/// Default OpenAI-facing model id used when a request omits `model`.
+/// Default model id for Messages / Responses when a request omits `model`.
 pub const DEFAULT_MODEL_ID: &str = "openai-gpt-6.1-sol";
-
-/// Fallback provider when a requested model id can't be resolved.
-pub const DEFAULT_PROVIDER: &str = "openai";
-
-/// Fallback upstream model when a requested model id can't be resolved.
-pub const DEFAULT_INTERNAL_MODEL: &str = "gpt-6.1-sol";
 
 /// 限额账号冷却缺省时长(秒):上游未给 `retry_after` 时使用。
 pub const DEFAULT_COOLDOWN_SECS: u64 = 600;

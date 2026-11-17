@@ -7,10 +7,13 @@
 //! change.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 // --- Requests ------------------------------------------------------------
 
-/// Incoming `POST /v1/chat/completions` body. Extra fields are ignored.
+/// Incoming `POST /v1/chat/completions` body. Unmapped fields are validated
+/// by the inbound adapter instead of silently discarding generation options.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
     #[serde(default)]
@@ -22,15 +25,88 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub stream: bool,
     #[serde(default)]
-    pub reasoning_effort: Option<serde_json::Value>,
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub tools: Option<Vec<InboundTool>>,
+    #[serde(default)]
+    pub tool_choice: Option<InboundToolChoice>,
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
-/// A chat message. `content` is a plain string (the common case); richer
-/// multi-part content is a possible future extension.
+/// Text messages and function-tool history supported by the upstream.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    #[serde(default)]
+    pub content: Option<Content>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<InboundToolCall>>,
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Content {
+    Text(String),
+    Parts(Vec<Value>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InboundToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InboundTool {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: FunctionDefinition,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FunctionDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub parameters: Option<Value>,
+    #[serde(default)]
+    pub strict: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum InboundToolChoice {
+    Mode(String),
+    Named {
+        #[serde(rename = "type")]
+        kind: String,
+        function: NamedFunction,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NamedFunction {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    pub include_usage: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 // --- Non-streaming response ---------------------------------------------
@@ -55,8 +131,7 @@ pub struct Choice {
 #[derive(Debug, Serialize)]
 pub struct AssistantMessage {
     pub role: &'static str,
-    /// The assistant text, or `null` on a tool-call turn (OpenAI carries a null
-    /// `content` alongside `tool_calls`).
+    /// Assistant text, or `null` on a tool-call-only turn.
     pub content: Option<String>,
     /// Tool calls the model requested; omitted entirely on a plain-text turn so
     /// the original text response stays byte-identical.
@@ -74,7 +149,7 @@ pub struct ToolCall {
 }
 
 /// The `function` payload shared by [`ToolCall`] and [`ToolCallDelta`].
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FunctionCall {
     pub name: String,
     /// The raw JSON arguments string the model emitted, forwarded verbatim.
@@ -165,9 +240,8 @@ pub struct ChatCompletionChunk {
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChunkChoice>,
-    /// Token usage, carried only on the final streaming chunk (which has an
-    /// empty `choices` array). Omitted on every other chunk so the content /
-    /// tool-call / finish chunks stay byte-identical to before.
+    /// Populated on the optional final usage chunk (empty choices). The
+    /// outbound adapter adds usage: null to normal chunks only when requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
 }

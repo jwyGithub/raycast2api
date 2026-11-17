@@ -123,18 +123,20 @@ impl AppState {
 
     /// Resolve an OpenAI-facing model id to `(provider, internal_model)`,
     /// applying the configured `model_overrides` aliases first, then looking up
-    /// the upstream model list, falling back to the configured defaults.
+    /// the upstream model list. Unknown models are rejected before inference.
     pub async fn resolve_model(
         &self,
         requested_id: &str,
     ) -> Result<(String, String), GatewayError> {
+        let client_id = requested_id;
         let requested_id = self
             .settings
             .model_overrides
             .get(requested_id)
             .map(String::as_str)
             .unwrap_or(requested_id);
-        let resolved = crate::raycast::models::resolve(&self.models().await?, requested_id);
+        let resolved = crate::raycast::models::resolve(&self.models().await?, requested_id)
+            .ok_or_else(|| GatewayError::NotFound(format!("Model '{client_id}' was not found")))?;
         Ok((resolved.provider, resolved.model))
     }
 }
@@ -182,6 +184,33 @@ pub(crate) fn compact_test_state() -> SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn model_aliases_resolve_and_unknown_models_are_rejected() {
+        let mut state = compact_test_state();
+        let settings = &mut Arc::get_mut(&mut state).unwrap().settings;
+        let mut updated = (**settings).clone();
+        updated
+            .model_overrides
+            .insert("alias".into(), "test-model".into());
+        updated
+            .model_overrides
+            .insert("bad-alias".into(), "missing".into());
+        *settings = Arc::new(updated);
+        assert_eq!(
+            state.resolve_model("alias").await.unwrap(),
+            ("openai".into(), "test".into())
+        );
+        for model in ["missing", "bad-alias"] {
+            let error = state.resolve_model(model).await.unwrap_err();
+            assert_eq!(
+                error.status_and_message().0,
+                axum::http::StatusCode::NOT_FOUND
+            );
+            assert!(error.to_string().contains(model));
+        }
+    }
+
     #[tokio::test]
     async fn failed_model_refresh_keeps_known_model_instead_of_default() {
         let mut state = compact_test_state();

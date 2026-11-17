@@ -74,11 +74,13 @@ fn request_defaults_stream_false_and_model_none() {
     assert!(req.temperature.is_none());
     assert_eq!(req.messages.len(), 1);
     assert_eq!(req.messages[0].role, "user");
-    assert_eq!(req.messages[0].content, "hi");
+    assert!(
+        matches!(&req.messages[0].content, Some(raycast2api::protocol::chat_completions::wire::Content::Text(text)) if text == "hi")
+    );
 }
 
 #[test]
-fn request_ignores_unknown_fields() {
+fn request_captures_unmapped_fields_for_validation() {
     let req: ChatCompletionRequest =
         serde_json::from_str(r#"{"messages":[],"model":"gpt-4","stream":true,"top_p":0.9,"n":3}"#)
             .unwrap();
@@ -86,6 +88,8 @@ fn request_ignores_unknown_fields() {
     assert!(req.stream);
     assert_eq!(req.model.as_deref(), Some("gpt-4"));
     assert!(req.messages.is_empty());
+    assert_eq!(req.extra["top_p"], 0.9);
+    assert_eq!(req.extra["n"], 3);
 }
 
 #[test]
@@ -213,4 +217,195 @@ fn usage_chunk_has_empty_choices_and_full_usage() {
     assert_eq!(value["usage"]["completion_tokens"], 20);
     assert_eq!(value["usage"]["total_tokens"], 120);
     assert_eq!(value["usage"]["prompt_tokens_details"]["cached_tokens"], 30);
+}
+
+async fn response_json(response: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn outbound_preserves_mixed_text_and_tools_and_nulls_only_tool_only_content() {
+    use raycast2api::core::{CanonicalResponse, message::ToolCall, response::FinishReason};
+    use raycast2api::protocol::{OutboundAdapter, chat_completions::ChatCompletionsOutbound};
+    for text in ["Checking the weather", ""] {
+        let response = CanonicalResponse {
+            text: text.into(),
+            tool_calls: vec![ToolCall {
+                id: "a".into(),
+                name: "weather".into(),
+                arguments: "{}".into(),
+            }],
+            finish_reason: FinishReason::ToolCalls,
+            ..Default::default()
+        };
+        let value = response_json(ChatCompletionsOutbound::render_complete("m", &response)).await;
+        let message = &value["choices"][0]["message"];
+        assert_eq!(
+            message["content"],
+            if text.is_empty() {
+                json!(null)
+            } else {
+                json!(text)
+            }
+        );
+        assert_eq!(message["tool_calls"][0]["id"], "a");
+        assert_eq!(value["choices"][0]["finish_reason"], "tool_calls");
+    }
+}
+
+#[tokio::test]
+async fn stream_usage_is_opt_in_and_normal_chunks_carry_null_only_when_requested() {
+    use raycast2api::core::{CanonicalEvent, CanonicalRequest, protocol::Protocol};
+    use raycast2api::protocol::{
+        InboundAdapter, OutboundAdapter,
+        chat_completions::{ChatCompletionsInbound, ChatCompletionsOutbound},
+    };
+    for option in [None, Some(false), Some(true)] {
+        let mut body =
+            json!({"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]});
+        if let Some(include_usage) = option {
+            body["stream_options"] = json!({"include_usage":include_usage});
+        }
+        let request = ChatCompletionsInbound::parse(serde_json::from_value(body).unwrap()).unwrap();
+        let mut events = raycast2api::raycast::parser::parse_events(
+            r#"{"text":"Checking","tool_calls":[{"id":"a","name":"weather","arguments":"{}"},{"id":"b","name":"weather","arguments":"{}"}],"finish_reason":"tool_calls","usage":{"input_tokens":5,"output_tokens":7,"cached_tokens":2}}"#,
+            &mut Vec::new(),
+        );
+        // Output after Finish must never leak into the completion.
+        events.push(CanonicalEvent::TextDelta("unexpected".into()));
+        let response = ChatCompletionsOutbound::stream_with_request(
+            "m",
+            &request,
+            futures_util::stream::iter(events),
+        );
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let frames: Vec<_> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .collect();
+        assert_eq!(frames.last(), Some(&"[DONE]"));
+        assert_eq!(frames.iter().filter(|s| **s == "[DONE]").count(), 1);
+        let chunks: Vec<serde_json::Value> = frames[..frames.len() - 1]
+            .iter()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        let ordinary = if option == Some(true) {
+            &chunks[..chunks.len() - 1]
+        } else {
+            &chunks[..]
+        };
+        assert_eq!(ordinary.len(), 4);
+        assert_eq!(ordinary[0]["choices"][0]["delta"]["content"], "Checking");
+        assert_eq!(ordinary[0]["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(
+            ordinary[1]["choices"][0]["delta"]["tool_calls"][0]["index"],
+            0
+        );
+        assert_eq!(
+            ordinary[2]["choices"][0]["delta"]["tool_calls"][0]["index"],
+            1
+        );
+        assert_eq!(ordinary[3]["choices"][0]["finish_reason"], "tool_calls");
+        for (i, chunk) in ordinary.iter().enumerate() {
+            assert_eq!(chunk["id"], chunks[0]["id"]);
+            assert_eq!(chunk["created"], chunks[0]["created"]);
+            assert_eq!(chunk["model"], "m");
+            if i > 0 {
+                assert!(chunk["choices"][0]["delta"].get("role").is_none());
+            }
+            assert_eq!(
+                chunk.get("usage"),
+                (option == Some(true)).then_some(&serde_json::Value::Null)
+            );
+        }
+        if option == Some(true) {
+            let tail = chunks.last().unwrap();
+            assert_eq!(tail["choices"], json!([]));
+            assert_eq!(
+                tail["usage"],
+                json!({"prompt_tokens":5,"completion_tokens":7,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":2}})
+            );
+        }
+    }
+    // The trait's context-free entry point defaults to the same opt-out policy.
+    let request = CanonicalRequest::new(Protocol::ChatCompletions, "m");
+    assert!(!request.include_usage);
+}
+
+#[tokio::test]
+async fn finish_reasons_survive_parser_and_both_chat_response_paths() {
+    use raycast2api::core::{CanonicalEvent, CanonicalResponse};
+    use raycast2api::protocol::{OutboundAdapter, chat_completions::ChatCompletionsOutbound};
+    for reason in ["stop", "length", "content_filter", "tool_calls"] {
+        let events = raycast2api::raycast::parser::parse_events(
+            &json!({"text":"partial","finish_reason":reason}).to_string(),
+            &mut Vec::new(),
+        );
+        let Some(CanonicalEvent::Finish {
+            reason: canonical_reason,
+            ..
+        }) = events.last()
+        else {
+            panic!("missing finish")
+        };
+        let aggregated = CanonicalResponse {
+            text: "partial".into(),
+            finish_reason: *canonical_reason,
+            ..Default::default()
+        };
+        let value = response_json(ChatCompletionsOutbound::render_complete("m", &aggregated)).await;
+        assert_eq!(value["choices"][0]["finish_reason"], reason);
+        let response = ChatCompletionsOutbound::stream("m", futures_util::stream::iter(events));
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let terminal: serde_json::Value = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .next_back()
+            .unwrap();
+        assert_eq!(terminal["choices"][0]["finish_reason"], reason);
+        assert!(terminal.get("usage").is_none());
+    }
+}
+
+#[tokio::test]
+async fn stream_error_does_not_emit_success_or_usage() {
+    use raycast2api::core::{CanonicalEvent, CanonicalRequest, protocol::Protocol};
+    use raycast2api::protocol::{OutboundAdapter, chat_completions::ChatCompletionsOutbound};
+    let mut request = CanonicalRequest::new(Protocol::ChatCompletions, "m");
+    request.include_usage = true;
+    let response = ChatCompletionsOutbound::stream_with_request(
+        "m",
+        &request,
+        futures_util::stream::iter(vec![
+            CanonicalEvent::TextDelta("partial".into()),
+            CanonicalEvent::Error {
+                status: 400,
+                message: "blocked".into(),
+            },
+        ]),
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(!text.contains("[DONE]"));
+    let frames: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[1]["error"]["message"], "blocked");
+    assert!(frames[1].get("choices").is_none());
 }

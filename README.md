@@ -131,7 +131,7 @@ curl http://localhost:8787/v1/accounts/create \
 * OpenAI 风格：`-H "Authorization: Bearer <你的 api_key>"`
 * Anthropic 风格：`-H "x-api-key: <你的 api_key>"`（Claude Code / Anthropic SDK 默认发送后者）
 
-两个头都带时，优先取 `Authorization: Bearer`。请求里省略 `model` 时，使用默认模型 `openai-gpt-6.1-sol`。
+两个头都带时，优先取 `Authorization: Bearer`。Chat Completions 的 `model` 必填；Messages / Responses 省略时使用 `openai-gpt-6.1-sol`。所有端点均在应用 `model_overrides` 后检查模型列表，未知模型返回 404，不再静默替换为默认模型。
 
 **OpenAI Chat Completions（流式）**
 
@@ -141,9 +141,21 @@ curl http://localhost:8787/v1/chat/completions \
   -d '{
     "model": "openai-gpt-6.1-sol",
     "stream": true,
+    "stream_options": {"include_usage": true},
     "messages": [{"role": "user", "content": "你好"}]
   }'
 ```
+
+Chat Completions 当前支持文本和 function 工具调用，按 [OpenAI Chat Completions 规范](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)处理以下字段：
+
+* `messages`：支持 `system`、`developer`、`user`、`assistant`、`tool`；内容支持字符串与 `text` 分块数组；system / developer 指令按出现顺序合并到上游 `additional_system_instructions`。assistant 工具调用允许 `content: null` 或省略 content，工具结果通过 `tool_call_id` 关联；历史调用必须有对应结果。
+* `tools` / `tool_choice`：支持 function 定义及 `auto`、`none`、`required`、指定函数；保留混合输出中的文本和工具调用。网关把调用交给客户端执行。
+* `temperature`：范围 0–2，默认 1；`reasoning_effort`：支持 `low`、`medium`、`high`、`xhigh`，传给上游。历史 reasoning 内容不回放。
+* `stream_options.include_usage`：仅在 true 时发送 usage 尾帧，此时普通帧带 `usage: null`；默认不发送 usage。成功流以 `[DONE]` 结束，失败流发送 error，不伪造完成帧。
+
+尚未确认 Raycast 支持的生成参数会返回 400，包括 `max_tokens` / `max_completion_tokens`、`stop`、JSON 输出格式、`strict: true`、非默认采样或惩罚参数、`n > 1`、`parallel_tool_calls: false`、图片／音频内容、非 tool 消息的 `name` 等。允许与当前行为一致的默认值，如 `n: 1`、`top_p: 1`、`response_format: {"type":"text"}`；`user` / `safety_identifier` 仅接受字符串，不转发给上游。不支持的字段不再静默忽略。
+
+无效 JSON、字段类型错误和请求校验失败均返回 JSON error；超出 16 MiB 的请求保留 413。上游 400 / 413 / 422 / 429 / 503 / 504 保留状态码；上游账号 401 / 403 仍作为 502，避免误报为客户端 API Key 失效。上游返回 `length` / `content_filter` 时保留结束原因，Messages / Responses 同步映射为对应的停止或 incomplete 状态。
 
 **Anthropic Messages**
 

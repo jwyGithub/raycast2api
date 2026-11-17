@@ -17,7 +17,7 @@ pub enum GatewayError {
     NotFound(String),
     /// Server misconfiguration, e.g. missing credentials (500).
     Config(String),
-    /// The upstream Raycast backend returned an error (surfaced as 502).
+    /// An upstream error; account authentication failures remain gateway errors.
     Upstream { status: u16, message: String },
     /// The account's access_token was rejected (upstream 401). Callers use
     /// this as a semantic signal to rotate accounts / attempt a refresh,
@@ -59,11 +59,23 @@ impl GatewayError {
             GatewayError::Config(m) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "server_error", m.clone())
             }
-            GatewayError::Upstream { status, message } => (
-                StatusCode::BAD_GATEWAY,
-                "bad_gateway",
-                format!("Raycast API error ({status}): {message}"),
-            ),
+            GatewayError::Upstream { status, message } => {
+                let (http_status, kind) = match status {
+                    400 | 413 | 422 => (
+                        StatusCode::from_u16(*status).unwrap(),
+                        "invalid_request_error",
+                    ),
+                    429 => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
+                    503 => (StatusCode::SERVICE_UNAVAILABLE, "server_error"),
+                    504 => (StatusCode::GATEWAY_TIMEOUT, "server_error"),
+                    _ => (StatusCode::BAD_GATEWAY, "bad_gateway"),
+                };
+                (
+                    http_status,
+                    kind,
+                    format!("Raycast API error ({status}): {message}"),
+                )
+            }
             GatewayError::TokenInvalid { message } => (
                 StatusCode::BAD_GATEWAY,
                 "bad_gateway",

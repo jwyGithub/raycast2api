@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 
 use crate::core::event::CanonicalEvent;
 use crate::core::message::ToolCall;
-use crate::core::response::CanonicalResponse;
+use crate::core::response::{CanonicalResponse, FinishReason};
 use crate::core::tools::ToolDef;
 use crate::error::GatewayError;
 use crate::protocol::OutboundAdapter;
@@ -167,11 +167,24 @@ pub fn response_object_with_tools(
         output.push(message_item(String::new()));
     }
 
+    let incomplete = incomplete_reason(response.finish_reason);
+    if incomplete.is_some() {
+        for item in &mut output {
+            if let OutputItem::Message { status, .. } = item {
+                *status = "incomplete";
+            }
+        }
+    }
     ResponseObject {
         id: format!("resp_{}", new_uuid()),
         object: "response",
         created_at: unix_secs(),
-        status: "completed",
+        status: if incomplete.is_some() {
+            "incomplete"
+        } else {
+            "completed"
+        },
+        incomplete_details: incomplete.map(|reason| json!({"reason":reason})),
         model: model.to_string(),
         output,
         usage: map_usage(response.usage),
@@ -188,6 +201,14 @@ fn message_item(text: String) -> OutputItem {
             text,
             annotations: Vec::new(),
         }],
+    }
+}
+
+fn incomplete_reason(reason: FinishReason) -> Option<&'static str> {
+    match reason {
+        FinishReason::Length => Some("max_output_tokens"),
+        FinishReason::ContentFilter => Some("content_filter"),
+        _ => None,
     }
 }
 
@@ -252,6 +273,7 @@ pub struct StreamEncoder {
     /// Set when an in-stream upstream error arrived: `finalize` emits
     /// `response.failed` instead of `response.completed`.
     terminal_error: Option<(u16, String)>,
+    finish_reason: FinishReason,
     /// Names of freeform (`custom`) tools: their calls emit
     /// `custom_tool_call` items with the raw text `input`.
     custom: HashSet<String>,
@@ -270,6 +292,7 @@ impl StreamEncoder {
             usage: ResponseUsage::default(),
             finalized: false,
             terminal_error: None,
+            finish_reason: FinishReason::Stop,
             custom: HashSet::new(),
         }
     }
@@ -343,7 +366,8 @@ impl StreamEncoder {
                 }
                 frames
             }
-            CanonicalEvent::Finish { usage, .. } => {
+            CanonicalEvent::Finish { reason, usage } => {
+                self.finish_reason = reason;
                 // Same mapping as the non-streaming response, so the terminating
                 // `response.completed` frame carries identical usage (incl.
                 // `input_tokens_details.cached_tokens`).
@@ -412,11 +436,24 @@ impl StreamEncoder {
         // the same object the non-streaming response carries (incl. the optional
         // `input_tokens_details`).
         let usage = serde_json::to_value(self.usage).unwrap_or(Value::Null);
-        let response = self.response_snapshot("completed", usage);
-        frames.push(self.frame(
-            "response.completed",
-            json!({ "type": "response.completed", "response": response }),
-        ));
+        let incomplete = incomplete_reason(self.finish_reason);
+        let event = if incomplete.is_some() {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
+        let mut response = self.response_snapshot(
+            if incomplete.is_some() {
+                "incomplete"
+            } else {
+                "completed"
+            },
+            usage,
+        );
+        if let Some(reason) = incomplete {
+            response["incomplete_details"] = json!({"reason":reason});
+        }
+        frames.push(self.frame(event, json!({ "type": event, "response": response })));
         frames
     }
 
@@ -558,7 +595,7 @@ impl StreamEncoder {
                 json!({
                     "id": item.id,
                     "type": "message",
-                    "status": "completed",
+                    "status": if incomplete_reason(self.finish_reason).is_some() { "incomplete" } else { "completed" },
                     "role": "assistant",
                     "content": [ { "type": "output_text", "text": item.text, "annotations": [] } ],
                 })

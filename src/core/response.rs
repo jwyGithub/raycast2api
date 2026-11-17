@@ -17,6 +17,10 @@ pub enum FinishReason {
     Stop,
     /// The model wants one or more tools executed.
     ToolCalls,
+    /// Generation stopped at a token limit.
+    Length,
+    /// Output was stopped by the provider's content filter.
+    ContentFilter,
 }
 
 /// A fully-aggregated completion.

@@ -617,3 +617,48 @@ async fn error_envelope_shape() {
     // Responses reuses the OpenAI `{ "error": { ... } }` envelope.
     assert_eq!(body["error"]["message"], "bad input");
 }
+
+#[test]
+fn incomplete_finish_reasons_match_streaming_and_non_streaming_responses() {
+    for (finish_reason, reason) in [
+        (FinishReason::Length, "max_output_tokens"),
+        (FinishReason::ContentFilter, "content_filter"),
+    ] {
+        let response = response_object(
+            "m",
+            &CanonicalResponse {
+                text: "partial".into(),
+                finish_reason,
+                ..Default::default()
+            },
+        );
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["status"], "incomplete");
+        assert_eq!(value["incomplete_details"]["reason"], reason);
+        assert_eq!(value["output"][0]["status"], "incomplete");
+        let mut encoder = StreamEncoder::new("id".into(), "m".into(), 1);
+        encoder.push(CanonicalEvent::TextDelta("partial".into()));
+        encoder.push(CanonicalEvent::Finish {
+            reason: finish_reason,
+            usage: Usage::default(),
+        });
+        let frames = encoder.finalize();
+        let terminal = frames.last().unwrap();
+        assert_eq!(terminal.event, "response.incomplete");
+        assert_eq!(terminal.data["type"], "response.incomplete");
+        assert_eq!(terminal.data["response"]["status"], "incomplete");
+        assert_eq!(
+            terminal.data["response"]["incomplete_details"]["reason"],
+            reason
+        );
+        assert_eq!(
+            terminal.data["response"]["output"][0]["status"],
+            "incomplete"
+        );
+        assert!(
+            frames.iter().any(|f| f.event == "response.output_item.done"
+                && f.data["item"]["status"] == "incomplete")
+        );
+        assert!(encoder.finalize().is_empty());
+    }
+}

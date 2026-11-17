@@ -288,8 +288,8 @@ impl StreamEncoder {
                 frames
             }
             CanonicalEvent::Finish { reason, usage } => {
-                if reason == FinishReason::ToolCalls {
-                    self.stop_reason = "tool_use";
+                if reason != FinishReason::Stop {
+                    self.stop_reason = stop_reason(reason);
                 }
                 // Keep the full usage so the terminating `message_delta` carries
                 // the same token accounting (incl. cached read tokens) as the
@@ -428,6 +428,8 @@ fn stop_reason(reason: FinishReason) -> &'static str {
     match reason {
         FinishReason::ToolCalls => "tool_use",
         FinishReason::Stop => "end_turn",
+        FinishReason::Length => "max_tokens",
+        FinishReason::ContentFilter => "refusal",
     }
 }
 

@@ -43,6 +43,8 @@ pub struct CanonicalRequest {
     pub protocol: Protocol,
     /// Whether the client asked for a streaming response.
     pub stream: bool,
+    /// Chat Completions opt-in trailing usage chunk.
+    pub include_usage: bool,
     /// Client-facing model id; resolved to a Raycast `model` + `provider` later.
     pub model: String,
     /// System / developer instructions, if any.
@@ -79,6 +81,7 @@ impl CanonicalRequest {
         Self {
             protocol,
             stream: false,
+            include_usage: false,
             model: model.into(),
             system: None,
             messages: Vec::new(),

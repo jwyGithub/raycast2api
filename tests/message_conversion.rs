@@ -1,109 +1,193 @@
-//! Offline tests for the OpenAI inbound mapping (`ChatCompletionsInbound::parse`).
-//!
-//! These pin the mapping rules the gateway depends on: a *leading* `system`
-//! message becomes the canonical system prompt, `user`/`assistant` messages are
-//! forwarded verbatim and in order, and every other message is dropped. The
-//! `"markdown"` default for an absent system prompt now lives in the Raycast
-//! builder, so one case asserts it there. Pure logic — no network involved.
-
+//! Offline Chat request -> canonical -> Raycast regression tests.
 use raycast2api::core::message::Role;
+use raycast2api::core::request::CanonicalRequest;
 use raycast2api::protocol::InboundAdapter;
 use raycast2api::protocol::chat_completions::ChatCompletionsInbound;
-use raycast2api::protocol::chat_completions::wire::{ChatCompletionRequest, ChatMessage};
 use raycast2api::raycast::builder::build_chat_request;
+use serde_json::{Value, json};
 
-fn msg(role: &str, content: &str) -> ChatMessage {
-    ChatMessage {
-        role: role.to_string(),
-        content: content.to_string(),
+fn parse(body: Value) -> Result<CanonicalRequest, raycast2api::error::GatewayError> {
+    ChatCompletionsInbound::parse(serde_json::from_value(body).unwrap())
+}
+
+#[test]
+fn preserves_system_developer_and_conversation_order() {
+    let canonical = parse(json!({"model":"m","messages":[
+        {"role":"system","content":"be terse"},
+        {"role":"developer","content":[{"type":"text","text":"be accurate"}]},
+        {"role":"user","content":"q1"},
+        {"role":"assistant","content":"a1"},
+        {"role":"system","content":"later instruction"},
+        {"role":"user","content":[{"type":"text","text":"q"},{"type":"text","text":"2"}]}
+    ]}))
+    .unwrap();
+    assert_eq!(
+        canonical.system.as_deref(),
+        Some("be terse\nbe accurate\nlater instruction")
+    );
+    let upstream = serde_json::to_value(build_chat_request(&canonical, "p", "m")).unwrap();
+    assert_eq!(
+        upstream["additional_system_instructions"],
+        "be terse\nbe accurate\nlater instruction"
+    );
+    let messages = upstream["messages"].as_array().unwrap();
+    let roles: Vec<_> = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["user", "assistant", "user"]);
+    assert_eq!(messages[0]["content"]["text"], "q1");
+    assert_eq!(messages[1]["content"]["text"], "a1");
+    assert_eq!(messages[2]["content"]["text"], "q2");
+}
+
+#[test]
+fn absent_system_retains_upstream_base_prompt() {
+    let canonical =
+        parse(json!({"model":"m","messages":[{"role":"user","content":"hi"}]})).unwrap();
+    assert!(canonical.system.is_none());
+    assert_eq!(canonical.messages[0].role, Role::User);
+    let upstream = build_chat_request(&canonical, "p", "m");
+    assert_eq!(upstream.system_instructions, "markdown");
+    assert_eq!(upstream.temperature, 1.0);
+}
+
+#[test]
+fn function_tools_and_parallel_results_round_trip_without_losing_text_or_arguments() {
+    for content in [json!(null), json!("Checking")] {
+        let canonical = parse(json!({"model":"m", "reasoning_effort":"high",
+            "tools":[{"type":"function","function":{"name":"weather","description":"Weather","parameters":{"type":"object"}}}],
+            "tool_choice":{"type":"function","function":{"name":"weather"}},
+            "messages":[
+                {"role":"user","content":"weather?"},
+                {"role":"assistant","content":content,"tool_calls":[
+                    {"id":"call_1","type":"function","function":{"name":"weather","arguments":"{ \"city\": \"SF\" }"}},
+                    {"id":"call_2","type":"function","function":{"name":"weather","arguments":"{}"}}
+                ]},
+                {"role":"tool","tool_call_id":"call_2","content":[{"type":"text","text":"sunny"}]},
+                {"role":"tool","tool_call_id":"call_1","name":"weather","content":"rainy"}
+            ]})).unwrap();
+        let upstream = serde_json::to_value(build_chat_request(&canonical, "p", "m")).unwrap();
+        assert_eq!(upstream["reasoning_effort"], "high");
+        assert_eq!(upstream["tool_choice"], "weather");
+        assert_eq!(upstream["tools"][0]["type"], "local_tool");
+        assert_eq!(upstream["tools"][0]["function"]["name"], "weather");
+        assert_eq!(
+            upstream["messages"][1]["tool_calls"][0]["function"]["arguments"],
+            "{ \"city\": \"SF\" }"
+        );
+        assert_eq!(
+            upstream["messages"][1]["content"]["text"],
+            content.as_str().unwrap_or("")
+        );
+        assert_eq!(upstream["messages"][2]["tool_call_id"], "call_2");
+        assert_eq!(upstream["messages"][2]["name"], "weather");
+        assert_eq!(upstream["messages"][3]["tool_call_id"], "call_1");
     }
 }
 
-fn request(messages: Vec<ChatMessage>) -> ChatCompletionRequest {
-    ChatCompletionRequest {
-        messages,
-        model: None,
-        temperature: None,
-        stream: false,
-        reasoning_effort: None,
+#[test]
+fn assistant_content_can_be_omitted_on_tool_turns() {
+    let request = json!({"model":"m", "messages":[
+        {"role":"assistant","tool_calls":[{"type":"function","id":"a","function":{"name":"run","arguments":"{}"}}]},
+        {"role":"tool","tool_call_id":"a","content":"done"}
+    ]});
+    assert!(parse(request).is_ok());
+}
+
+#[test]
+fn rejects_invalid_roles_content_and_tool_history() {
+    for messages in [
+        json!([]),
+        json!([{"role":"function","content":"hi"}]),
+        json!([{"role":"user","content":null}]),
+        json!([{"role":"assistant","content":null}]),
+        json!([{"role":"assistant","content":"hello","tool_calls":[]}]),
+        json!([{"role":"user","content":[]}]),
+        json!([{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}]),
+        json!([{"role":"user","content":[{"type":"text"}]}]),
+        json!([{"role":"tool","content":"x"}]),
+        json!([{"role":"tool","tool_call_id":"unknown","content":"x"}]),
+        json!([{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"run","arguments":"{}"}}]}]),
+        json!([
+            {"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"run","arguments":"{}"}}]},
+            {"role":"user","content":"skip"}
+        ]),
+        json!([
+            {"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"run","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"a","name":"wrong","content":"x"}
+        ]),
+        json!([
+            {"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"run","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"a","content":"x"},
+            {"role":"tool","tool_call_id":"a","content":"x"}
+        ]),
+    ] {
+        assert!(
+            parse(json!({"model":"m","messages":messages})).is_err(),
+            "accepted {messages}"
+        );
     }
 }
 
 #[test]
-fn leading_system_message_becomes_system_prompt() {
-    let canonical = ChatCompletionsInbound::parse(request(vec![
-        msg("system", "be terse"),
-        msg("user", "hello"),
-    ]))
-    .expect("valid request");
-
-    assert_eq!(canonical.system.as_deref(), Some("be terse"));
-    // The system message is folded into the prompt, not forwarded.
-    assert_eq!(canonical.messages.len(), 1);
-    assert_eq!(canonical.messages[0].role, Role::User);
-    assert_eq!(canonical.messages[0].text, "hello");
+fn rejects_missing_model_and_unsupported_parameters_instead_of_ignoring_them() {
+    assert!(parse(json!({"messages":[{"role":"user","content":"hi"}]})).is_err());
+    for (key, value) in [
+        ("model", json!(" ")),
+        ("temperature", json!(2.1)),
+        ("reasoning_effort", json!("invalid")),
+        ("max_tokens", json!(10)),
+        ("max_completion_tokens", json!(10)),
+        ("stop", json!(["END"])),
+        ("top_p", json!(0.9)),
+        ("n", json!(2)),
+        ("response_format", json!({"type":"json_object"})),
+        ("parallel_tool_calls", json!(false)),
+        ("stream_options", json!({"include_usage":true})),
+        ("tool_choice", json!("required")),
+        (
+            "tool_choice",
+            json!({"type":"function","function":{"name":"missing"}}),
+        ),
+        (
+            "tools",
+            json!([{"type":"function","function":{"name":"run","strict":true}}]),
+        ),
+        (
+            "tools",
+            json!([{"type":"function","function":{"name":"bad name"}}]),
+        ),
+        (
+            "tools",
+            json!([{"type":"function","function":{"name":"run","parameters":[]}}]),
+        ),
+    ] {
+        let mut body = json!({"model":"m","messages":[{"role":"user","content":"hi"}]});
+        body[key] = value;
+        assert!(parse(body.clone()).is_err(), "accepted {body}");
+    }
 }
 
 #[test]
-fn absent_system_prompt_defaults_to_markdown_in_builder() {
-    let canonical =
-        ChatCompletionsInbound::parse(request(vec![msg("user", "hi")])).expect("valid request");
-    // The inbound leaves the system prompt unset...
-    assert!(canonical.system.is_none());
-    assert_eq!(canonical.messages.len(), 1);
-
-    // ...and the Raycast builder applies the historical `"markdown"` default.
-    let raycast = build_chat_request(&canonical, "provider", "model");
-    assert_eq!(raycast.system_instructions, "markdown");
-}
-
-#[test]
-fn forwards_user_and_assistant_in_order() {
-    let canonical = ChatCompletionsInbound::parse(request(vec![
-        msg("user", "q1"),
-        msg("assistant", "a1"),
-        msg("user", "q2"),
-    ]))
-    .expect("valid request");
-
-    let roles: Vec<Role> = canonical.messages.iter().map(|m| m.role).collect();
-    assert_eq!(roles, [Role::User, Role::Assistant, Role::User]);
-
-    let texts: Vec<&str> = canonical.messages.iter().map(|m| m.text.as_str()).collect();
-    assert_eq!(texts, ["q1", "a1", "q2"]);
-
-    // No leading system message → the prompt stays unset.
-    assert!(canonical.system.is_none());
-}
-
-#[test]
-fn drops_unknown_roles() {
-    let canonical = ChatCompletionsInbound::parse(request(vec![
-        msg("user", "hi"),
-        msg("tool", "ignored"),
-        msg("function", "ignored too"),
-    ]))
-    .expect("valid request");
-
-    assert_eq!(canonical.messages.len(), 1);
-    assert_eq!(canonical.messages[0].role, Role::User);
-}
-
-#[test]
-fn non_leading_system_message_is_dropped() {
-    // Only a *leading* system message is special. A later one must not become
-    // the prompt, and must not be forwarded as a message.
-    let canonical =
-        ChatCompletionsInbound::parse(request(vec![msg("user", "hi"), msg("system", "too late")]))
-            .expect("valid request");
-
-    assert!(canonical.system.is_none());
-    assert_eq!(canonical.messages.len(), 1);
-    assert_eq!(canonical.messages[0].role, Role::User);
-}
-
-#[test]
-fn empty_messages_is_rejected() {
-    // The inbound guards against an empty conversation.
-    assert!(ChatCompletionsInbound::parse(request(vec![])).is_err());
+fn accepts_default_options_and_maps_stream_usage_and_effort() {
+    for effort in ["low", "medium", "high", "xhigh"] {
+        let canonical = parse(
+            json!({"model":"m","messages":[{"role":"user","content":"hi"}],
+                "n":1,"top_p":1.0,"frequency_penalty":0,"presence_penalty":0,
+                "logprobs":false,"store":false,"parallel_tool_calls":true,
+                "response_format":{"type":"text"},"modalities":["text"],
+                "stream":true,"stream_options":{"include_usage":true},"reasoning_effort":effort
+            }),
+        )
+        .unwrap();
+        assert!(canonical.include_usage);
+        assert_eq!(
+            build_chat_request(&canonical, "p", "m")
+                .reasoning_effort
+                .as_deref(),
+            Some(effort)
+        );
+        assert_eq!(canonical.requested_effort.as_deref(), Some(effort));
+    }
 }

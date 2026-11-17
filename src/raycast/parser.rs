@@ -119,11 +119,12 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
     events
 }
 
-/// Map Raycast's `finish_reason` string to the canonical reason. Anything other
-/// than `"tool_calls"` (including `"stop"`) is treated as a normal stop.
+/// Preserve provider termination reasons through every outbound adapter.
 fn finish_reason(raw: &str) -> FinishReason {
     match raw {
         "tool_calls" => FinishReason::ToolCalls,
+        "length" => FinishReason::Length,
+        "content_filter" => FinishReason::ContentFilter,
         _ => FinishReason::Stop,
     }
 }

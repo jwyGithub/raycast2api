@@ -730,3 +730,34 @@ fn streaming_tool_call_with_safety_check_carries_safeguard_results() {
         .join("");
     assert!(!dumped.contains("safeguard_results"));
 }
+
+#[test]
+fn incomplete_finish_reasons_map_to_messages_stop_reasons() {
+    for (finish_reason, reason) in [
+        (FinishReason::Length, "max_tokens"),
+        (FinishReason::ContentFilter, "refusal"),
+    ] {
+        let value = serde_json::to_value(message_response(
+            "m",
+            &CanonicalResponse {
+                text: "partial".into(),
+                finish_reason,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        assert_eq!(value["stop_reason"], reason);
+        let mut encoder = StreamEncoder::new();
+        encoder.push(CanonicalEvent::TextDelta("partial".into()));
+        encoder.push(CanonicalEvent::Finish {
+            reason: finish_reason,
+            usage: Usage::default(),
+        });
+        let frames = encoder.finalize();
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.event == "message_delta" && f.data["delta"]["stop_reason"] == reason)
+        );
+    }
+}

@@ -1150,4 +1150,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/compact_redis.rs"]
 mod redis_tests;

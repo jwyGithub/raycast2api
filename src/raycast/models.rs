@@ -6,8 +6,6 @@
 //! can share the app's HTTP client and serve-stale policy); this module holds
 //! the pure resolution logic over an already-fetched list.
 
-use crate::config::{DEFAULT_INTERNAL_MODEL, DEFAULT_PROVIDER};
-
 use super::wire::RaycastRawModel;
 
 /// Suffix Raycast uses to mark a model's reasoning ("think") variant.
@@ -20,19 +18,14 @@ pub struct ResolvedModel {
     pub model: String,
 }
 
-/// Resolve a client-facing model id to `(provider, upstream model)`, falling
-/// back to the configured defaults when the id isn't in `models`.
-pub fn resolve(models: &[RaycastRawModel], requested_id: &str) -> ResolvedModel {
+/// Resolve a client-facing model id without silently selecting another model.
+pub fn resolve(models: &[RaycastRawModel], requested_id: &str) -> Option<ResolvedModel> {
     models
         .iter()
         .find(|m| m.id == requested_id)
         .map(|m| ResolvedModel {
             provider: m.provider.clone(),
             model: m.model.clone(),
-        })
-        .unwrap_or_else(|| ResolvedModel {
-            provider: DEFAULT_PROVIDER.to_string(),
-            model: DEFAULT_INTERNAL_MODEL.to_string(),
         })
 }
 

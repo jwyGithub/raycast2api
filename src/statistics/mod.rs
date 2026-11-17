@@ -1,6 +1,7 @@
 //! Usage accounting at the upstream boundary, independent of diagnostic logs.
 pub mod store;
 #[cfg(test)]
+#[path = "../../tests/unit/statistics.rs"]
 mod tests;
 pub mod wire;
 

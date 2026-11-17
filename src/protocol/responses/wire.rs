@@ -173,6 +173,8 @@ pub struct ResponseObject {
     pub object: &'static str,
     pub created_at: u64,
     pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete_details: Option<Value>,
     pub model: String,
     pub output: Vec<OutputItem>,
     pub usage: ResponseUsage,

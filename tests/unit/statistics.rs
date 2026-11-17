@@ -373,7 +373,7 @@ async fn three_protocols_capture_metadata_for_streaming_and_non_streaming_reques
         for (path, mut body) in [
             (
                 "/v1/chat/completions",
-                json!({"messages":[{"role":"user","content":"hello"}],"reasoning_effort":"max"}),
+                json!({"messages":[{"role":"user","content":"hello"}],"reasoning_effort":"xhigh"}),
             ),
             (
                 "/v1/messages",
@@ -414,7 +414,14 @@ async fn three_protocols_capture_metadata_for_streaming_and_non_streaming_reques
             assert_eq!(row.account_email, "actual@example.com");
             assert_eq!(row.requested_model, "test-model");
             assert_eq!(row.upstream_model, "test");
-            assert_eq!(row.requested_effort.as_deref(), Some("max"));
+            assert_eq!(
+                row.requested_effort.as_deref(),
+                Some(if path == "/v1/chat/completions" {
+                    "xhigh"
+                } else {
+                    "max"
+                })
+            );
             assert_eq!(row.api_key.as_deref(), Some("caller-key-123456"));
             assert_ne!(row.request_id, "-");
             assert!(state.log.detail(&row.request_id).is_some());

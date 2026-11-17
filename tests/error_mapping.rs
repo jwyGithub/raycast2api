@@ -43,7 +43,7 @@ fn maps_variants_to_expected_status_codes() {
             status: 429,
             message: "rate limited".into(),
         }),
-        StatusCode::BAD_GATEWAY
+        StatusCode::TOO_MANY_REQUESTS
     );
 }
 
@@ -123,4 +123,31 @@ fn no_account_sets_x_should_retry_false() {
             .map(|v| v.to_str().unwrap()),
         Some("false")
     );
+}
+
+#[tokio::test]
+async fn upstream_request_errors_keep_status_but_account_auth_errors_stay_gateway_failures() {
+    for (upstream, expected, kind) in [
+        (400, 400, "invalid_request_error"),
+        (413, 413, "invalid_request_error"),
+        (422, 422, "invalid_request_error"),
+        (429, 429, "rate_limit_error"),
+        (503, 503, "server_error"),
+        (504, 504, "server_error"),
+        (401, 502, "bad_gateway"),
+        (403, 502, "bad_gateway"),
+        (500, 502, "bad_gateway"),
+    ] {
+        let response = GatewayError::Upstream {
+            status: upstream,
+            message: "upstream failure".into(),
+        }
+        .into_response();
+        assert_eq!(response.status().as_u16(), expected);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["type"], kind);
+    }
 }

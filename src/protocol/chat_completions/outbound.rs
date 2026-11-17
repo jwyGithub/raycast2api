@@ -1,13 +1,8 @@
 //! ⑤ OpenAI Chat Completions outbound: canonical output → OpenAI JSON / SSE.
 //!
-//! This is the streaming/aggregation logic that previously lived inline in the
-//! handler, now expressed over [`CanonicalEvent`]s so it is fed by the shared
-//! pipeline. The plain-text path stays byte-compatible with the original
-//! implementation; on top of that this stage renders tool calls (as OpenAI
-//! `tool_calls`), maps real token usage (`prompt_tokens` / `completion_tokens`,
-//! plus `prompt_tokens_details.cached_tokens` when present), and reports the
-//! canonical finish reason. Reasoning / thought-signature deltas stay off the
-//! byte-compatible chat/completions stream (available as an opt-in extension).
+//! Renders text, function calls, finish reasons and usage from the shared
+//! pipeline. Stream usage is opt-in; reasoning and thought signatures are
+//! deliberately omitted from the Chat wire contract.
 
 use std::convert::Infallible;
 
@@ -18,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::{Stream, StreamExt};
 
 use crate::core::event::CanonicalEvent;
+use crate::core::request::CanonicalRequest;
 use crate::core::response::{CanonicalResponse, FinishReason};
 use crate::core::usage::Usage as CanonicalUsage;
 use crate::error::GatewayError;
@@ -42,9 +38,7 @@ impl OutboundAdapter for ChatCompletionsOutbound {
             })
             .collect();
 
-        // OpenAI carries a null `content` on a tool-call turn; otherwise the
-        // aggregated assistant text.
-        let content = if tool_calls.is_empty() {
+        let content = if tool_calls.is_empty() || !response.text.is_empty() {
             Some(response.text.clone())
         } else {
             None
@@ -63,6 +57,26 @@ impl OutboundAdapter for ChatCompletionsOutbound {
     }
 
     fn stream<S>(model: &str, events: S) -> Response
+    where
+        S: Stream<Item = CanonicalEvent> + Send + 'static,
+    {
+        Self::stream_impl(model, false, events)
+    }
+
+    fn stream_with_request<S>(model: &str, request: &CanonicalRequest, events: S) -> Response
+    where
+        S: Stream<Item = CanonicalEvent> + Send + 'static,
+    {
+        Self::stream_impl(model, request.include_usage, events)
+    }
+
+    fn render_error(error: GatewayError) -> Response {
+        super::error::render(error)
+    }
+}
+
+impl ChatCompletionsOutbound {
+    fn stream_impl<S>(model: &str, include_usage: bool, events: S) -> Response
     where
         S: Stream<Item = CanonicalEvent> + Send + 'static,
     {
@@ -87,7 +101,7 @@ impl OutboundAdapter for ChatCompletionsOutbound {
                         role_sent = true;
                         let chunk =
                             ChatCompletionChunk::delta(&id, created, &model, role, Some(text));
-                        yield sse_json(&chunk);
+                        yield sse_json(&chunk, include_usage);
                     }
                     CanonicalEvent::ToolCall(call) => {
                         let role = (!role_sent).then_some("assistant");
@@ -103,7 +117,7 @@ impl OutboundAdapter for ChatCompletionsOutbound {
                             call.arguments,
                         );
                         tool_index += 1;
-                        yield sse_json(&chunk);
+                        yield sse_json(&chunk, include_usage);
                     }
                     CanonicalEvent::Finish { reason, usage } => {
                         if !role_sent {
@@ -114,7 +128,7 @@ impl OutboundAdapter for ChatCompletionsOutbound {
                                 Some("assistant"),
                                 None,
                             );
-                            yield sse_json(&chunk);
+                            yield sse_json(&chunk, include_usage);
                         }
                         let finish = ChatCompletionChunk::finish(
                             &id,
@@ -122,13 +136,12 @@ impl OutboundAdapter for ChatCompletionsOutbound {
                             &model,
                             finish_reason_str(reason),
                         );
-                        yield sse_json(&finish);
-                        // Emit a trailing usage-only chunk so streaming clients
-                        // get the same token accounting as the non-streaming
-                        // response (same `map_usage`, incl. cached tokens).
-                        let usage_chunk =
-                            ChatCompletionChunk::usage(&id, created, &model, map_usage(usage));
-                        yield sse_json(&usage_chunk);
+                        yield sse_json(&finish, include_usage);
+                        if include_usage {
+                            let usage_chunk =
+                                ChatCompletionChunk::usage(&id, created, &model, map_usage(usage));
+                            yield sse_json(&usage_chunk, true);
+                        }
                         break;
                     }
                     CanonicalEvent::Error { status, message } => {
@@ -145,8 +158,7 @@ impl OutboundAdapter for ChatCompletionsOutbound {
                         yield Ok(Event::default().data(err.to_string()));
                         return;
                     }
-                    // Reasoning and thought signatures stay off the byte-compatible
-                    // chat/completions stream (available as an opt-in extension).
+                    // Chat has no standard reasoning / thought-signature delta.
                     _ => {}
                 }
             }
@@ -156,12 +168,6 @@ impl OutboundAdapter for ChatCompletionsOutbound {
 
         Sse::new(sse).into_response()
     }
-
-    fn render_error(error: GatewayError) -> Response {
-        // OpenAI clients already expect the gateway's `{ "error": { ... } }`
-        // shape, which is exactly what `GatewayError` renders.
-        error.into_response()
-    }
 }
 
 /// Map the canonical finish reason to the OpenAI wire value.
@@ -169,6 +175,8 @@ fn finish_reason_str(reason: FinishReason) -> &'static str {
     match reason {
         FinishReason::Stop => "stop",
         FinishReason::ToolCalls => "tool_calls",
+        FinishReason::Length => "length",
+        FinishReason::ContentFilter => "content_filter",
     }
 }
 
@@ -186,9 +194,12 @@ fn map_usage(usage: CanonicalUsage) -> Usage {
     }
 }
 
-/// Serialize a chunk into an SSE event. Serialization of these fixed structs
-/// cannot fail, so on the impossible error path we emit an empty event.
-fn sse_json(chunk: &ChatCompletionChunk) -> Result<Event, Infallible> {
-    let data = serde_json::to_string(chunk).unwrap_or_default();
+/// Requested usage is null on normal chunks and populated on the final chunk.
+fn sse_json(chunk: &ChatCompletionChunk, include_usage: bool) -> Result<Event, Infallible> {
+    let mut value = serde_json::to_value(chunk).expect("chat chunk is serializable");
+    if include_usage && chunk.usage.is_none() {
+        value["usage"] = serde_json::Value::Null;
+    }
+    let data = value.to_string();
     Ok(Event::default().data(data))
 }
