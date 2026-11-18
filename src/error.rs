@@ -198,7 +198,17 @@ pub(crate) fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
 
 impl From<reqwest::Error> for GatewayError {
     fn from(e: reqwest::Error) -> Self {
-        GatewayError::Internal(format!("upstream request error: {}", error_chain(&e)))
+        let message = format!("upstream request error: {}", error_chain(&e));
+        // 请求构造失败是网关自身的问题(500);连接/传输/解码失败都是上游问题,
+        // 按 502 返回,与其他上游错误一致。
+        if e.is_builder() {
+            GatewayError::Internal(message)
+        } else {
+            GatewayError::Upstream {
+                status: 502,
+                message,
+            }
+        }
     }
 }
 
@@ -220,10 +230,25 @@ mod tests {
             .await
             .unwrap_err();
         let head = format!("upstream request error: {e}");
-        let GatewayError::Internal(message) = GatewayError::from(e) else {
-            panic!("expected Internal");
+        let error = GatewayError::from(e);
+        let GatewayError::Upstream {
+            status: 502,
+            message,
+        } = &error
+        else {
+            panic!("expected Upstream 502, got {error:?}");
         };
         assert!(message.len() > head.len(), "chain missing: {message}");
         println!("{message}");
+        assert_eq!(
+            axum::response::IntoResponse::into_response(error).status(),
+            axum::http::StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn reqwest_builder_error_stays_internal() {
+        let e = reqwest::Client::new().get("not a url").build().unwrap_err();
+        assert!(matches!(GatewayError::from(e), GatewayError::Internal(_)));
     }
 }

@@ -19,6 +19,11 @@ impl RaycastClient {
             direct.chain(proxies).collect()
         };
         let mut last = None;
+        let body_bytes = request
+            .body()
+            .and_then(|body| body.as_bytes())
+            .map(<[u8]>::len);
+        let account = context.map(|(_, email)| email);
         for (channel, client) in channels {
             let replay = request
                 .try_clone()
@@ -26,6 +31,10 @@ impl RaycastClient {
             let attempt = context.and_then(|(call, email)| {
                 crate::statistics::Attempt::start(self.statistics.clone(), call, email)
             });
+            // 失败日志带耗时:瞬间失败(复用到死连接)与等几秒才失败(上游收下
+            // 请求后主动断开)是两种不同成因,排查 "connection closed before
+            // message completed" 时靠它区分。
+            let started = std::time::Instant::now();
             match tokio::time::timeout(self.settings.upstream_timeout, client.execute(replay)).await
             {
                 Ok(Ok(mut response)) => {
@@ -40,9 +49,25 @@ impl RaycastClient {
                     return Ok(response);
                 }
                 Ok(Err(error)) => {
+                    tracing::warn!(
+                        channel,
+                        account,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        body_bytes,
+                        is_connect = error.is_connect(),
+                        "→ upstream send failed: {}",
+                        crate::error::error_chain(&error)
+                    );
                     last = Some(GatewayError::from(error));
                 }
                 Err(_) => {
+                    tracing::warn!(
+                        channel,
+                        account,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        body_bytes,
+                        "→ upstream send failed: response header timeout"
+                    );
                     last = Some(GatewayError::Upstream {
                         status: 504,
                         message: "upstream response header timeout".into(),
