@@ -16,6 +16,7 @@ use crate::core::request::{CanonicalRequest, ReasoningEffort};
 use crate::core::tools::{ToolChoice, ToolDef};
 use crate::error::GatewayError;
 use crate::protocol::InboundAdapter;
+use crate::protocol::validate::require_model;
 
 pub struct ChatCompletionsInbound;
 
@@ -23,11 +24,7 @@ impl InboundAdapter for ChatCompletionsInbound {
     type Request = ChatCompletionRequest;
 
     fn parse(request: ChatCompletionRequest) -> Result<CanonicalRequest, GatewayError> {
-        // `model` selects the upstream provider/model, so it is mandatory.
-        let model = request
-            .model
-            .filter(|m| !m.trim().is_empty())
-            .ok_or_else(|| invalid("'model' is required and must not be empty"))?;
+        let model = require_model(request.model)?;
         let mut canonical = CanonicalRequest::new(Protocol::ChatCompletions, model);
         canonical.stream = request.stream;
         // Match the Chat API default without changing the other protocols.
@@ -66,7 +63,9 @@ impl InboundAdapter for ChatCompletionsInbound {
                 "required" => Some(ToolChoice::Required),
                 _ => None,
             },
-            Some(InboundToolChoice::Named { function, .. }) => Some(ToolChoice::Named(function.name)),
+            Some(InboundToolChoice::Named { function, .. }) => {
+                Some(ToolChoice::Named(function.name))
+            }
             Some(InboundToolChoice::Other(_)) | None => None,
         };
 

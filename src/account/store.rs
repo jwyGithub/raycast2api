@@ -10,9 +10,9 @@ use diesel::sqlite::Sqlite;
 
 use crate::account::wire::{AccountInfo, AccountRecord};
 use crate::core::page::Page;
-use crate::db::Db;
 use crate::error::GatewayError;
-use crate::schema::accounts;
+use crate::storage::db::Db;
+use crate::storage::schema::accounts;
 use crate::util::unix_secs;
 
 /// 一次 upsert 的三态结果。
@@ -202,7 +202,7 @@ pub struct AccountStore {
 impl AccountStore {
     /// 构造并建表(幂等),并做既有库的增量迁移。
     pub fn new(db: Db) -> Self {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             {
                 let mut conn = db.lock();
                 conn.batch_execute(SCHEMA).expect("create accounts schema");
@@ -229,7 +229,7 @@ impl AccountStore {
 
     /// 按 email upsert;三态语义见 [`UpsertOutcome`]。
     pub fn upsert(&self, record: &AccountRecord) -> Result<UpsertOutcome, GatewayError> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let email = record.email().ok_or_else(|| {
                 GatewayError::BadRequest("account entry has no user.email".into())
             })?;
@@ -291,7 +291,7 @@ impl AccountStore {
         page_size: Option<u32>,
         status: Option<&str>,
     ) -> Result<AccountList, GatewayError> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let mut conn = self.db.lock();
             let status = status.filter(|value| !value.is_empty() && *value != "all");
             if status
@@ -358,7 +358,7 @@ impl AccountStore {
     }
 
     pub fn counts(&self) -> Result<(u64, u64, u64, u64), GatewayError> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let now = unix_secs() as i64;
             let mut conn = self.db.lock();
             let total = accounts::table
@@ -396,7 +396,7 @@ impl AccountStore {
 
     /// 导出可直接提交给 POST /v1/accounts/create 的原始账号凭据。
     pub fn export_records(&self) -> Result<Vec<AccountRecord>, GatewayError> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let mut conn = self.db.lock();
             accounts::table
                 .select((
@@ -439,7 +439,7 @@ impl AccountStore {
 
     /// 按 email 取单个账号;不存在返回 `None`。
     pub fn get(&self, email: &str) -> Result<Option<AccountRow>, GatewayError> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let mut conn = self.db.lock();
             accounts::table
                 .filter(accounts::email.eq(email))
@@ -453,7 +453,7 @@ impl AccountStore {
 
     /// 当前可选(未摘除、不在冷却)的账号数,作为 `send_chat` 换号重试的上限。
     pub fn count_available(&self) -> usize {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let now = unix_secs() as i64;
             let mut conn = self.db.lock();
             accounts::table
@@ -477,7 +477,7 @@ impl AccountStore {
     ///
     /// [`GatewayError::NoAccount`]: crate::error::GatewayError::NoAccount
     pub fn earliest_cooldown_secs(&self) -> Option<i64> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let now = unix_secs() as i64;
             let mut conn = self.db.lock();
             accounts::table
@@ -493,7 +493,7 @@ impl AccountStore {
 
     /// 按邮箱和/或状态删除;返回删除行数。
     pub fn delete(&self, email: Option<&str>, status: Option<&str>) -> Result<usize, GatewayError> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             if email.is_none() && status.is_none() {
                 return Err(GatewayError::BadRequest(
                     "email or status is required".into(),
@@ -527,7 +527,7 @@ impl AccountStore {
     /// 轮询取下一个可用账号(未摘除且不在限额冷却期);全不可用报
     /// [`GatewayError::NoAccount`]。
     pub fn next_available(&self) -> Result<AccountRow, GatewayError> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let now = unix_secs() as i64;
             let mut conn = self.db.lock();
             let last = self.last_id.load(Ordering::Relaxed);
@@ -560,7 +560,7 @@ impl AccountStore {
 
     /// 摘除(401 / 额度耗尽)。
     pub fn mark_unavailable(&self, email: &str, reason: &str) {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             self.set_available(email, false, Some(reason));
         })
     }
@@ -571,7 +571,7 @@ impl AccountStore {
         access_token: &str,
         refresh_token: Option<&str>,
     ) -> Result<bool, GatewayError> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let now = unix_secs().to_string();
             let mut conn = self.db.lock();
             let n = if let Some(refresh_token) = refresh_token {
@@ -600,7 +600,7 @@ impl AccountStore {
     }
 
     pub fn reinstate(&self, email: &str) -> Result<bool, GatewayError> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let now = unix_secs().to_string();
             let mut conn = self.db.lock();
             let n = diesel::update(accounts::table.filter(accounts::email.eq(email)))
@@ -617,7 +617,7 @@ impl AccountStore {
     }
 
     pub fn mark_cooldown(&self, email: &str, until_unix_secs: i64, reason: &str) {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let mut conn = self.db.lock();
             let _ = diesel::update(accounts::table.filter(accounts::email.eq(email)))
                 .set((
@@ -630,7 +630,7 @@ impl AccountStore {
     }
 
     pub fn set_available(&self, email: &str, available: bool, reason: Option<&str>) {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let now = unix_secs().to_string();
             let mut conn = self.db.lock();
             let _ = diesel::update(accounts::table.filter(accounts::email.eq(email)))
@@ -644,7 +644,7 @@ impl AccountStore {
     }
 
     pub fn update_info(&self, email: &str, info: &AccountInfo) -> Result<(), GatewayError> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let now = unix_secs().to_string();
             let mut conn = self.db.lock();
             diesel::update(accounts::table.filter(accounts::email.eq(email)))
@@ -677,7 +677,7 @@ fn sql_err(e: diesel::result::Error) -> GatewayError {
 mod tests {
     use super::*;
     use crate::account::wire::AccountRecord;
-    use crate::db::Db;
+    use crate::storage::db::Db;
 
     fn rec(email: &str, token: &str) -> AccountRecord {
         serde_json::from_value(serde_json::json!({

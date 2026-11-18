@@ -282,7 +282,7 @@ fn decode_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{core::message::ToolCall, db::Db};
+    use crate::{core::message::ToolCall, storage::db::Db};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -365,7 +365,11 @@ mod tests {
             .unwrap();
         assert_eq!(interrupted.status, "interrupted");
         assert!(
-            interrupted.error_message.as_deref().unwrap().contains("EOF"),
+            interrupted
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("EOF"),
             "{:?}",
             interrupted.error_message
         );

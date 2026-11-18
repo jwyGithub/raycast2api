@@ -7,8 +7,8 @@ use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use raycast2api::account::store::AccountStore;
 use raycast2api::config::Settings;
-use raycast2api::db::Db;
 use raycast2api::server::build_router;
+use raycast2api::storage::db::Db;
 use serde_json::Value;
 use tower::ServiceExt;
 

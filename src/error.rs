@@ -202,6 +202,12 @@ impl From<reqwest::Error> for GatewayError {
     }
 }
 
+impl From<serde_json::Error> for GatewayError {
+    fn from(e: serde_json::Error) -> Self {
+        GatewayError::Internal(format!("serialization error: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::GatewayError;
@@ -219,11 +225,5 @@ mod tests {
         };
         assert!(message.len() > head.len(), "chain missing: {message}");
         println!("{message}");
-    }
-}
-
-impl From<serde_json::Error> for GatewayError {
-    fn from(e: serde_json::Error) -> Self {
-        GatewayError::Internal(format!("serialization error: {e}"))
     }
 }

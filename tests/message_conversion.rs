@@ -116,7 +116,10 @@ fn passes_requests_through_without_validating_options_or_history() {
         ("parallel_tool_calls", json!(false)),
         ("stream_options", json!({"include_usage":true})),
         ("tool_choice", json!("required")),
-        ("tool_choice", json!({"type":"custom","custom":{"name":"x"}})),
+        (
+            "tool_choice",
+            json!({"type":"custom","custom":{"name":"x"}}),
+        ),
         (
             "tool_choice",
             json!({"type":"function","function":{"name":"missing"}}),

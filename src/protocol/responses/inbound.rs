@@ -25,13 +25,13 @@
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use crate::config::DEFAULT_MODEL_ID;
 use crate::core::message::{Message, Role, ToolCall};
 use crate::core::protocol::Protocol;
 use crate::core::request::{CanonicalRequest, ReasoningEffort};
 use crate::core::tools::{ToolChoice, ToolDef};
 use crate::error::GatewayError;
 use crate::protocol::InboundAdapter;
+use crate::protocol::validate::{require_model, require_non_empty};
 
 use super::wire::{
     InboundTool, InboundToolChoice, Input, InputItem, ReasoningConfig, ResponsesRequest,
@@ -44,10 +44,7 @@ impl InboundAdapter for ResponsesInbound {
     type Request = ResponsesRequest;
 
     fn parse(request: ResponsesRequest) -> Result<CanonicalRequest, GatewayError> {
-        let model = request
-            .model
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| DEFAULT_MODEL_ID.to_string());
+        let model = require_model(request.model)?;
 
         // `instructions` seeds the system prompt; `system` / `developer` input
         // items append to it in order.
@@ -74,11 +71,7 @@ impl InboundAdapter for ResponsesInbound {
         };
 
         // A request must carry at least one conversational turn.
-        if messages.is_empty() {
-            return Err(GatewayError::BadRequest(
-                "Missing or invalid 'input' field".into(),
-            ));
-        }
+        require_non_empty("input", &messages)?;
 
         let mut canonical = CanonicalRequest::new(Protocol::Responses, model);
         canonical.stream = request.stream;

@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn renewal_preserves_error_kinds_and_requires_persistence() {
         use crate::error::GatewayError;
-        let store = AccountStore::new(crate::db::Db::open(":memory:").unwrap());
+        let store = AccountStore::new(crate::storage::db::Db::open(":memory:").unwrap());
         assert!(matches!(
             persist_outcome(&store, "missing", TokenRenewalOutcome::InvalidGrant),
             Err(GatewayError::TokenInvalid { .. })

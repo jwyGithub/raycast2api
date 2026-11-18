@@ -44,7 +44,7 @@ pub struct DetailParams {
 }
 
 #[derive(Debug, Queryable, Selectable, Serialize)]
-#[diesel(table_name = crate::schema::statistics)]
+#[diesel(table_name = crate::storage::schema::statistics)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Statistic {
     pub id: String,

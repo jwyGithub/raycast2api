@@ -228,7 +228,9 @@ mod tests {
 
     #[test]
     fn expired_trial_is_removed_even_without_pro_credits() {
-        let store = Arc::new(AccountStore::new(crate::db::Db::open(":memory:").unwrap()));
+        let store = Arc::new(AccountStore::new(
+            crate::storage::db::Db::open(":memory:").unwrap(),
+        ));
         let record = serde_json::from_value(
             serde_json::json!({"user":{"email":"trial@test"},"access_token":"rca_trial"}),
         )
@@ -246,7 +248,7 @@ mod tests {
 
     #[test]
     fn refresh_errors_only_remove_explicitly_rejected_accounts() {
-        let store = AccountStore::new(crate::db::Db::open(":memory:").unwrap());
+        let store = AccountStore::new(crate::storage::db::Db::open(":memory:").unwrap());
         let record = serde_json::from_value(serde_json::json!({
             "user": { "email": "refresh@x" },
             "access_token": "test-token"

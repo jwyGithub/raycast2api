@@ -4,7 +4,7 @@
 
 ## 已实现的 Session
 
-连接由 `src/redis_store.rs::connect_from_env` 创建，读取 Compose 中的 `REDIS_HOST`、`REDIS_PORT`、`REDIS_USERNAME`、`REDIS_PASSWORD`、`REDIS_DB`。异步 ConnectionManager 复用连接并自动重连；连接和响应超时均为 3 秒。配置了控制台密码却缺少 Redis，或配置的 Redis 无法连接，启动时直接报错。
+连接由 `src/storage/redis_store.rs::connect_from_env` 创建，读取 Compose 中的 `REDIS_HOST`、`REDIS_PORT`、`REDIS_USERNAME`、`REDIS_PASSWORD`、`REDIS_DB`。异步 ConnectionManager 复用连接并自动重连；连接和响应超时均为 3 秒。配置了控制台密码却缺少 Redis，或配置的 Redis 无法连接，启动时直接报错。
 
 `src/server/session.rs` 实现会话生成、签名校验、Redis 检查和注销：
 

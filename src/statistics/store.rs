@@ -5,7 +5,11 @@ use super::{
     CallContext,
     wire::{ListParams, Statistic},
 };
-use crate::{core::page::Page, db::Db, schema::statistics as s, util::unix_secs};
+use crate::{
+    core::page::Page,
+    storage::{db::Db, schema::statistics as s},
+    util::unix_secs,
+};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS statistics (
@@ -33,13 +37,13 @@ pub struct StatisticsStore {
 
 impl StatisticsStore {
     pub fn new(db: Db) -> Self {
-        crate::db::blocking(|| db.lock().batch_execute(SCHEMA))
+        crate::storage::db::blocking(|| db.lock().batch_execute(SCHEMA))
             .expect("failed to initialize statistics schema");
         Self { db }
     }
 
     pub(crate) fn start(&self, id: &str, call: &CallContext, email: &str) -> Result<(), String> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             diesel::insert_into(s::table)
                 .values((
                     s::id.eq(id),
@@ -73,7 +77,7 @@ impl StatisticsStore {
         error: Option<&str>,
         usage: Option<&serde_json::Value>,
     ) -> Result<(), String> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let usage = usage.map(serde_json::Value::to_string);
             diesel::update(
                 s::table
@@ -95,7 +99,7 @@ impl StatisticsStore {
 
     /// Called once during startup, before serving traffic after an unclean shutdown.
     pub fn interrupt_unfinished(&self) -> Result<usize, String> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             diesel::update(s::table.filter(s::finished_at.is_null()))
                 .set((
                     s::status.eq("interrupted"),
@@ -108,7 +112,7 @@ impl StatisticsStore {
     }
 
     pub fn detail(&self, id: &str) -> Result<Option<Statistic>, String> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             s::table
                 .find(id)
                 .select(Statistic::as_select())
@@ -120,7 +124,7 @@ impl StatisticsStore {
 
     pub fn list(&self, params: &ListParams) -> Result<Page<Statistic>, String> {
         let (page, size) = params.pagination()?;
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let filtered = || {
                 let mut query = s::table.into_boxed::<diesel::sqlite::Sqlite>();
                 if let Some(from) = params.requested_at_from {

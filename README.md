@@ -187,8 +187,7 @@ flowchart LR
 src/
     main.rs                       服务启动与后台维护任务
     config.rs                     运行配置
-    db.rs                         SQLite 连接
-    redis_store.rs                Redis 连接
+    storage/                      共享存储基础设施(SQLite 连接、diesel 表定义、Redis 连接)
     core/                         统一请求、响应与事件类型
     protocol/                     三种客户端协议的输入与输出适配
     raycast/                      Raycast 客户端与模型解析

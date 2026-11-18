@@ -24,6 +24,7 @@ use crate::error::GatewayError;
 pub mod chat_completions;
 pub mod messages;
 pub mod responses;
+mod validate;
 
 /// ② Normalizes one client protocol's request into a [`CanonicalRequest`].
 ///

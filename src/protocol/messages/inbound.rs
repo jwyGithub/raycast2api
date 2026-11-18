@@ -26,13 +26,13 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use crate::config::DEFAULT_MODEL_ID;
 use crate::core::message::{Message, Role, Thinking, ToolCall};
 use crate::core::protocol::Protocol;
 use crate::core::request::{CanonicalRequest, ReasoningEffort};
 use crate::core::tools::{ToolChoice, ToolDef};
 use crate::error::GatewayError;
 use crate::protocol::InboundAdapter;
+use crate::protocol::validate::{require_model, require_non_empty};
 
 use super::wire::{
     ContentBlock, InboundMessage, InboundTool, InboundToolChoice, MessageContent, MessagesRequest,
@@ -46,16 +46,8 @@ impl InboundAdapter for MessagesInbound {
     type Request = MessagesRequest;
 
     fn parse(request: MessagesRequest) -> Result<CanonicalRequest, GatewayError> {
-        if request.messages.is_empty() {
-            return Err(GatewayError::BadRequest(
-                "Missing or invalid 'messages' field".into(),
-            ));
-        }
-
-        let model = request
-            .model
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| DEFAULT_MODEL_ID.to_string());
+        require_non_empty("messages", &request.messages)?;
+        let model = require_model(request.model)?;
 
         let mut canonical = CanonicalRequest::new(Protocol::Messages, model);
         canonical.stream = request.stream;

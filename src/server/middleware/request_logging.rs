@@ -195,10 +195,10 @@ mod tests {
 
     use crate::account::store::AccountStore;
     use crate::config::Settings;
-    use crate::db::Db;
     use crate::log::store::RequestLogStore;
     use crate::raycast::client::RaycastClient;
     use crate::server::state::AppState;
+    use crate::storage::db::Db;
 
     use super::*;
 

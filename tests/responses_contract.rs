@@ -50,6 +50,22 @@ fn empty_input_is_rejected() {
 }
 
 #[test]
+fn missing_or_blank_model_is_rejected() {
+    // No default model: absent, empty and whitespace-only all fail as 400s.
+    for model in [None, Some(""), Some("  ")] {
+        let mut body = json!({ "input": "hello" });
+        if let Some(model) = model {
+            body["model"] = json!(model);
+        }
+        let err = parse(body).unwrap_err();
+        assert!(
+            matches!(&err, GatewayError::BadRequest(m) if m.contains("'model' is required")),
+            "{model:?} -> {err:?}"
+        );
+    }
+}
+
+#[test]
 fn string_input_becomes_a_single_user_message() {
     let canonical = parse(json!({ "model": "gpt-x", "input": "hello" })).unwrap();
 

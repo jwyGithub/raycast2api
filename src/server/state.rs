@@ -121,6 +121,16 @@ impl AppState {
         }
     }
 
+    /// Apply the configured `model_overrides` alias (exact match, one hop) to a
+    /// client-facing model id. Every lookup into the upstream model list must
+    /// go through this so aliases behave the same everywhere.
+    pub fn apply_model_override<'a>(&'a self, requested_id: &'a str) -> &'a str {
+        self.settings
+            .model_overrides
+            .get(requested_id)
+            .map_or(requested_id, String::as_str)
+    }
+
     /// Resolve an OpenAI-facing model id to `(provider, internal_model)`,
     /// applying the configured `model_overrides` aliases first, then looking up
     /// the upstream model list. Unknown models are rejected before inference.
@@ -129,12 +139,7 @@ impl AppState {
         requested_id: &str,
     ) -> Result<(String, String), GatewayError> {
         let client_id = requested_id;
-        let requested_id = self
-            .settings
-            .model_overrides
-            .get(requested_id)
-            .map(String::as_str)
-            .unwrap_or(requested_id);
+        let requested_id = self.apply_model_override(requested_id);
         let resolved = crate::raycast::models::resolve(&self.models().await?, requested_id)
             .ok_or_else(|| GatewayError::NotFound(format!("Model '{client_id}' was not found")))?;
         Ok((resolved.provider, resolved.model))
@@ -143,7 +148,7 @@ impl AppState {
 
 #[cfg(test)]
 pub(crate) fn compact_test_state() -> SharedState {
-    let db = crate::db::Db::open(":memory:").unwrap();
+    let db = crate::storage::db::Db::open(":memory:").unwrap();
     let accounts = Arc::new(AccountStore::new(db.clone()));
     let statistics = Arc::new(crate::statistics::store::StatisticsStore::new(db.clone()));
     let log = Arc::new(RequestLogStore::new(db));

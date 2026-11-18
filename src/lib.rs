@@ -6,7 +6,8 @@
 //! * [`account`]   — the Raycast account domain (store, import, refresh).
 //! * [`config`]    — static endpoints and runtime [`config::Settings`].
 //! * [`core`]      — the canonical, protocol- and provider-agnostic model.
-//! * [`db`]        — shared SQLite infrastructure (connection management).
+//! * [`storage`]   — shared persistence infrastructure (SQLite connection,
+//!   diesel schema, Redis connection).
 //! * [`log::context`]     — request-correlation support for the request-log store.
 //! * [`error`]     — the unified [`error::GatewayError`] (OpenAI-style output).
 //! * [`log`]       — request-log storage (inbound/upstream/response, 7-day retention).
@@ -20,14 +21,12 @@
 pub mod account;
 pub mod config;
 pub mod core;
-pub mod db;
 pub mod error;
 pub mod log;
 pub mod protocol;
 pub mod raycast;
-pub mod redis_store;
-pub mod schema;
 pub mod server;
 pub mod signature;
 pub mod statistics;
+pub mod storage;
 pub mod util;

@@ -32,7 +32,7 @@ async fn main() {
         .build()
         .expect("failed to build HTTP client");
 
-    let db = raycast2api::db::Db::open(&settings.accounts_db).unwrap_or_else(|e| {
+    let db = raycast2api::storage::db::Db::open(&settings.accounts_db).unwrap_or_else(|e| {
         eprintln!("accounts db error: {e}");
         std::process::exit(1);
     });
@@ -76,7 +76,7 @@ async fn main() {
         request_log.clone(),
         statistics,
     );
-    let redis = raycast2api::redis_store::connect_from_env()
+    let redis = raycast2api::storage::redis_store::connect_from_env()
         .await
         .unwrap_or_else(|error| {
             eprintln!("Redis configuration error: {error}");

@@ -515,7 +515,10 @@ pub(crate) async fn plan(state: &SharedState, request: &CanonicalRequest) -> Com
         Ok(models) => models,
         Err(_) => return Compaction::NotNeeded,
     };
-    let Some(entry) = models.iter().find(|m| m.id == request.model) else {
+    // Same alias step as `resolve_model`, else an aliased model never matches
+    // and compaction is silently skipped.
+    let upstream_id = state.apply_model_override(&request.model);
+    let Some(entry) = models.iter().find(|m| m.id == upstream_id) else {
         return Compaction::NotNeeded;
     };
     // `context` is in K tokens (Raycast `GET /models`); lives in the passthrough `extra`.
@@ -680,6 +683,38 @@ mod tests {
         assert_eq!(approx_tokens(""), 0);
         assert_eq!(approx_tokens("abcd"), 1);
         assert_eq!(approx_tokens("abcde"), 2);
+    }
+
+    #[tokio::test]
+    async fn plan_applies_model_overrides_before_model_lookup() {
+        let mut state = crate::server::state::compact_test_state();
+        let inner = std::sync::Arc::get_mut(&mut state).unwrap();
+        let mut settings = (*inner.settings).clone();
+        settings
+            .model_overrides
+            .insert("alias".into(), "test-model".into());
+        inner.settings = std::sync::Arc::new(settings);
+
+        let build = |model: &str| {
+            let mut request = CanonicalRequest::new(Protocol::Responses, model);
+            request.messages = vec![
+                Message::text(Role::Assistant, "x".repeat(90_000)),
+                Message::text(Role::User, "CURRENT_TASK"),
+            ];
+            request
+        };
+        // The alias must reach the same model entry (and its context window)
+        // as the real id; an unknown id still skips compaction.
+        for model in ["test-model", "alias"] {
+            assert!(
+                matches!(plan(&state, &build(model)).await, Compaction::Summarize(_)),
+                "{model} should trigger compaction"
+            );
+        }
+        assert!(matches!(
+            plan(&state, &build("unknown")).await,
+            Compaction::NotNeeded
+        ));
     }
 
     #[test]

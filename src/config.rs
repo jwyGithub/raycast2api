@@ -45,9 +45,6 @@ pub const USER_AGENT: &str = "Raycast/2.11.0.0 (x-Windows-amd64 10.0.26100.9711)
 /// completed"。取短一点,宁可多建几次连接。
 pub const UPSTREAM_POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Default model id for Messages / Responses when a request omits `model`.
-pub const DEFAULT_MODEL_ID: &str = "openai-gpt-6.1-sol";
-
 /// 限额账号冷却缺省时长(秒):上游未给 `retry_after` 时使用。
 pub const DEFAULT_COOLDOWN_SECS: u64 = 600;
 

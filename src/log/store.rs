@@ -1,9 +1,8 @@
 //! 请求日志存储:request_logs 表的写入、查询与过期清理。
 use crate::{
     core::page::Page,
-    db::Db,
     log::wire::{LogDetail, LogEntry},
-    schema::request_logs,
+    storage::{db::Db, schema::request_logs},
     util::unix_secs,
 };
 use diesel::connection::SimpleConnection;
@@ -71,7 +70,7 @@ pub struct RequestLogStore {
 }
 impl RequestLogStore {
     pub fn new(db: Db) -> Self {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             if let Err(e) = db.lock().batch_execute(SCHEMA) {
                 tracing::error!("request log schema: {e}");
             }
@@ -86,7 +85,7 @@ impl RequestLogStore {
         })
     }
     pub fn count(&self) -> Result<u64, String> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let mut c = self.db.lock();
             request_logs::table
                 .count()
@@ -96,7 +95,7 @@ impl RequestLogStore {
         })
     }
     pub fn insert_request(&self, id: &str, method: &str, path: &str, body: &serde_json::Value) {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let model = body.get("model").and_then(|m| m.as_str());
             let effort = request_effort(body);
             let body = serde_json::to_string_pretty(body).unwrap_or_default();
@@ -120,7 +119,7 @@ impl RequestLogStore {
         })
     }
     pub fn insert_request_without_body(&self, id: &str, method: &str, path: &str) {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let mut c = self.db.lock();
             if let Err(e) = diesel::insert_into(request_logs::table)
                 .values(NewLog {
@@ -141,7 +140,7 @@ impl RequestLogStore {
         })
     }
     pub fn update_upstream(&self, id: &str, body: &serde_json::Value) {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             // 从最终发送的请求体提取,避免记录成映射前的客户端模型。
             let upstream_model = body.get("model").and_then(|model| model.as_str());
             let upstream_effort = body.get("reasoning_effort").and_then(|e| e.as_str());
@@ -179,7 +178,7 @@ impl RequestLogStore {
         })
     }
     pub fn update_response(&self, id: &str, body: &str) {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let mut c = self.db.lock();
             if let Err(e) =
                 diesel::update(request_logs::table.filter(request_logs::request_id.eq(id)))
@@ -196,7 +195,7 @@ impl RequestLogStore {
         created_at: Option<i64>,
         request_id: Option<&str>,
     ) -> Result<Page<LogEntry>, String> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             if page == 0 || page_size == 0 {
                 return Err("page and page_size must be positive".into());
             }
@@ -285,7 +284,7 @@ impl RequestLogStore {
         })
     }
     pub fn detail(&self, id: &str) -> Option<LogDetail> {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let mut c = self.db.lock();
             request_logs::table
                 .filter(request_logs::request_id.eq(id))
@@ -296,7 +295,7 @@ impl RequestLogStore {
         })
     }
     pub fn cleanup_expired(&self) -> usize {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             let mut c = self.db.lock();
             match diesel::delete(
                 request_logs::table
@@ -313,7 +312,7 @@ impl RequestLogStore {
         })
     }
     pub fn vacuum(&self) {
-        crate::db::blocking(|| {
+        crate::storage::db::blocking(|| {
             if let Err(e) = self
                 .db
                 .lock()

@@ -42,6 +42,22 @@ fn empty_messages_is_rejected() {
 }
 
 #[test]
+fn missing_or_blank_model_is_rejected() {
+    // No default model: absent, empty and whitespace-only all fail as 400s.
+    for model in [None, Some(""), Some("  ")] {
+        let mut body = json!({ "messages": [{ "role": "user", "content": "hi" }] });
+        if let Some(model) = model {
+            body["model"] = json!(model);
+        }
+        let err = parse(body).unwrap_err();
+        assert!(
+            matches!(&err, GatewayError::BadRequest(m) if m.contains("'model' is required")),
+            "{model:?} -> {err:?}"
+        );
+    }
+}
+
+#[test]
 fn string_content_maps_in_order_and_drops_unknown_roles() {
     let canonical = parse(json!({
         "model": "claude-x",

@@ -1,10 +1,10 @@
 use super::*;
 use crate::{
     core::{event::CanonicalEvent, protocol::Protocol},
-    db::Db,
     protocol::{InboundAdapter, messages::MessagesInbound, responses::ResponsesInbound},
     raycast::{builder::build_chat_request, stream::canonical_events_with_retry},
     server::{build_router, state::compact_test_state},
+    storage::db::Db,
 };
 use axum::{
     body::{Body, to_bytes},
@@ -118,7 +118,7 @@ fn original_effort_and_thinking_survive_protocol_normalization() {
     assert_eq!(request.requested_thinking.unwrap()["budget_tokens"], 32000);
     let request = ResponsesInbound::parse(
         serde_json::from_value(json!({
-            "input":"hi","reasoning":{"effort":"max"}
+            "model":"anthropic-claude-test-think","input":"hi","reasoning":{"effort":"max"}
         }))
         .unwrap(),
     )
