@@ -5,7 +5,6 @@
 //! Redis connection settings are read separately from `REDIS_*` environment variables.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
 /// Endpoint that streams AI chat completions as Server-Sent Events.
@@ -76,10 +75,6 @@ pub struct ConfigFile {
     /// 直连优先,网络失败换代理。两种模式都要求代理链非空才生效。
     #[serde(default, alias = "proxiesEnabled")]
     pub proxies_enabled: Option<bool>,
-    /// Client-facing model id → gateway model id (e.g. `"gpt-6-astra"` →
-    /// `"openai-gpt-6-astra"`), applied before the upstream model lookup.
-    #[serde(default, alias = "modelOverrides")]
-    pub model_overrides: Option<HashMap<String, String>>,
 }
 
 /// Runtime configuration, loaded once at startup via [`Settings::from_path`].
@@ -99,9 +94,6 @@ pub struct Settings {
     pub bind_addr: SocketAddr,
     /// Dual-stack: secondary address for dual IPv4/IPv6 binding. `None` if single-stack.
     pub bind_addr_dual: Option<SocketAddr>,
-    /// Client-facing model id → gateway model id, applied before the upstream
-    /// model lookup. Requests naming an aliased id are sent as the mapped id.
-    pub model_overrides: HashMap<String, String>,
     /// SQLite 账号库路径(账号表与后续模块共用)。
     pub accounts_db: String,
     pub upstream_timeout: std::time::Duration,
@@ -182,7 +174,6 @@ impl Settings {
             dashboard_session_secret,
             bind_addr,
             bind_addr_dual,
-            model_overrides: config.model_overrides.unwrap_or_default(),
             upstream_timeout: std::time::Duration::from_secs(
                 config
                     .upstream_timeout_secs
@@ -292,6 +283,16 @@ mod proxy_tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn leftover_model_overrides_key_is_ignored() {
+        // 模型映射已改为控制台维护;旧 config.json 里没删的键不应让启动失败。
+        let config = serde_json::from_str(
+            r#"{"raycast_device_id":"d","raycast_signature_secret":"s","model_overrides":{"a":"b"},"modelOverrides":{"a":"b"}}"#,
+        )
+        .unwrap();
+        assert!(Settings::from_config_file(config).is_ok());
     }
 
     #[test]

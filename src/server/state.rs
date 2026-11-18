@@ -9,6 +9,7 @@ use crate::account::store::AccountStore;
 use crate::config::Settings;
 use crate::error::GatewayError;
 use crate::log::store::RequestLogStore;
+use crate::model::store::ModelAliasStore;
 use crate::raycast::client::RaycastClient;
 use crate::raycast::wire::RaycastRawModel;
 
@@ -32,6 +33,8 @@ pub struct AppState {
     pub accounts: Arc<AccountStore>,
     /// 请求日志存储(推理请求三体采集写入)。
     pub log: Arc<RequestLogStore>,
+    /// 模型别名(控制台维护,请求路径读内存缓存)。
+    pub aliases: ModelAliasStore,
     pub statistics: Arc<crate::statistics::store::StatisticsStore>,
     /// auto-compact 本地摘要缓存(Redis 不可用时保留)。
     pub summary_cache: SummaryCache,
@@ -54,6 +57,8 @@ impl AppState {
         accounts: Arc<AccountStore>,
         log: Arc<RequestLogStore>,
     ) -> Self {
+        // 与其他 store 共用同一个 SQLite 连接。
+        let aliases = ModelAliasStore::new(log.db.clone());
         Self {
             statistics: client.statistics.clone(),
             settings,
@@ -64,6 +69,7 @@ impl AppState {
             inference_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             accounts,
             log,
+            aliases,
             summary_cache: SummaryCache::default(),
             usage_cache: UsageCache::default(),
             models_cache: RwLock::new(None),
@@ -121,18 +127,17 @@ impl AppState {
         }
     }
 
-    /// Apply the configured `model_overrides` alias (exact match, one hop) to a
+    /// Apply a console-managed model alias (exact match, one hop) to a
     /// client-facing model id. Every lookup into the upstream model list must
     /// go through this so aliases behave the same everywhere.
-    pub fn apply_model_override<'a>(&'a self, requested_id: &'a str) -> &'a str {
-        self.settings
-            .model_overrides
-            .get(requested_id)
-            .map_or(requested_id, String::as_str)
+    pub fn apply_model_override(&self, requested_id: &str) -> String {
+        self.aliases
+            .resolve(requested_id)
+            .unwrap_or_else(|| requested_id.to_owned())
     }
 
     /// Resolve an OpenAI-facing model id to `(provider, internal_model)`,
-    /// applying the configured `model_overrides` aliases first, then looking up
+    /// applying the console-managed model aliases first, then looking up
     /// the upstream model list. Unknown models are rejected before inference.
     pub async fn resolve_model(
         &self,
@@ -140,7 +145,7 @@ impl AppState {
     ) -> Result<(String, String), GatewayError> {
         let client_id = requested_id;
         let requested_id = self.apply_model_override(requested_id);
-        let resolved = crate::raycast::models::resolve(&self.models().await?, requested_id)
+        let resolved = crate::raycast::models::resolve(&self.models().await?, &requested_id)
             .ok_or_else(|| GatewayError::NotFound(format!("Model '{client_id}' was not found")))?;
         Ok((resolved.provider, resolved.model))
     }
@@ -160,7 +165,6 @@ pub(crate) fn compact_test_state() -> SharedState {
         dashboard_session_secret: None,
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,
-        model_overrides: Default::default(),
         upstream_timeout: std::time::Duration::from_secs(20),
         accounts_db: ":memory:".into(),
         proxies: Vec::new(),
@@ -192,16 +196,9 @@ mod tests {
 
     #[tokio::test]
     async fn model_aliases_resolve_and_unknown_models_are_rejected() {
-        let mut state = compact_test_state();
-        let settings = &mut Arc::get_mut(&mut state).unwrap().settings;
-        let mut updated = (**settings).clone();
-        updated
-            .model_overrides
-            .insert("alias".into(), "test-model".into());
-        updated
-            .model_overrides
-            .insert("bad-alias".into(), "missing".into());
-        *settings = Arc::new(updated);
+        let state = compact_test_state();
+        state.aliases.create("alias", "test-model").unwrap();
+        state.aliases.create("bad-alias", "missing").unwrap();
         assert_eq!(
             state.resolve_model("alias").await.unwrap(),
             ("openai".into(), "test".into())

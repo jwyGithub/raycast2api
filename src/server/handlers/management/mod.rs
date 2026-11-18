@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod login;
 pub mod logs;
+pub mod models;
 pub mod statistics;
 
 use axum::{
@@ -24,6 +25,9 @@ pub(crate) fn routes() -> Router<SharedState> {
         .route("/accounts/refresh", post(accounts::refresh))
         .route("/logs/list", post(logs::list))
         .route("/logs/detail", post(logs::detail))
+        .route("/models/list", post(models::list))
+        .route("/models/alias/create", post(models::create_alias))
+        .route("/models/alias/delete", post(models::delete_alias))
         .route("/statistics/list", post(statistics::list))
         .route("/statistics/detail", post(statistics::detail))
 }

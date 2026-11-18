@@ -686,14 +686,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_applies_model_overrides_before_model_lookup() {
-        let mut state = crate::server::state::compact_test_state();
-        let inner = std::sync::Arc::get_mut(&mut state).unwrap();
-        let mut settings = (*inner.settings).clone();
-        settings
-            .model_overrides
-            .insert("alias".into(), "test-model".into());
-        inner.settings = std::sync::Arc::new(settings);
+    async fn plan_applies_model_aliases_before_model_lookup() {
+        let state = crate::server::state::compact_test_state();
+        state.aliases.create("alias", "test-model").unwrap();
 
         let build = |model: &str| {
             let mut request = CanonicalRequest::new(Protocol::Responses, model);

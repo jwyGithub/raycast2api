@@ -23,9 +23,14 @@ pub async fn auth(
         return Ok(next.run(request).await);
     }
 
-    let is_management = ["/v1/accounts/", "/v1/logs/", "/v1/statistics/"]
-        .iter()
-        .any(|prefix| path.starts_with(prefix));
+    let is_management = [
+        "/v1/accounts/",
+        "/v1/logs/",
+        "/v1/models/",
+        "/v1/statistics/",
+    ]
+    .iter()
+    .any(|prefix| path.starts_with(prefix));
     if state
         .settings
         .api_key

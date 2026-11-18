@@ -27,6 +27,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    model_aliases (alias) {
+        alias -> Text,
+        model_id -> Text,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
     request_logs (id) {
         id -> BigInt,
         request_id -> Text,
@@ -67,4 +75,4 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(accounts, request_logs, statistics);
+diesel::allow_tables_to_appear_in_same_query!(accounts, model_aliases, request_logs, statistics);

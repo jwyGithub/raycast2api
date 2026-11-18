@@ -29,7 +29,6 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
         dashboard_session_secret: Some("s".repeat(32)),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,
-        model_overrides: Default::default(),
         upstream_timeout: std::time::Duration::from_secs(20),
         accounts_db: ":memory:".into(),
         proxies: Vec::new(),

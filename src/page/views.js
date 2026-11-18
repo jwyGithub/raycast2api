@@ -1,6 +1,7 @@
 import { LitElement, html } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 import './views/accounts.js';
 import './views/logs.js';
+import './views/models.js';
 import './views/statistics.js';
 import { message } from './components/message.js';
 
@@ -57,6 +58,7 @@ class AccountConsole extends LitElement {
         this.loginAttempt = null;
         this.loggingIn = false;
         this.querySelector('logs-panel')?.closeDetail();
+        this.querySelector('models-panel')?.closeDetail();
         this.querySelector('statistics-panel')?.closeDetail();
         this.querySelectorAll('ui-date-picker').forEach(picker => picker.picker?.close());
         this.querySelectorAll('ui-tooltip').forEach(tooltip => tooltip.hide());
@@ -163,6 +165,7 @@ class AccountConsole extends LitElement {
         this.panel = panel;
         await this.updateComplete;
         if (panel === 'logs') this.querySelector('logs-panel').load();
+        if (panel === 'models') this.querySelector('models-panel').load();
         if (panel === 'statistics') this.querySelector('statistics-panel').load();
     }
     render() {
@@ -224,6 +227,7 @@ class AccountConsole extends LitElement {
                         ${[
                             ['accounts', '账号面板'],
                             ['logs', '日志面板'],
+                            ['models', '模型面板'],
                             ['statistics', '统计面板']
                         ].map(
                             ([value, label]) =>
@@ -252,6 +256,11 @@ class AccountConsole extends LitElement {
                 ?inert=${this.panel !== 'logs'}
                 .request=${(path, body) => this.request(path, body, 'logs')}
             ></logs-panel>
+            <models-panel
+                class="min-h-0 flex-1 overflow-hidden ${this.panel === 'models' ? 'block' : 'hidden'}"
+                ?inert=${this.panel !== 'models'}
+                .request=${(path, body) => this.request(path, body, 'models')}
+            ></models-panel>
             <statistics-panel
                 class="min-h-0 flex-1 overflow-hidden ${this.panel === 'statistics' ? 'block' : 'hidden'}"
                 ?inert=${this.panel !== 'statistics'}

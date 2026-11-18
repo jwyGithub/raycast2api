@@ -6,13 +6,13 @@ use axum::response::{IntoResponse, Response};
 
 use crate::error::GatewayError;
 use crate::protocol::chat_completions::wire::{ModelEntry, ModelList};
+use crate::raycast::wire::RaycastRawModel;
 use crate::server::state::SharedState;
 use crate::util::unix_secs;
 
-pub async fn list_models(State(state): State<SharedState>) -> Result<Response, GatewayError> {
-    let models = state.models().await?;
+/// 上游模型 → 对外条目(按 id 排序);`/v1/models` 与控制台模型面板共用。
+pub(crate) fn model_entries(models: &[RaycastRawModel]) -> Vec<ModelEntry> {
     let created = unix_secs();
-
     let mut data: Vec<ModelEntry> = models
         .iter()
         .map(|m| ModelEntry {
@@ -24,10 +24,15 @@ pub async fn list_models(State(state): State<SharedState>) -> Result<Response, G
         })
         .collect();
     data.sort_by(|a, b| a.id.cmp(&b.id));
+    data
+}
+
+pub async fn list_models(State(state): State<SharedState>) -> Result<Response, GatewayError> {
+    let models = state.models().await?;
 
     Ok(Json(ModelList {
         object: "list",
-        data,
+        data: model_entries(&models),
     })
     .into_response())
 }

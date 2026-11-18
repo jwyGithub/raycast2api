@@ -23,7 +23,7 @@
 * **协议兼容**：支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages，提供文本、工具调用、流式与非流式响应。
 * **模型与上下文**：查询可用模型、配置模型别名，支持为 Responses 请求自动压缩长对话。
 * **多账号池**：在可用账号之间轮询，支持令牌续期、限额冷却与换号重试。
-* **管理控制台**：在网页中导入和管理账号，查看请求日志与调用统计。请求日志保留 7 天。
+* **管理控制台**：在网页中导入和管理账号，查看模型并配置模型别名，查看请求日志与调用统计。请求日志保留 7 天。
 
 ## 快速运行
 
@@ -140,7 +140,6 @@ curl http://localhost:8787/v1/responses \
 | `dashboard_session_secret` | 无 | 启用控制台时必填，至少 32 字节，可用 `openssl rand -hex 32` 生成。 |
 | `host` / `port` | `0.0.0.0` / `8787` | HTTP 监听地址和端口。 |
 | `accounts_db` | `store/store.db` | 账号、请求日志和调用统计共用的 SQLite 文件。 |
-| `model_overrides` | `{}` | 模型别名表，格式为 `{"客户端模型 ID": "目标模型 ID"}`。 |
 | `upstream_timeout_secs` | `20` | 转发请求的超时秒数，须为正整数。流式响应持续有输出时，总时长可超过此值。 |
 | `proxies` | `[]` | 代理 URL 列表，支持 HTTP、HTTPS 和 SOCKS5。 |
 | `proxies_enabled` | `false` | 有代理时，`true` 为代理优先，`false` 为直连优先。 |
@@ -192,14 +191,15 @@ src/
     protocol/                     三种客户端协议的输入与输出适配
     raycast/                      Raycast 客户端与模型解析
     account/                      账号存储、续期与额度刷新
+    model/                        模型别名存储
     server/                       HTTP 路由、中间件、推理流程与会话
         handlers/
             inference/            推理与模型查询接口
-            management/           登录、账号、日志和统计接口
+            management/           登录、账号、日志、模型和统计接口
     log/                          请求日志
     statistics/                   调用统计
     page/                         内置管理控制台
-        views/                    账号、日志与统计面板
+        views/                    账号、日志、模型与统计面板
         components/               共享组件
 deploy/                           部署辅助脚本
 doc/                              项目文档
