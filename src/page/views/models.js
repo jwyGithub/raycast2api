@@ -52,6 +52,9 @@ class ModelsPanel extends LitElement {
         config: { state: true },
         aliasInput: { state: true },
         aliasBusy: { state: true },
+        preview: { state: true },
+        previewItems: { state: true },
+        previewLoading: { state: true },
         page: { state: true },
         total: { state: true },
         pages: { state: true },
@@ -72,6 +75,9 @@ class ModelsPanel extends LitElement {
             config: null,
             aliasInput: '',
             aliasBusy: false,
+            preview: false,
+            previewItems: [],
+            previewLoading: false,
             page: 1,
             total: 0,
             pages: 0,
@@ -86,7 +92,8 @@ class ModelsPanel extends LitElement {
     updated() {
         for (const [id, wanted] of [
             ['model-detail-dialog', this.detail],
-            ['model-config-dialog', this.config]
+            ['model-config-dialog', this.config],
+            ['model-preview-dialog', this.preview]
         ]) {
             const dialog = this.querySelector('#' + id);
             if (wanted && !dialog.open) dialog.showModal();
@@ -99,6 +106,7 @@ class ModelsPanel extends LitElement {
     closeDetail() {
         this.detail = null;
         this.closeConfig();
+        this.closePreview();
     }
     openConfig(item) {
         this.config = item;
@@ -106,6 +114,22 @@ class ModelsPanel extends LitElement {
     }
     closeConfig() {
         this.config = null;
+    }
+    // 映射预览:每次打开都重新拉全量别名。
+    async openPreview() {
+        this.preview = true;
+        this.previewItems = [];
+        this.previewLoading = true;
+        try {
+            this.previewItems = (await this.request('alias/list', {})).items || [];
+        } catch (error) {
+            message(error.message || '加载映射失败');
+        } finally {
+            this.previewLoading = false;
+        }
+    }
+    closePreview() {
+        this.preview = false;
     }
     // 别名增删:成功后重新拉列表,弹窗里的别名列表随 items 刷新。
     async changeAlias(path, body, failure) {
@@ -181,11 +205,11 @@ class ModelsPanel extends LitElement {
     render() {
         const headers = ['模型', '供应商', '能力', '推理强度', '状态', '别名', '操作'];
         return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5">
-            <div class="mb-4 flex shrink-0 flex-wrap items-end gap-3">
-                <div class="w-56">
-                    <span class="mb-1 block text-xs text-muted">供应商</span>
+            <div class="mb-4 flex shrink-0 flex-wrap items-center gap-3">
+                <div class="flex items-center gap-3">
+                    <span class="shrink-0 whitespace-nowrap text-xs text-muted">供应商</span>
                     <ui-select
-                        class="block"
+                        class="block w-50"
                         label="供应商"
                         .options=${[['', '全部供应商'], ...this.providers.map(p => [p.value, p.label])]}
                         .value=${this.draftProvider}
@@ -193,10 +217,10 @@ class ModelsPanel extends LitElement {
                         @select-change=${e => (this.draftProvider = e.detail.value)}
                     ></ui-select>
                 </div>
-                <div class="w-44">
-                    <span class="mb-1 block text-xs text-muted">订阅等级</span>
+                <div class="flex items-center gap-3">
+                    <span class="shrink-0 whitespace-nowrap text-xs text-muted">订阅等级</span>
                     <ui-select
-                        class="block"
+                        class="block w-48"
                         label="订阅等级"
                         .options=${tierOptions}
                         .value=${this.draftTier}
@@ -218,6 +242,7 @@ class ModelsPanel extends LitElement {
                         .disabled=${this.loading}
                         @button-click=${this.reset}
                     ></ui-button>
+                    <ui-button class="inline-flex" label="映射预览" @button-click=${this.openPreview}></ui-button>
                 </div>
             </div>
             <div
@@ -301,8 +326,66 @@ class ModelsPanel extends LitElement {
                 </div>
                 ${this.renderDetail()}
             </dialog>
-            ${this.renderConfig()}
+            ${this.renderConfig()} ${this.renderPreview()}
         </div>`;
+    }
+    renderPreview() {
+        return html`<dialog
+            id="model-preview-dialog"
+            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-4xl overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
+            aria-labelledby="model-preview-title"
+            @close=${this.closePreview}
+        >
+            <div class="flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3">
+                <h2 id="model-preview-title" class="text-sm font-semibold">映射预览 · 共 ${this.previewItems.length} 条</h2>
+                <button
+                    class="size-8 shrink-0 rounded-lg text-lg text-muted hover:bg-slate-100"
+                    aria-label="关闭映射预览"
+                    @click=${this.closePreview}
+                >
+                    ×
+                </button>
+            </div>
+            <div class="p-5">
+                <div class="max-h-[60dvh] overflow-auto rounded-lg border border-line">
+                    <table class="w-full whitespace-nowrap text-left text-xs">
+                        <caption class="sr-only">
+                            全部模型映射
+                        </caption>
+                        <thead class="sticky top-0 border-b border-line bg-slate-50 text-muted">
+                            <tr>
+                                ${['映射名称', '模型名称', '模型ID', '创建时间'].map(
+                                    label => html`<th scope="col" class="px-3 py-2.5 font-medium">${label}</th>`
+                                )}
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-line">
+                            ${this.previewItems.length
+                                ? this.previewItems.map(
+                                      ({ alias, model_id, model_name, created_at }) =>
+                                          html`<tr>
+                                              <td class="max-w-56 truncate px-3 py-2 font-mono text-ink" title=${alias}>
+                                                  ${alias}
+                                              </td>
+                                              <td class="max-w-40 truncate px-3 py-2" title=${model_name || model_id}>
+                                                  ${model_name || model_id}
+                                              </td>
+                                              <td class="max-w-48 truncate px-3 py-2 font-mono" title=${model_id}>
+                                                  ${model_id}
+                                              </td>
+                                              <td class="px-3 py-2 tabular-nums text-muted">${formatDate(created_at)}</td>
+                                          </tr>`
+                                  )
+                                : html`<tr>
+                                      <td colspan="4" class="py-10 text-center text-muted" role="status">
+                                          ${this.previewLoading ? '正在加载映射…' : '暂无映射'}
+                                      </td>
+                                  </tr>`}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </dialog>`;
     }
     renderRow(item) {
         const aliasCount = item.aliases?.length ?? 0;

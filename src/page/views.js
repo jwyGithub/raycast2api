@@ -226,9 +226,9 @@ class AccountConsole extends LitElement {
                     <nav class="flex justify-self-center gap-1 rounded-lg bg-slate-100 p-1" aria-label="面板切换">
                         ${[
                             ['accounts', '账号面板'],
-                            ['logs', '日志面板'],
                             ['models', '模型面板'],
-                            ['statistics', '统计面板']
+                            ['statistics', '统计面板'],
+                            ['logs', '日志面板']
                         ].map(
                             ([value, label]) =>
                                 html`<button

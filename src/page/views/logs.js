@@ -138,19 +138,19 @@ class LogsPanel extends LitElement {
     }
     render() {
         return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5">
-            <form class="mb-4 flex shrink-0 flex-wrap items-end gap-3" @submit=${this.search}>
-                <div class="min-w-48 flex-1">
-                    <label for="log-request-id" class="mb-1 block text-xs text-muted">请求 ID</label
+            <form class="mb-4 flex shrink-0 flex-wrap items-center gap-3" @submit=${this.search}>
+                <div class="flex min-w-48 flex-1 items-center gap-3">
+                    <label for="log-request-id" class="shrink-0 whitespace-nowrap text-xs text-muted">请求 ID</label
                     ><input
                         id="log-request-id"
-                        class="h-9 w-full rounded-lg border border-line bg-white px-3 text-[13px]"
+                        class="h-9 min-w-0 flex-1 rounded-lg border border-line bg-white px-3 text-[13px]"
                         placeholder="输入完整客户端请求 ID"
                         .value=${this.requestId}
                         @input=${e => (this.requestId = e.target.value)}
                     />
                 </div>
                 <ui-date-picker
-                    class="block"
+                    class="flex items-center gap-3 [&>label]:mb-0 [&>label]:shrink-0 [&>label]:whitespace-nowrap"
                     label="创建时间（精确到秒）"
                     .value=${this.createdAt}
                     .disabled=${this.loading}

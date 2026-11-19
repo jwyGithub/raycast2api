@@ -1,5 +1,5 @@
 //! 控制台模型面板:`/v1/models/list`(筛选 + 分页 + 供应商枚举)与
-//! `/v1/models/alias/{create,delete}`(模型别名)。
+//! `/v1/models/alias/{list,create,delete}`(模型别名)。
 
 use std::collections::BTreeMap;
 
@@ -132,6 +132,47 @@ pub async fn list(
         page: Page::new(items, total, page, page_size),
         providers,
     }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct AliasRow {
+    pub alias: String,
+    pub model_id: String,
+    /// 目标模型已不在模型表里时为 null。
+    pub model_name: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AliasList {
+    items: Vec<AliasRow>,
+}
+
+/// `POST /v1/models/alias/list` — 全部别名映射(按别名升序),给控制台"映射预览"使用。
+pub async fn list_aliases(
+    State(state): State<SharedState>,
+) -> Result<Json<AliasList>, GatewayError> {
+    let entries = model_entries(&state.models().await?);
+    let mut items: Vec<AliasRow> = state
+        .aliases
+        .by_model()
+        .into_iter()
+        .flat_map(|(model_id, aliases)| {
+            let model_name = entries
+                .iter()
+                .find(|entry| entry.id == model_id)
+                .and_then(|entry| str_field(entry, "name"))
+                .map(str::to_owned);
+            aliases.into_iter().map(move |a| AliasRow {
+                alias: a.alias,
+                model_id: model_id.clone(),
+                model_name: model_name.clone(),
+                created_at: a.created_at,
+            })
+        })
+        .collect();
+    items.sort_by(|a, b| a.alias.cmp(&b.alias));
+    Ok(Json(AliasList { items }))
 }
 
 #[derive(Debug, Deserialize)]

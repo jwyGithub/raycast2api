@@ -26,6 +26,7 @@ pub(crate) fn routes() -> Router<SharedState> {
         .route("/logs/list", post(logs::list))
         .route("/logs/detail", post(logs::detail))
         .route("/models/list", post(models::list))
+        .route("/models/alias/list", post(models::list_aliases))
         .route("/models/alias/create", post(models::create_alias))
         .route("/models/alias/delete", post(models::delete_alias))
         .route("/statistics/list", post(statistics::list))

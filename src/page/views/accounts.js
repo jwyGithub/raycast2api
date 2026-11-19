@@ -308,13 +308,16 @@ class AccountsPanel extends LitElement {
                 <div
                     class="mb-4 shrink-0 px-8 max-[700px]:px-5 flex items-center justify-between gap-3 max-[700px]:flex-wrap"
                 >
-                    <ui-select
-                        class="flex items-center gap-3"
-                        label="筛选账号状态"
-                        .options=${filters}
-                        .value=${this.status}
-                        @select-change=${this.chooseStatus}
-                    ></ui-select>
+                    <div class="flex items-center gap-3">
+                        <span class="shrink-0 whitespace-nowrap text-xs text-muted">状态</span>
+                        <ui-select
+                            class="block"
+                            label="筛选账号状态"
+                            .options=${filters}
+                            .value=${this.status}
+                            @select-change=${this.chooseStatus}
+                        ></ui-select>
+                    </div>
                     <div class="flex items-center gap-2">
                         <ui-button
                             class="inline-flex"
