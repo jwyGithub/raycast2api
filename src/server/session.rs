@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::Settings;
 use crate::error::GatewayError;
+use crate::storage::redis_store::RedisKv;
 
 use super::state::AppState;
 
@@ -51,11 +52,10 @@ fn valid_token(settings: &Settings, token: &str) -> bool {
     signature(settings, id).is_ok_and(|mac| mac.verify_slice(&tag).is_ok())
 }
 
-fn session_key(state: &AppState, token: &str) -> String {
-    format!(
-        "{}:dashboard:session:{}",
-        state.redis_key_prefix,
-        hex::encode(Sha256::digest(token.as_bytes()))
+fn session_key(redis: &RedisKv, token: &str) -> String {
+    redis.key(
+        "dashboard:session",
+        &hex::encode(Sha256::digest(token.as_bytes())),
     )
 }
 
@@ -76,7 +76,7 @@ fn unavailable(error: redis::RedisError) -> GatewayError {
 
 pub async fn create(state: &AppState) -> Result<String, GatewayError> {
     credentials(&state.settings)?;
-    let mut connection = state.redis.clone().ok_or_else(|| {
+    let redis = state.redis.as_ref().ok_or_else(|| {
         GatewayError::Config("Dashboard Session 需要配置 REDIS_HOST 并连接 Redis。".into())
     })?;
     let mut random = [0; 32];
@@ -85,8 +85,9 @@ pub async fn create(state: &AppState) -> Result<String, GatewayError> {
     let id = hex::encode(random);
     let tag = hex::encode(signature(&state.settings, &id)?.finalize().into_bytes());
     let token = format!("{id}.{tag}");
-    connection
-        .set_ex::<_, _, ()>(session_key(state, &token), "1", SESSION_TTL_SECS)
+    redis
+        .conn()
+        .set_ex::<_, _, ()>(session_key(redis, &token), "1", SESSION_TTL_SECS)
         .await
         .map_err(unavailable)?;
     Ok(token)
@@ -102,12 +103,13 @@ pub async fn verify(state: &AppState, headers: &HeaderMap) -> Result<(), Gateway
                 && valid_token(&state.settings, token)
         })
         .ok_or_else(|| GatewayError::Unauthorized("登录已失效，请重新登录。".into()))?;
-    let mut connection = state
+    let redis = state
         .redis
-        .clone()
+        .as_ref()
         .ok_or_else(|| GatewayError::Unavailable("登录会话存储未连接。".into()))?;
-    let exists: bool = connection
-        .exists(session_key(state, token))
+    let exists: bool = redis
+        .conn()
+        .exists(session_key(redis, token))
         .await
         .map_err(unavailable)?;
     if !exists {
@@ -120,12 +122,13 @@ pub async fn verify(state: &AppState, headers: &HeaderMap) -> Result<(), Gateway
 
 pub async fn revoke(state: &AppState, headers: &HeaderMap) -> Result<(), GatewayError> {
     if let Some(token) = cookie_token(headers).filter(|token| valid_token(&state.settings, token)) {
-        let mut connection = state
+        let redis = state
             .redis
-            .clone()
+            .as_ref()
             .ok_or_else(|| GatewayError::Unavailable("登录会话存储未连接。".into()))?;
-        connection
-            .del::<_, ()>(session_key(state, token))
+        redis
+            .conn()
+            .del::<_, ()>(session_key(redis, token))
             .await
             .map_err(unavailable)?;
     }

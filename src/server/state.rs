@@ -12,6 +12,7 @@ use crate::log::store::RequestLogStore;
 use crate::model::store::ModelAliasStore;
 use crate::raycast::client::RaycastClient;
 use crate::raycast::wire::RaycastRawModel;
+use crate::storage::redis_store::RedisKv;
 
 use super::compact::{SummaryCache, UsageCache};
 use super::health::BackendHealth;
@@ -24,8 +25,7 @@ pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
     pub settings: Arc<Settings>,
-    pub redis: Option<redis::aio::ConnectionManager>,
-    pub redis_key_prefix: String,
+    pub redis: Option<RedisKv>,
     pub client: RaycastClient,
     pub health: BackendHealth,
     pub inference_slots: std::sync::Arc<tokio::sync::Semaphore>,
@@ -41,6 +41,9 @@ pub struct AppState {
     pub summary_cache: SummaryCache,
     /// auto-compact 本地实测输入 token 缓存(Redis 不可用时保留)。
     pub usage_cache: UsageCache,
+    /// 仅测试:直接操作底层 SQLite(建触发器、重载 store)。
+    #[cfg(test)]
+    pub(crate) db: crate::storage::db::Db,
     models_cache: RwLock<Option<ModelsCache>>,
     models_refresh: Mutex<()>,
     models_failed_at: Mutex<Option<Instant>>,
@@ -51,24 +54,36 @@ struct ModelsCache {
     models: Vec<RaycastRawModel>,
 }
 
+/// 构造 `AppState` 所需的依赖;各 store 由调用方(main)持有同一个 `Db` 创建。
+pub struct AppDeps {
+    pub settings: Arc<Settings>,
+    pub client: RaycastClient,
+    pub accounts: Arc<AccountStore>,
+    pub log: Arc<RequestLogStore>,
+    pub statistics: Arc<crate::statistics::store::StatisticsStore>,
+    /// 与上面各 store 共用的 SQLite 连接,用于创建别名与 API Key store。
+    pub db: crate::storage::db::Db,
+}
+
 impl AppState {
-    pub fn new(
-        settings: Arc<Settings>,
-        client: RaycastClient,
-        accounts: Arc<AccountStore>,
-        log: Arc<RequestLogStore>,
-    ) -> Result<Self, String> {
-        // 与其他 store 共用同一个 SQLite 连接。
-        let aliases = ModelAliasStore::new(log.db.clone());
+    pub fn new(deps: AppDeps) -> Result<Self, String> {
+        let AppDeps {
+            settings,
+            client,
+            accounts,
+            log,
+            statistics,
+            db,
+        } = deps;
+        let aliases = ModelAliasStore::new(db.clone());
         let api_keys = Arc::new(crate::apikey::ApiKeyStore::new(
-            log.db.clone(),
+            db.clone(),
             &settings.api_key,
         )?);
         Ok(Self {
-            statistics: client.statistics.clone(),
+            statistics,
             settings,
             redis: None,
-            redis_key_prefix: "raycast2api".into(),
             client,
             health: BackendHealth::default(),
             inference_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
@@ -78,10 +93,17 @@ impl AppState {
             api_keys,
             summary_cache: SummaryCache::default(),
             usage_cache: UsageCache::default(),
+            #[cfg(test)]
+            db,
             models_cache: RwLock::new(None),
             models_refresh: Mutex::new(()),
             models_failed_at: Mutex::new(None),
         })
+    }
+
+    pub fn with_redis(mut self, redis: Option<RedisKv>) -> Self {
+        self.redis = redis;
+        self
     }
 
     /// Return the model list, serving a cached copy while it is fresh and
@@ -161,7 +183,7 @@ pub(crate) fn compact_test_state() -> SharedState {
     let db = crate::storage::db::Db::open(":memory:").unwrap();
     let accounts = Arc::new(AccountStore::new(db.clone()));
     let statistics = Arc::new(crate::statistics::store::StatisticsStore::new(db.clone()));
-    let log = Arc::new(RequestLogStore::new(db));
+    let log = Arc::new(RequestLogStore::new(db.clone()));
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
@@ -180,9 +202,17 @@ pub(crate) fn compact_test_state() -> SharedState {
         settings.clone(),
         accounts.clone(),
         log.clone(),
-        statistics,
+        statistics.clone(),
     );
-    let mut state = AppState::new(settings, client, accounts, log).unwrap();
+    let mut state = AppState::new(AppDeps {
+        settings,
+        client,
+        accounts,
+        log,
+        statistics,
+        db,
+    })
+    .unwrap();
     state.models_cache = RwLock::new(Some(ModelsCache {
         fetched_at: Instant::now(),
         models: vec![

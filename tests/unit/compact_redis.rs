@@ -54,7 +54,7 @@ async fn start_redis() -> (RedisServer, redis::aio::ConnectionManager) {
 
 fn state(connection: &redis::aio::ConnectionManager) -> SharedState {
     let mut state = compact_test_state();
-    Arc::get_mut(&mut state).unwrap().redis = Some(connection.clone());
+    Arc::get_mut(&mut state).unwrap().redis = Some(RedisKv::new(connection.clone(), "raycast2api"));
     state
 }
 
@@ -104,8 +104,12 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
     );
 
     let hash = prompt_prefix_hashes(&original)[2];
-    let summary_key = redis_cache_key(&writer, "summary", &hash);
-    let usage_redis_key = redis_cache_key(&writer, "usage", &usage_key.prefix_hash);
+    let summary_key = redis_cache_key(writer.redis.as_ref().unwrap(), "summary", &hash);
+    let usage_redis_key = redis_cache_key(
+        writer.redis.as_ref().unwrap(),
+        "usage",
+        &usage_key.prefix_hash,
+    );
     for key in [&summary_key, &usage_redis_key] {
         let ttl: i64 = connection.ttl(key).await.unwrap();
         assert!((1790..=1800).contains(&ttl), "{key}: {ttl}");
@@ -123,7 +127,8 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
         Some(25_000)
     );
     let mut isolated = state(&connection);
-    Arc::get_mut(&mut isolated).unwrap().redis_key_prefix = "other-gateway".into();
+    Arc::get_mut(&mut isolated).unwrap().redis =
+        Some(RedisKv::new(connection.clone(), "other-gateway"));
     assert_eq!(isolated.cached_summary(&original).await, None);
     assert_eq!(isolated.estimate_input_tokens(&original).await, None);
     let mut changed = original.clone();
@@ -222,7 +227,11 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
     fresh.record_usage(UsageKey::new(&empty), 10).await;
     fresh.record_summary(&empty, summary("empty history")).await;
     fresh.record_usage(usage_key, 0).await;
-    let invalid_key = redis_cache_key(&fresh, "usage", &UsageKey::new(&empty).prefix_hash);
+    let invalid_key = redis_cache_key(
+        fresh.redis.as_ref().unwrap(),
+        "usage",
+        &UsageKey::new(&empty).prefix_hash,
+    );
     assert!(!connection.exists::<_, bool>(invalid_key).await.unwrap());
     let mut failed = original.clone();
     failed.system = Some("failed compaction".into());

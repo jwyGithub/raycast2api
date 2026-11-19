@@ -20,7 +20,7 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
     let statistics = Arc::new(raycast2api::statistics::store::StatisticsStore::new(
         db.clone(),
     ));
-    let log = Arc::new(RequestLogStore::new(db));
+    let log = Arc::new(RequestLogStore::new(db.clone()));
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
@@ -39,9 +39,17 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
         settings.clone(),
         accounts.clone(),
         log.clone(),
-        statistics,
+        statistics.clone(),
     );
-    AppState::new(settings, client, accounts, log).unwrap()
+    AppState::new(raycast2api::server::state::AppDeps {
+        settings,
+        client,
+        accounts,
+        log,
+        statistics,
+        db,
+    })
+    .unwrap()
 }
 
 fn app(password: Option<&str>, api_key: Option<&str>) -> axum::Router {
@@ -132,7 +140,10 @@ async fn redis_session_lifecycle_and_authentication_boundaries() {
     .await
     .unwrap();
     let mut first = state(Some("password"), Some("api-key"));
-    first.redis = Some(connection.clone());
+    first.redis = Some(raycast2api::storage::redis_store::RedisKv::new(
+        connection.clone(),
+        "raycast2api",
+    ));
     let app = build_router(Arc::new(first));
     let (status, headers, body) = send(
         &app,
@@ -210,7 +221,10 @@ async fn redis_session_lifecycle_and_authentication_boundaries() {
 
     // A new application instance restores the session, even with no API key.
     let mut second = state(Some("password"), None);
-    second.redis = Some(connection.clone());
+    second.redis = Some(raycast2api::storage::redis_store::RedisKv::new(
+        connection.clone(),
+        "raycast2api",
+    ));
     let second = build_router(Arc::new(second));
     assert_eq!(
         send(&second, "/v1/session", json!({}), &auth).await.0,
@@ -232,7 +246,10 @@ async fn redis_session_lifecycle_and_authentication_boundaries() {
         if !change_password {
             Arc::make_mut(&mut changed.settings).dashboard_session_secret = Some("x".repeat(32));
         }
-        changed.redis = Some(connection.clone());
+        changed.redis = Some(raycast2api::storage::redis_store::RedisKv::new(
+            connection.clone(),
+            "raycast2api",
+        ));
         let changed = build_router(Arc::new(changed));
         assert_eq!(
             send(&changed, "/v1/session", json!({}), &auth).await.0,

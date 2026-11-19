@@ -87,7 +87,7 @@ async fn management_crud_model_catalog_and_exact_route_authorization() {
         StatusCode::CONFLICT,
     )
     .await;
-    let conflict = ApiKeyStore::new(state.log.db.clone(), KEY).err().unwrap();
+    let conflict = ApiKeyStore::new(state.db.clone(), KEY).err().unwrap();
     assert!(conflict.contains(id.as_str().unwrap()) && !conflict.contains(KEY));
 
     for (method, path) in [
@@ -393,7 +393,7 @@ async fn insert_failure_refuses_limited_keys_before_sse_across_protocols() {
         StatusCode::OK,
     )
     .await;
-    state.log.db.lock().batch_execute("CREATE TRIGGER fail_start BEFORE INSERT ON statistics BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;").unwrap();
+    state.db.lock().batch_execute("CREATE TRIGGER fail_start BEFORE INSERT ON statistics BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;").unwrap();
     for (path, input) in [
         ("/v1/responses", json!({"input":"hello"})),
         (
@@ -465,14 +465,13 @@ fn settlement_retries_original_snapshot_and_cannot_charge_recreated_key() {
     let attempt = start();
     let id = attempt.0.id.clone();
     attempt.observe_payload(&sample);
-    state.log.db.lock().batch_execute("CREATE TRIGGER fail_settle BEFORE UPDATE OF used_cost ON api_keys BEGIN SELECT RAISE(ABORT, 'test rollback'); END;").unwrap();
+    state.db.lock().batch_execute("CREATE TRIGGER fail_settle BEFORE UPDATE OF used_cost ON api_keys BEGIN SELECT RAISE(ABORT, 'test rollback'); END;").unwrap();
     attempt.finish("completed", None);
     assert_eq!(
         state.statistics.detail(&id).unwrap().unwrap().status,
         "in_progress"
     );
     state
-        .log
         .db
         .lock()
         .batch_execute("DROP TRIGGER fail_settle;")
@@ -493,7 +492,7 @@ fn settlement_retries_original_snapshot_and_cannot_charge_recreated_key() {
     };
     assert_eq!(list().used_cost, "0.0091105");
     assert_eq!(list().used_credits, "1.25");
-    let reloaded = ApiKeyStore::new(state.log.db.clone(), GLOBAL).unwrap();
+    let reloaded = ApiKeyStore::new(state.db.clone(), GLOBAL).unwrap();
     assert_eq!(
         reloaded
             .list(serde_json::from_value(json!({})).unwrap())

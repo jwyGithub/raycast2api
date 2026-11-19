@@ -37,6 +37,8 @@ use tokio::sync::Mutex;
 use crate::core::message::{Message, Role};
 use crate::core::request::CanonicalRequest;
 
+use crate::storage::redis_store::RedisKv;
+
 use super::state::{AppState, SharedState};
 
 /// Fraction of the model context window at which compaction triggers.
@@ -59,14 +61,9 @@ const TRIGGER_MARGIN_TOKENS: u64 = 8_000;
 const SUMMARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const USAGE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const USAGE_CACHE_CAPACITY: usize = 1_024;
-const REDIS_CACHE_TIMEOUT: Duration = Duration::from_millis(100);
 
-fn redis_cache_key(state: &AppState, kind: &str, hash: &[u8; 32]) -> String {
-    format!(
-        "{}:compact:v1:{kind}:{}",
-        state.redis_key_prefix,
-        hex::encode(hash)
-    )
+fn redis_cache_key(redis: &RedisKv, kind: &str, hash: &[u8; 32]) -> String {
+    redis.key(&format!("compact:v1:{kind}"), &hex::encode(hash))
 }
 
 async fn redis_cached_prefixes(
@@ -74,25 +71,20 @@ async fn redis_cached_prefixes(
     kind: &str,
     hashes: &[[u8; 32]],
 ) -> Vec<Option<Vec<u8>>> {
-    let Some(mut connection) = state.redis.clone().filter(|_| !hashes.is_empty()) else {
+    let Some(redis) = state.redis.as_ref().filter(|_| !hashes.is_empty()) else {
         return Vec::new();
     };
-    let keys: Vec<_> = hashes
+    let keys = hashes
         .iter()
-        .map(|hash| redis_cache_key(state, kind, hash))
+        .map(|hash| redis_cache_key(redis, kind, hash))
         .collect();
-    let mut command = redis::cmd("MGET");
-    command.arg(keys);
-    match tokio::time::timeout(REDIS_CACHE_TIMEOUT, command.query_async(&mut connection)).await {
-        Ok(Ok(values)) => values,
-        _ => {
-            tracing::warn!(
-                kind,
-                "compact: Redis cache read unavailable; using local estimate/cache"
-            );
-            Vec::new()
-        }
-    }
+    redis.mget(keys).await.unwrap_or_else(|| {
+        tracing::warn!(
+            kind,
+            "compact: Redis cache read unavailable; using local estimate/cache"
+        );
+        Vec::new()
+    })
 }
 
 async fn redis_record(
@@ -102,23 +94,13 @@ async fn redis_record(
     value: impl redis::ToRedisArgs,
     ttl: Duration,
 ) {
-    let Some(mut connection) = state.redis.clone() else {
+    let Some(redis) = state.redis.as_ref() else {
         return;
     };
-    let mut command = redis::cmd("SET");
-    command
-        .arg(redis_cache_key(state, kind, hash))
-        .arg(value)
-        .arg("EX")
-        .arg(ttl.as_secs());
-    if !matches!(
-        tokio::time::timeout(
-            REDIS_CACHE_TIMEOUT,
-            command.query_async::<()>(&mut connection)
-        )
-        .await,
-        Ok(Ok(()))
-    ) {
+    if !redis
+        .set_ex(redis_cache_key(redis, kind, hash), value, ttl)
+        .await
+    {
         tracing::warn!(
             kind,
             "compact: Redis cache write unavailable; kept local entry"

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use raycast2api::config::Settings;
 use raycast2api::raycast::client::RaycastClient;
 use raycast2api::server::build_router;
-use raycast2api::server::state::AppState;
+use raycast2api::server::state::{AppDeps, AppState};
 
 #[tokio::main]
 async fn main() {
@@ -37,7 +37,7 @@ async fn run() -> Result<(), String> {
     let statistics = Arc::new(raycast2api::statistics::store::StatisticsStore::new(
         db.clone(),
     ));
-    let request_log = Arc::new(raycast2api::log::store::RequestLogStore::new(db));
+    let request_log = Arc::new(raycast2api::log::store::RequestLogStore::new(db.clone()));
 
     // 启动后每小时清理一次,避免服务空闲时过期日志滞留。
     {
@@ -70,7 +70,7 @@ async fn run() -> Result<(), String> {
         settings.clone(),
         accounts.clone(),
         request_log.clone(),
-        statistics,
+        statistics.clone(),
     );
     let redis = raycast2api::storage::redis_store::connect_from_env()
         .await
@@ -78,19 +78,16 @@ async fn run() -> Result<(), String> {
     if settings.dashboard_password.is_some() && redis.is_none() {
         return Err("REDIS_HOST is required when dashboard_password is configured".into());
     }
-    let mut state = AppState::new(
-        settings.clone(),
-        client.clone(),
-        accounts.clone(),
-        request_log,
-    )
-    .map_err(|error| format!("API key initialization error: {error}"))?;
-    state.redis = redis;
-    if let Ok(prefix) = std::env::var("REDIS_KEY_PREFIX")
-        && !prefix.is_empty()
-    {
-        state.redis_key_prefix = prefix;
-    }
+    let state = AppState::new(AppDeps {
+        settings: settings.clone(),
+        client: client.clone(),
+        accounts: accounts.clone(),
+        log: request_log,
+        statistics,
+        db,
+    })
+    .map_err(|error| format!("API key initialization error: {error}"))?
+    .with_redis(redis);
     let state = Arc::new(state);
     state
         .statistics

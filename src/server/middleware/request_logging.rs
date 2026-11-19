@@ -261,7 +261,7 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         let accounts = Arc::new(AccountStore::new(db.clone()));
         let statistics = Arc::new(crate::statistics::store::StatisticsStore::new(db.clone()));
-        let log = Arc::new(RequestLogStore::new(db));
+        let log = Arc::new(RequestLogStore::new(db.clone()));
         let settings = Arc::new(Settings {
             raycast_device_id: "device".into(),
             raycast_signature_secret: "secret".into(),
@@ -280,9 +280,19 @@ mod tests {
             settings.clone(),
             accounts.clone(),
             log.clone(),
-            statistics,
+            statistics.clone(),
         );
-        let state = Arc::new(AppState::new(settings, client, accounts, log.clone()).unwrap());
+        let state = Arc::new(
+            AppState::new(crate::server::state::AppDeps {
+                settings,
+                client,
+                accounts,
+                log: log.clone(),
+                statistics,
+                db,
+            })
+            .unwrap(),
+        );
         let app = Router::new()
             .route("/v1/chat/completions", post(echo_size))
             .layer(DefaultBodyLimit::disable())

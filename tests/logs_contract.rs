@@ -20,7 +20,7 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
     let statistics = Arc::new(raycast2api::statistics::store::StatisticsStore::new(
         db.clone(),
     ));
-    let log_store = Arc::new(RequestLogStore::new(db));
+    let log_store = Arc::new(RequestLogStore::new(db.clone()));
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
@@ -39,9 +39,19 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
         settings.clone(),
         store.clone(),
         log_store.clone(),
-        statistics,
+        statistics.clone(),
     );
-    let state = Arc::new(AppState::new(settings, client, store, log_store.clone()).unwrap());
+    let state = Arc::new(
+        AppState::new(raycast2api::server::state::AppDeps {
+            settings,
+            client,
+            accounts: store,
+            log: log_store.clone(),
+            statistics,
+            db,
+        })
+        .unwrap(),
+    );
     (build_router(state), log_store)
 }
 

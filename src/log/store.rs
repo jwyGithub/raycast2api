@@ -66,7 +66,7 @@ impl StoredLog {
     }
 }
 pub struct RequestLogStore {
-    pub(crate) db: Db,
+    db: Db,
 }
 impl RequestLogStore {
     pub fn new(db: Db) -> Self {
