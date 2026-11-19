@@ -183,7 +183,7 @@ fn track_usage(
             match &event {
                 CanonicalEvent::Finish { usage, .. } => {
                     state.health.mark_working();
-                    state.record_usage(key, usage.input_tokens).await;
+                    state.compact.record_usage(key, usage.input_tokens).await;
                 }
                 CanonicalEvent::Error { .. } => state.health.mark_failed(),
                 _ => {}
@@ -268,10 +268,7 @@ mod tests {
                 Message::text(Role::Assistant, "done"),
                 Message::text(Role::User, "next"),
             ]);
-            assert_eq!(
-                state.usage_cache.estimate_tokens(&request).await,
-                Some(46_692)
-            );
+            assert_eq!(state.compact.estimate_tokens(&request).await, Some(46_692));
         }
     }
 
@@ -297,7 +294,7 @@ mod tests {
                 futures_util::stream::iter(terminal),
             );
             let _: Vec<_> = events.collect().await;
-            assert_eq!(state.usage_cache.estimate_tokens(&request).await, None);
+            assert_eq!(state.compact.estimate_tokens(&request).await, None);
         }
     }
 }

@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::protocol::Protocol;
 use crate::server::state::compact_test_state;
+use crate::storage::redis_store::RedisKv;
 use redis::AsyncCommands;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -54,7 +55,8 @@ async fn start_redis() -> (RedisServer, redis::aio::ConnectionManager) {
 
 fn state(connection: &redis::aio::ConnectionManager) -> SharedState {
     let mut state = compact_test_state();
-    Arc::get_mut(&mut state).unwrap().redis = Some(RedisKv::new(connection.clone(), "raycast2api"));
+    Arc::get_mut(&mut state).unwrap().compact.redis =
+        Some(RedisKv::new(connection.clone(), "raycast2api"));
     state
 }
 
@@ -85,9 +87,12 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
     .await
     .unwrap();
     let usage_key = UsageKey::new(&original);
-    writer.record_usage(usage_key, 25_000).await;
-    assert!(reader.summary_cache.entries.lock().await.is_empty());
-    assert_eq!(reader.estimate_input_tokens(&original).await, Some(25_000));
+    writer.compact.record_usage(usage_key, 25_000).await;
+    assert!(reader.compact.summary.entries.lock().await.is_empty());
+    assert_eq!(
+        reader.compact.estimate_input_tokens(&original).await,
+        Some(25_000)
+    );
     assert!(matches!(
         plan_for_test(&reader, &original).await,
         Compaction::Cached(_)
@@ -104,9 +109,9 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
     );
 
     let hash = prompt_prefix_hashes(&original)[2];
-    let summary_key = redis_cache_key(writer.redis.as_ref().unwrap(), "summary", &hash);
+    let summary_key = redis_cache_key(writer.compact.redis.as_ref().unwrap(), "summary", &hash);
     let usage_redis_key = redis_cache_key(
-        writer.redis.as_ref().unwrap(),
+        writer.compact.redis.as_ref().unwrap(),
         "usage",
         &usage_key.prefix_hash,
     );
@@ -119,29 +124,36 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
     drop(writer);
     let restarted = state(&connection);
     assert_eq!(
-        restarted.cached_summary(&original).await,
+        restarted.compact.cached_summary(&original).await,
         Some((2, summary("shared summary")))
     );
     assert_eq!(
-        restarted.estimate_input_tokens(&original).await,
+        restarted.compact.estimate_input_tokens(&original).await,
         Some(25_000)
     );
     let mut isolated = state(&connection);
-    Arc::get_mut(&mut isolated).unwrap().redis =
+    Arc::get_mut(&mut isolated).unwrap().compact.redis =
         Some(RedisKv::new(connection.clone(), "other-gateway"));
-    assert_eq!(isolated.cached_summary(&original).await, None);
-    assert_eq!(isolated.estimate_input_tokens(&original).await, None);
+    assert_eq!(isolated.compact.cached_summary(&original).await, None);
+    assert_eq!(
+        isolated.compact.estimate_input_tokens(&original).await,
+        None
+    );
     let mut changed = original.clone();
     changed.system = Some("other instructions".into());
-    assert_eq!(restarted.cached_summary(&changed).await, None);
-    assert_eq!(restarted.estimate_input_tokens(&changed).await, None);
+    assert_eq!(restarted.compact.cached_summary(&changed).await, None);
+    assert_eq!(
+        restarted.compact.estimate_input_tokens(&changed).await,
+        None
+    );
 
     // Local short hits must not hide longer Redis hits, even across branches.
     let mut seed = original.clone();
     seed.messages.truncate(1);
-    reader.usage_cache.record(UsageKey::new(&seed), 10).await;
+    reader.compact.usage.record(UsageKey::new(&seed), 10).await;
     reader
-        .summary_cache
+        .compact
+        .summary
         .record(
             &original.model,
             prompt_prefix_hashes(&seed)[1],
@@ -156,29 +168,46 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
     ]);
     let restarted = state(&connection);
     restarted
+        .compact
         .record_summary(&extended, summary("longest"))
         .await;
     restarted
+        .compact
         .record_usage(UsageKey::new(&extended), 30_000)
         .await;
     let mut branch = extended.clone();
     branch.messages[3].text = "other branch".into();
-    restarted.record_summary(&branch, summary("branch")).await;
-    restarted.record_usage(UsageKey::new(&branch), 40_000).await;
+    restarted
+        .compact
+        .record_summary(&branch, summary("branch"))
+        .await;
+    restarted
+        .compact
+        .record_usage(UsageKey::new(&branch), 40_000)
+        .await;
     assert_eq!(
-        reader.cached_summary(&extended).await,
+        reader.compact.cached_summary(&extended).await,
         Some((4, summary("longest")))
     );
-    assert_eq!(reader.estimate_input_tokens(&extended).await, Some(30_000));
     assert_eq!(
-        reader.cached_summary(&branch).await,
+        reader.compact.estimate_input_tokens(&extended).await,
+        Some(30_000)
+    );
+    assert_eq!(
+        reader.compact.cached_summary(&branch).await,
         Some((4, summary("branch")))
     );
-    assert_eq!(reader.estimate_input_tokens(&branch).await, Some(40_000));
+    assert_eq!(
+        reader.compact.estimate_input_tokens(&branch).await,
+        Some(40_000)
+    );
     extended
         .messages
         .push(Message::text(Role::Assistant, "abcd"));
-    assert_eq!(reader.estimate_input_tokens(&extended).await, Some(30_001));
+    assert_eq!(
+        reader.compact.estimate_input_tokens(&extended).await,
+        Some(30_001)
+    );
     // A partial hit must pass only the unsummarized suffix to the next summary.
     branch.messages[3].text = "uncached branch".into();
     match plan_for_test(&reader, &branch).await {
@@ -197,38 +226,41 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
             .set_ex(&usage_redis_key, invalid, 1800)
             .await
             .unwrap();
-        assert_eq!(fresh.estimate_input_tokens(&original).await, None);
+        assert_eq!(fresh.compact.estimate_input_tokens(&original).await, None);
     }
     let _: usize = connection.del(&usage_redis_key).await.unwrap();
     let _: usize = connection
         .lpush(&usage_redis_key, "wrong type")
         .await
         .unwrap();
-    assert_eq!(fresh.estimate_input_tokens(&original).await, None);
+    assert_eq!(fresh.compact.estimate_input_tokens(&original).await, None);
     for invalid in [String::new(), "garbage".into(), summary("  ")] {
         let _: () = connection
             .set_ex(&summary_key, invalid, 1800)
             .await
             .unwrap();
-        assert_eq!(fresh.cached_summary(&original).await, None);
+        assert_eq!(fresh.compact.cached_summary(&original).await, None);
     }
     let _: () = connection
         .set_ex(&summary_key, vec![0xff_u8], 1800)
         .await
         .unwrap();
-    assert_eq!(fresh.cached_summary(&original).await, None);
+    assert_eq!(fresh.compact.cached_summary(&original).await, None);
     let _: usize = connection.del(&summary_key).await.unwrap();
     let _: usize = connection.lpush(&summary_key, "wrong type").await.unwrap();
-    assert_eq!(fresh.cached_summary(&original).await, None);
+    assert_eq!(fresh.compact.cached_summary(&original).await, None);
 
     // Invalid records must never reach Redis.
     let mut empty = original.clone();
     empty.messages.clear();
-    fresh.record_usage(UsageKey::new(&empty), 10).await;
-    fresh.record_summary(&empty, summary("empty history")).await;
-    fresh.record_usage(usage_key, 0).await;
+    fresh.compact.record_usage(UsageKey::new(&empty), 10).await;
+    fresh
+        .compact
+        .record_summary(&empty, summary("empty history"))
+        .await;
+    fresh.compact.record_usage(usage_key, 0).await;
     let invalid_key = redis_cache_key(
-        fresh.redis.as_ref().unwrap(),
+        fresh.compact.redis.as_ref().unwrap(),
         "usage",
         &UsageKey::new(&empty).prefix_hash,
     );
@@ -242,18 +274,33 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
         .await
         .is_err()
     );
-    assert_eq!(state(&connection).cached_summary(&failed).await, None);
+    assert_eq!(
+        state(&connection).compact.cached_summary(&failed).await,
+        None
+    );
 
     // Reads neither renew Redis TTL nor populate L1 with a fresh 30-minute TTL.
-    fresh.record_summary(&original, summary("expiring")).await;
-    fresh.record_usage(usage_key, 25_000).await;
+    fresh
+        .compact
+        .record_summary(&original, summary("expiring"))
+        .await;
+    fresh.compact.record_usage(usage_key, 25_000).await;
     for key in [&summary_key, &usage_redis_key] {
         let _: bool = connection.pexpire(key, 180).await.unwrap();
     }
     let expiring_reader = state(&connection);
-    assert!(expiring_reader.cached_summary(&original).await.is_some());
+    assert!(
+        expiring_reader
+            .compact
+            .cached_summary(&original)
+            .await
+            .is_some()
+    );
     assert_eq!(
-        expiring_reader.estimate_input_tokens(&original).await,
+        expiring_reader
+            .compact
+            .estimate_input_tokens(&original)
+            .await,
         Some(25_000)
     );
     for key in [&summary_key, &usage_redis_key] {
@@ -261,8 +308,17 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
         assert!((1..=180).contains(&ttl));
     }
     tokio::time::sleep(Duration::from_millis(220)).await;
-    assert_eq!(expiring_reader.cached_summary(&original).await, None);
-    assert_eq!(expiring_reader.estimate_input_tokens(&original).await, None);
+    assert_eq!(
+        expiring_reader.compact.cached_summary(&original).await,
+        None
+    );
+    assert_eq!(
+        expiring_reader
+            .compact
+            .estimate_input_tokens(&original)
+            .await,
+        None
+    );
 
     // A stalled Redis command cannot hold a local cache lock or the response.
     let _: () = redis::cmd("CLIENT")
@@ -277,15 +333,18 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
         let fresh = fresh.clone();
         let original = original.clone();
         async move {
-            fresh.record_usage(usage_key, 123).await;
-            fresh.record_summary(&original, summary("fallback")).await;
+            fresh.compact.record_usage(usage_key, 123).await;
+            fresh
+                .compact
+                .record_summary(&original, summary("fallback"))
+                .await;
         }
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(
         tokio::time::timeout(
             Duration::from_millis(50),
-            fresh.usage_cache.estimate_tokens(&original)
+            fresh.compact.usage.estimate_tokens(&original)
         )
         .await
         .unwrap(),
@@ -294,18 +353,33 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
     pending.await.unwrap();
     assert!(started.elapsed() < Duration::from_millis(700));
     let started = Instant::now();
-    assert_eq!(fresh.estimate_input_tokens(&original).await, Some(123));
     assert_eq!(
-        fresh.cached_summary(&original).await,
+        fresh.compact.estimate_input_tokens(&original).await,
+        Some(123)
+    );
+    assert_eq!(
+        fresh.compact.cached_summary(&original).await,
         Some((2, summary("fallback")))
     );
-    assert_eq!(expiring_reader.estimate_input_tokens(&original).await, None);
-    assert_eq!(expiring_reader.cached_summary(&original).await, None);
+    assert_eq!(
+        expiring_reader
+            .compact
+            .estimate_input_tokens(&original)
+            .await,
+        None
+    );
+    assert_eq!(
+        expiring_reader.compact.cached_summary(&original).await,
+        None
+    );
     assert!(started.elapsed() < Duration::from_millis(700));
 
     // Connection loss is also a cache miss; inference/compaction still proceeds.
     drop(server);
-    assert_eq!(fresh.estimate_input_tokens(&original).await, Some(123));
+    assert_eq!(
+        fresh.compact.estimate_input_tokens(&original).await,
+        Some(123)
+    );
     let rewritten = maybe_compact(&expiring_reader, original, |_| {
         Box::pin(async { Ok("offline summary".into()) })
     })

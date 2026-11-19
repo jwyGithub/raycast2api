@@ -51,8 +51,8 @@ pub async fn responses(
             encoder.compaction(summary);
             Json(encoder.finalize().pop().unwrap().data["response"].take()).into_response()
         } else {
-            let plan = compact::plan(&state, &canonical, &model).await;
-            let canonical = compact::apply(&state, canonical, plan, summarize).await?;
+            let plan = compact::plan(&state.compact, &canonical, &model).await;
+            let canonical = compact::apply(&state.compact, canonical, plan, summarize).await?;
             pipeline::run::<ResponsesOutbound>(&state, canonical, &model, accounting).await?
         }
     };
@@ -138,14 +138,14 @@ fn stream_response_with(
             }
             return;
         }
-        let plan = compact::plan(&state, &request, &model).await;
+        let plan = compact::plan(&state.compact, &request, &model).await;
         let compacting = !matches!(plan, compact::Compaction::NotNeeded);
         if compacting {
             for frame in encoder.push(CanonicalEvent::ReasoningDelta("正在压缩上下文…\n".into())) {
                 yield to_event(&frame);
             }
         }
-        let result = compact::apply(&state, request, plan, summarize).await;
+        let result = compact::apply(&state.compact, request, plan, summarize).await;
         match result {
             Ok(request) => {
                 if compacting {

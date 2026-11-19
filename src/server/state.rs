@@ -14,7 +14,7 @@ use crate::raycast::client::RaycastClient;
 use crate::raycast::wire::RaycastRawModel;
 use crate::storage::redis_store::RedisKv;
 
-use super::compact::{SummaryCache, UsageCache};
+use super::compact::CompactCache;
 use super::health::BackendHealth;
 
 /// How long a fetched model list stays fresh before it is re-fetched.
@@ -25,6 +25,7 @@ pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
     pub settings: Arc<Settings>,
+    /// Redis 句柄(会话撤销使用);compact 缓存持有它的另一份克隆。
     pub redis: Option<RedisKv>,
     pub client: RaycastClient,
     pub health: BackendHealth,
@@ -37,10 +38,8 @@ pub struct AppState {
     pub aliases: ModelAliasStore,
     pub(crate) api_keys: Arc<crate::apikey::ApiKeyStore>,
     pub statistics: Arc<crate::statistics::store::StatisticsStore>,
-    /// auto-compact 本地摘要缓存(Redis 不可用时保留)。
-    pub summary_cache: SummaryCache,
-    /// auto-compact 本地实测输入 token 缓存(Redis 不可用时保留)。
-    pub usage_cache: UsageCache,
+    /// auto-compact 的摘要 / 实测 token 缓存(本地 L1 + 可选 Redis L2)。
+    pub compact: CompactCache,
     /// 仅测试:直接操作底层 SQLite(建触发器、重载 store)。
     #[cfg(test)]
     pub(crate) db: crate::storage::db::Db,
@@ -91,8 +90,7 @@ impl AppState {
             log,
             aliases,
             api_keys,
-            summary_cache: SummaryCache::default(),
-            usage_cache: UsageCache::default(),
+            compact: CompactCache::default(),
             #[cfg(test)]
             db,
             models_cache: RwLock::new(None),
@@ -102,6 +100,7 @@ impl AppState {
     }
 
     pub fn with_redis(mut self, redis: Option<RedisKv>) -> Self {
+        self.compact = std::mem::take(&mut self.compact).with_redis(redis.clone());
         self.redis = redis;
         self
     }
