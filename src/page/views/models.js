@@ -14,8 +14,8 @@ const usd = value => (value == null || value === '' ? '—' : '$' + Number(value
 // 订阅等级(in_better_ai_subscription):true = 仅 Pro Plus 可用,false = Pro 与 Pro Plus 均可使用。
 const tierOptions = [
     ['', '全部等级'],
-    ['pro', 'Pro / Pro Plus 均可'],
-    ['plus', '仅 Pro Plus 可用']
+    ['pro', 'Pro 可用'],
+    ['plus', 'Pro Plus 可用']
 ];
 const tierIcon = plus =>
     plus
