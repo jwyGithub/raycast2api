@@ -1,7 +1,9 @@
 use axum::extract::{Request, State};
+use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
 
+use crate::apikey::invalid_key;
 use crate::error::GatewayError;
 
 use super::super::state::SharedState;
@@ -15,11 +17,16 @@ use super::super::state::SharedState;
 /// - Anthropic style: `x-api-key: <key>` (what Claude Code / Anthropic SDKs send)
 pub async fn auth(
     State(state): State<SharedState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, GatewayError> {
     let path = request.uri().path();
     if path == "/health" || path == "/ready" {
+        return Ok(next.run(request).await);
+    }
+
+    let key = extract_api_key(request.headers());
+    if key.as_deref() == Some(state.settings.api_key.as_str()) {
         return Ok(next.run(request).await);
     }
 
@@ -28,25 +35,46 @@ pub async fn auth(
         "/v1/logs/",
         "/v1/models/",
         "/v1/statistics/",
+        "/v1/api-keys/",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix));
-    if state
-        .settings
-        .api_key
-        .as_deref()
-        .is_some_and(|expected| extract_api_key(request.headers()).as_deref() == Some(expected))
-    {
-        return Ok(next.run(request).await);
-    }
     if is_management {
+        if key
+            .as_deref()
+            .is_some_and(|key| state.api_keys.contains(key))
+        {
+            return Err(invalid_key());
+        }
+        // Keep the session's own "登录已失效/已过期，请重新登录" message.
         crate::server::session::verify(&state, request.headers()).await?;
-    } else if state.settings.api_key.is_some() {
-        return Err(GatewayError::Unauthorized(
-            "Invalid API key provided.".into(),
-        ));
+    } else if matches!(
+        (request.method(), path),
+        (
+            &Method::POST,
+            "/v1/chat/completions" | "/v1/responses" | "/v1/messages"
+        ) | (&Method::GET, "/v1/models")
+    ) {
+        let id = state
+            .api_keys
+            .verify(key.as_deref().ok_or_else(invalid_key)?)?;
+        request.extensions_mut().insert(id);
+    } else {
+        return Err(invalid_key());
     }
 
+    Ok(next.run(request).await)
+}
+
+/// Keep the existing catch-all response for unrelated callers.
+pub(in crate::server) async fn guard_unknown_route(
+    State(state): State<SharedState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, GatewayError> {
+    if extract_api_key(request.headers()).is_some_and(|key| state.api_keys.contains(&key)) {
+        return Err(invalid_key());
+    }
     Ok(next.run(request).await)
 }
 

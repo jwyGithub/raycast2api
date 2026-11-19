@@ -21,6 +21,8 @@ class UiDatePicker extends LitElement {
         this.updateComplete.then(() => {
             if (!this.isConnected || this.picker) return;
             this.picker = flatpickr(this.querySelector('input'), {
+                // 模态 dialog 位于 top layer，挂在 body 的日历会被盖住且不可点击
+                appendTo: this.closest('dialog') || undefined,
                 locale: Mandarin,
                 enableTime: true,
                 enableSeconds: true,

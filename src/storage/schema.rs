@@ -76,3 +76,21 @@ diesel::table! {
 }
 
 diesel::allow_tables_to_appear_in_same_query!(accounts, model_aliases, request_logs, statistics);
+
+diesel::table! {
+    api_keys (id) {
+        id -> Text,
+        api_key -> Text,
+        enabled -> Bool,
+        concurrency_limit -> BigInt,
+        starts_at -> Nullable<BigInt>,
+        ends_at -> Nullable<BigInt>,
+        quota_kind -> Text,
+        quota_limit -> Nullable<BigInt>,
+        used_credits -> BigInt,
+        used_cost -> BigInt,
+        model_ids -> Nullable<Text>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}

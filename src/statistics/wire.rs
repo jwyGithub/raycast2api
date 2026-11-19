@@ -20,11 +20,8 @@ pub struct ListParams {
 
 impl ListParams {
     pub fn pagination(&self) -> Result<(u32, u32), String> {
-        let page = self.page.unwrap_or(1);
-        let size = self.page_size.unwrap_or(10);
-        if page == 0 || !(1..=100).contains(&size) {
-            return Err("page must be positive and page_size must be in 1..=100".into());
-        }
+        let (page, size) = crate::core::page::page_params(self.page, self.page_size)
+            .map_err(|error| error.to_string())?;
         if self.requested_at_from.is_some_and(|from| from < 0)
             || self.requested_at_to.is_some_and(|to| to < 0)
             || matches!((self.requested_at_from, self.requested_at_to), (Some(from), Some(to)) if from > to)

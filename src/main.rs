@@ -13,24 +13,25 @@ use raycast2api::server::state::AppState;
 #[tokio::main]
 async fn main() {
     init_tracing();
+    if let Err(message) = run().await {
+        eprintln!("{message}");
+        std::process::exit(1);
+    }
+}
 
-    let settings = match Settings::from_path(std::path::Path::new("config.json")) {
-        Ok(settings) => Arc::new(settings),
-        Err(err) => {
-            eprintln!("configuration error: {err}");
-            eprintln!(
-                "Create a config.json file with raycast_device_id and raycast_signature_secret (see config.example.json)."
-            );
-            std::process::exit(1);
-        }
-    };
+async fn run() -> Result<(), String> {
+    let settings = Settings::from_path(std::path::Path::new("config.json"))
+        .map(Arc::new)
+        .map_err(|err| {
+            format!(
+                "configuration error: {err}\nCreate a config.json file with api_key, raycast_device_id and raycast_signature_secret (see config.example.json)."
+            )
+        })?;
 
     let http = raycast2api::proxies::direct_client(settings.upstream_timeout());
 
-    let db = raycast2api::storage::db::Db::open(&settings.accounts_db).unwrap_or_else(|e| {
-        eprintln!("accounts db error: {e}");
-        std::process::exit(1);
-    });
+    let db = raycast2api::storage::db::Db::open(&settings.accounts_db)
+        .map_err(|e| format!("accounts db error: {e}"))?;
     let accounts = Arc::new(raycast2api::account::store::AccountStore::new(db.clone()));
 
     let statistics = Arc::new(raycast2api::statistics::store::StatisticsStore::new(
@@ -73,20 +74,17 @@ async fn main() {
     );
     let redis = raycast2api::storage::redis_store::connect_from_env()
         .await
-        .unwrap_or_else(|error| {
-            eprintln!("Redis configuration error: {error}");
-            std::process::exit(1);
-        });
+        .map_err(|error| format!("Redis configuration error: {error}"))?;
     if settings.dashboard_password.is_some() && redis.is_none() {
-        eprintln!("REDIS_HOST is required when dashboard_password is configured");
-        std::process::exit(1);
+        return Err("REDIS_HOST is required when dashboard_password is configured".into());
     }
     let mut state = AppState::new(
         settings.clone(),
         client.clone(),
         accounts.clone(),
         request_log,
-    );
+    )
+    .map_err(|error| format!("API key initialization error: {error}"))?;
     state.redis = redis;
     if let Ok(prefix) = std::env::var("REDIS_KEY_PREFIX")
         && !prefix.is_empty()
@@ -111,93 +109,46 @@ async fn main() {
         });
     }
 
-    let listener = match tokio::net::TcpListener::bind(settings.bind_addr).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            eprintln!("failed to bind {}: {err}", settings.bind_addr);
-            std::process::exit(1);
-        }
-    };
-
+    let listener = tokio::net::TcpListener::bind(settings.bind_addr)
+        .await
+        .map_err(|err| format!("failed to bind {}: {err}", settings.bind_addr))?;
     tracing::info!(
         "raycast2api gateway listening on http://{}",
         settings.bind_addr
     );
+    let mut listeners = vec![listener];
 
-    if settings.api_key.is_none() {
-        tracing::warn!(
-            "api_key is not set — inference and model endpoints accept unauthenticated requests"
-        );
+    // Dual-stack: if binding to 0.0.0.0, also bind to [::]; failing that is non-fatal.
+    if let Some(dual_addr) = settings.bind_addr_dual {
+        match tokio::net::TcpListener::bind(dual_addr).await {
+            Ok(listener) => {
+                tracing::info!("raycast2api gateway listening on http://{dual_addr}");
+                listeners.push(listener);
+            }
+            Err(err) => tracing::warn!("failed to bind dual-stack {dual_addr}: {err}"),
+        }
     }
 
     let app = build_router(state);
-
-    // Dual-stack: if binding to 0.0.0.0, also bind to [::]
-    if let Some(dual_addr) = settings.bind_addr_dual {
-        match tokio::net::TcpListener::bind(dual_addr).await {
-            Ok(dual_listener) => {
-                tracing::info!("raycast2api gateway listening on http://{}", dual_addr);
-
-                // Serve both listeners concurrently
-                let app_clone = app.clone();
-                let primary_handle = tokio::spawn(async move {
-                    if let Err(err) = axum::serve(
-                        listener,
-                        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(shutdown_signal())
-                    .await
-                    {
-                        tracing::error!("primary server error: {err}");
-                    }
-                });
-
-                let dual_handle = tokio::spawn(async move {
-                    if let Err(err) = axum::serve(
-                        dual_listener,
-                        app_clone.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(shutdown_signal())
-                    .await
-                    {
-                        tracing::error!("dual-stack server error: {err}");
-                    }
-                });
-
-                // Wait for either to fail
-                tokio::select! {
-                    _ = primary_handle => {},
-                    _ = dual_handle => {},
-                }
-            }
-            Err(err) => {
-                tracing::warn!("failed to bind dual-stack {}: {err}", dual_addr);
-                // Fall back to primary listener only
-                if let Err(err) = axum::serve(
-                    listener,
-                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                )
-                .with_graceful_shutdown(shutdown_signal())
-                .await
-                {
-                    tracing::error!("server error: {err}");
-                    std::process::exit(1);
-                }
-            }
-        }
-    } else {
-        // Single-stack mode
-        if let Err(err) = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        {
-            tracing::error!("server error: {err}");
-            std::process::exit(1);
-        }
+    let mut servers = tokio::task::JoinSet::new();
+    for listener in listeners {
+        let app = app.clone();
+        servers.spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+        });
     }
+    // Any listener failing takes the whole process down; a clean shutdown drains them all.
+    while let Some(result) = servers.join_next().await {
+        result
+            .map_err(|err| format!("server task failed: {err}"))?
+            .map_err(|err| format!("server error: {err}"))?;
+    }
+    Ok(())
 }
 
 fn init_tracing() {

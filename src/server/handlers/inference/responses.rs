@@ -11,6 +11,7 @@ use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_util::{StreamExt, future::BoxFuture, stream::BoxStream};
 
+use crate::apikey::Accounting;
 use crate::core::event::CanonicalEvent;
 use crate::core::request::CanonicalRequest;
 use crate::error::GatewayError;
@@ -19,9 +20,11 @@ use crate::protocol::InboundAdapter;
 use crate::protocol::responses::outbound::{StreamEncoder, custom_names, to_event};
 use crate::protocol::responses::wire::ResponsesRequest;
 use crate::protocol::responses::{ResponsesInbound, ResponsesOutbound};
+use crate::raycast::wire::RaycastRawModel;
 use crate::server::compact;
 use crate::server::pipeline;
 use crate::server::state::SharedState;
+use crate::statistics::Attempt;
 use crate::util::{new_uuid, unix_secs};
 
 pub async fn responses(
@@ -29,34 +32,64 @@ pub async fn responses(
     Json(request): Json<ResponsesRequest>,
 ) -> Result<Response, GatewayError> {
     let canonical = ResponsesInbound::parse(request)?;
-    if canonical.stream {
-        return Ok(stream_response(state, canonical));
-    }
-    // Auto compact: when the conversation crosses ~90% of the model context
-    // window, summarize the prefix and rewrite the history first. The closure
-    // runs the summarization completion through the upstream and folds it to
-    // plain text (no recursion — `maybe_compact` is called only from here).
-    let canonical = compact::maybe_compact(&state, canonical, |summary_request| {
-        let state = state.clone();
-        Box::pin(async move { summarize(&state, summary_request).await })
-    })
-    .await?;
-    pipeline::run::<ResponsesOutbound>(&state, canonical).await
+    let (model, admission) = pipeline::admit(&state, &canonical.model).await?;
+    let (permit, accounting) = admission.unzip();
+    let response = if canonical.stream {
+        let reserved = pipeline::reserve_attempt(&state, &canonical, &model, accounting.as_ref())?;
+        stream_response(state, canonical, model, accounting, reserved)
+    } else {
+        let summary_state = state.clone();
+        let summary_model = model.clone();
+        let summarize = move |request| -> BoxFuture<'static, _> {
+            Box::pin(async move { summarize(&summary_state, request, &summary_model).await })
+        };
+        if canonical.compaction_trigger {
+            let messages = canonical.messages.clone();
+            let summary = compact::summarize_messages(&canonical, messages, summarize).await?;
+            let mut encoder =
+                StreamEncoder::new(format!("resp_{}", new_uuid()), canonical.model, unix_secs());
+            encoder.compaction(summary);
+            Json(encoder.finalize().pop().unwrap().data["response"].take()).into_response()
+        } else {
+            let plan = compact::plan(&state, &canonical, &model).await;
+            let canonical = compact::apply(&state, canonical, plan, summarize).await?;
+            pipeline::run::<ResponsesOutbound>(&state, canonical, &model, accounting).await?
+        }
+    };
+    Ok(pipeline::hold_permit(response, permit))
 }
 
 /// Keep compaction and inference in one response, with no detached background task.
-fn stream_response(state: SharedState, request: CanonicalRequest) -> Response {
+fn stream_response(
+    state: SharedState,
+    request: CanonicalRequest,
+    model: RaycastRawModel,
+    accounting: Option<Accounting>,
+    reserved: Option<Attempt>,
+) -> Response {
     let summary_state = state.clone();
     let inference_state = state.clone();
+    let summary_model = model.clone();
+    let inference_model = model.clone();
     stream_response_with(
         state,
         request,
-        move |request| Box::pin(async move { summarize(&summary_state, request).await }),
+        model,
+        move |request| {
+            Box::pin(async move { summarize(&summary_state, request, &summary_model).await })
+        },
         move |request| {
             Box::pin(async move {
-                Ok(pipeline::events(&inference_state, &request, "inference")
-                    .await?
-                    .boxed())
+                Ok(pipeline::events(
+                    &inference_state,
+                    &request,
+                    &inference_model,
+                    "inference",
+                    accounting,
+                    reserved,
+                )
+                .await?
+                .boxed())
             })
         },
     )
@@ -65,6 +98,7 @@ fn stream_response(state: SharedState, request: CanonicalRequest) -> Response {
 fn stream_response_with(
     state: SharedState,
     request: CanonicalRequest,
+    model: RaycastRawModel,
     summarize: impl FnOnce(CanonicalRequest) -> BoxFuture<'static, Result<String, GatewayError>>
     + Send
     + 'static,
@@ -104,7 +138,7 @@ fn stream_response_with(
             }
             return;
         }
-        let plan = compact::plan(&state, &request).await;
+        let plan = compact::plan(&state, &request, &model).await;
         let compacting = !matches!(plan, compact::Compaction::NotNeeded);
         if compacting {
             for frame in encoder.push(CanonicalEvent::ReasoningDelta("正在压缩上下文…\n".into())) {
@@ -195,8 +229,9 @@ impl Drop for RequestChannel {
 async fn summarize(
     state: &SharedState,
     request: crate::core::request::CanonicalRequest,
+    model: &RaycastRawModel,
 ) -> Result<String, GatewayError> {
-    let events = pipeline::events(state, &request, "compact").await?;
+    let events = pipeline::events(state, &request, model, "compact", None, None).await?;
     let mut events = std::pin::pin!(events);
     let mut text = String::new();
     while let Some(event) = events.next().await {
@@ -255,8 +290,9 @@ mod tests {
         let response = REQUEST_ID
             .scope("compact-stream-test".into(), async {
                 stream_response_with(
-                    state,
+                    state.clone(),
                     request(),
+                    state.resolve_model("test-model").await.unwrap(),
                     move |_| {
                         Box::pin(async move {
                             assert_eq!(debug::current_request_id(), "compact-stream-test");
@@ -358,8 +394,9 @@ mod tests {
     async fn summary_failure_emits_failed_without_inference_or_completed() {
         let state = crate::server::state::compact_test_state();
         let response = stream_response_with(
-            state,
+            state.clone(),
             request(),
+            state.resolve_model("test-model").await.unwrap(),
             |_| {
                 Box::pin(async {
                     Err(GatewayError::Upstream {
@@ -388,8 +425,9 @@ mod tests {
     async fn dropping_progress_stream_cancels_compaction() {
         let state = crate::server::state::compact_test_state();
         let response = stream_response_with(
-            state,
+            state.clone(),
             request(),
+            state.resolve_model("test-model").await.unwrap(),
             |_| panic!("summary must not start after cancellation"),
             |_| panic!("inference must not start"),
         );
@@ -418,8 +456,9 @@ mod tests {
             grammar: String::new(),
         });
         let response = stream_response_with(
-            state,
+            state.clone(),
             request,
+            state.resolve_model("test-model").await.unwrap(),
             |_| panic!("no compaction needed"),
             |_| {
                 Box::pin(async {
@@ -461,8 +500,9 @@ mod tests {
         let response = REQUEST_ID
             .scope("compact-cancel-test".into(), async {
                 stream_response_with(
-                    state,
+                    state.clone(),
                     request(),
+                    state.resolve_model("test-model").await.unwrap(),
                     move |_| {
                         Box::pin(async move {
                             let _guard = Cancelled(summary_cancelled);
@@ -495,8 +535,9 @@ mod tests {
     async fn inference_connection_failure_after_compaction_emits_failed() {
         let state = crate::server::state::compact_test_state();
         let response = stream_response_with(
-            state,
+            state.clone(),
             request(),
+            state.resolve_model("test-model").await.unwrap(),
             |_| Box::pin(async { Ok("summary".into()) }),
             |_| Box::pin(async { Err(GatewayError::NoAccount("no account".into())) }),
         );
@@ -520,8 +561,9 @@ mod tests {
         let mut request = request();
         request.compaction_trigger = true;
         let response = stream_response_with(
-            state,
+            state.clone(),
             request,
+            state.resolve_model("test-model").await.unwrap(),
             |_| Box::pin(async { Ok(format!("{}\nSUMMARY", compact::SUMMARY_PREFIX)) }),
             |_| panic!("no inference for a compaction trigger"),
         );

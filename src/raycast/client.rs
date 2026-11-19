@@ -108,6 +108,7 @@ impl RaycastClient {
         &self,
         request: &RaycastChatRequest,
         call: &CallContext,
+        mut reserved: Option<Attempt>,
     ) -> Result<reqwest::Response, GatewayError> {
         let body = serde_json::to_string(request)?;
         let attempts = self.accounts.count_available().max(1);
@@ -125,14 +126,14 @@ impl RaycastClient {
                 }
             };
             tracing::info!(account = %account.email, tag = ?account.tag, "→ using account");
-            let result = self.try_chat(&account, &body, call).await;
+            let result = self.try_chat(&account, &body, call, reserved.take()).await;
             let result = if matches!(result, Err(GatewayError::TokenInvalid { .. })) {
                 match crate::account::token_renewal::auto_renew(&self.accounts, self, &account)
                     .await
                 {
                     Ok(token) => {
                         account.access_token = token;
-                        self.try_chat(&account, &body, call).await
+                        self.try_chat(&account, &body, call, reserved.take()).await
                     }
                     Err(error) => Err(error),
                 }
@@ -236,23 +237,6 @@ impl RaycastClient {
                             last_error = Some(GatewayError::Upstream { status, message });
                             continue;
                         }
-                        if err.parsed.is_content_policy_blocked() {
-                            // 流中段的内容策略拦截(peek 只扫首 payload,真实流
-                            // 开头是 ping,错误在其后):与账号无关,
-                            // retryable:false,换号/重试纯属浪费 —— 立即终止,
-                            // 附排查提示透传给客户端(同 peek 分支语义)。
-                            tracing::warn!(
-                                account = %account.email,
-                                "→ upstream content-policy block mid-stream (request content, not account): {message}"
-                            );
-                            return Err(GatewayError::Upstream {
-                                status,
-                                message: format!(
-                                    "{message}{}",
-                                    crate::raycast::parser::content_policy_hint()
-                                ),
-                            });
-                        }
                         tracing::warn!(
                             account = %account.email,
                             "→ upstream in-stream error (not rate-limit): {message}"
@@ -308,6 +292,7 @@ impl RaycastClient {
         account: &AccountRow,
         body: &str,
         call: &CallContext,
+        reserved: Option<Attempt>,
     ) -> Result<reqwest::Response, GatewayError> {
         let timestamp = unix_secs().to_string();
         let signature = calculate_signature_v2(
@@ -340,7 +325,9 @@ impl RaycastClient {
             .headers(headers)
             .body(body.to_owned())
             .build()?;
-        let response = self.send(request, Some((call, &account.email))).await?;
+        let response = self
+            .send(request, Some((call, &account.email)), reserved)
+            .await?;
         let attempt = response.extensions().get::<Attempt>().cloned();
         let result = ensure_success(response).await;
         if let (Err(error), Some(attempt)) = (&result, attempt) {
@@ -405,7 +392,7 @@ impl RaycastClient {
             .headers(headers)
             .timeout(self.settings.upstream_timeout())
             .build()?;
-        let response = self.send(request, None).await?;
+        let response = self.send(request, None, None).await?;
         let response = ensure_success(response).await?;
         Ok(response.json().await?)
     }
@@ -554,8 +541,8 @@ mod tests {
             );
             let upstream =
                 crate::raycast::builder::build_chat_request(&request, "openai", "upstream");
-            let call = CallContext::new(&request, &upstream, "inference");
-            let result = client.send_chat(&upstream, &call).await;
+            let call = CallContext::new(&request, &upstream.provider, &upstream.model, "inference");
+            let result = client.send_chat(&upstream, &call, None).await;
             if failure == "policy" {
                 assert!(result.is_err());
             } else {

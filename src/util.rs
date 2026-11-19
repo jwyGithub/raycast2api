@@ -1,4 +1,4 @@
-//! Small shared helpers with no external dependencies.
+//! Small shared helpers.
 
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,24 +24,19 @@ pub fn new_uuid() -> String {
     }
     b[6] = (b[6] & 0x0f) | 0x40; // version 4
     b[8] = (b[8] & 0x3f) | 0x80; // variant 1
+    format_uuid(b)
+}
+
+/// Render 16 bytes in the canonical 8-4-4-4-12 lowercase-hex UUID layout.
+fn format_uuid(b: [u8; 16]) -> String {
+    let h = hex::encode(b);
     format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0],
-        b[1],
-        b[2],
-        b[3],
-        b[4],
-        b[5],
-        b[6],
-        b[7],
-        b[8],
-        b[9],
-        b[10],
-        b[11],
-        b[12],
-        b[13],
-        b[14],
-        b[15],
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
     )
 }
 
@@ -103,25 +98,7 @@ pub fn derive_uuid(seed: &[u8]) -> String {
     let mut b = fnv1a_128(seed).to_be_bytes();
     b[6] = (b[6] & 0x0f) | 0x80; // version 8 (custom)
     b[8] = (b[8] & 0x3f) | 0x80; // variant 1
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0],
-        b[1],
-        b[2],
-        b[3],
-        b[4],
-        b[5],
-        b[6],
-        b[7],
-        b[8],
-        b[9],
-        b[10],
-        b[11],
-        b[12],
-        b[13],
-        b[14],
-        b[15],
-    )
+    format_uuid(b)
 }
 
 /// Encode a 128-bit value as a 26-char Crockford base32 string (ULID width).
@@ -139,32 +116,27 @@ fn encode_ulid(value: u128) -> String {
 /// Today's date in UTC as `YYYY-MM-DD`, as the Raycast backend expects for
 /// `current_date`.
 pub fn current_date() -> String {
-    date_utc(unix_secs())
-}
-
-/// Format a Unix timestamp (whole seconds) as a UTC `YYYY-MM-DD` date.
-fn date_utc(secs: u64) -> String {
-    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// Convert a count of days since the Unix epoch into a `(year, month, day)`
-/// UTC civil date, via Howard Hinnant's `civil_from_days` algorithm.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = (z - era * 146_097) as u64; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    time::OffsetDateTime::now_utc().date().to_string()
 }
 
 pub(crate) fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
     std::fs::File::open("/dev/urandom")?.read_exact(buf)
+}
+
+/// Mask an API key for display and storage: `****` between the first and last
+/// few characters. Each side keeps at most `MASK_EDGE` characters and never more
+/// than a quarter of the key, so at least half of it stays hidden; keys of 8
+/// characters or fewer are hidden entirely. Single source for every `api_key_masked`.
+pub fn mask_api_key(key: &str) -> String {
+    const MASK_EDGE: usize = 8;
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 8 {
+        return "****".into();
+    }
+    let edge = (chars.len() / 4).min(MASK_EDGE);
+    let head: String = chars[..edge].iter().collect();
+    let tail: String = chars[chars.len() - edge..].iter().collect();
+    format!("{head}****{tail}")
 }
 
 #[cfg(test)]
@@ -175,10 +147,30 @@ mod tests {
     // are covered by `tests/id_derivation.rs`.
 
     #[test]
-    fn date_utc_matches_known_dates() {
-        assert_eq!(date_utc(0), "1970-01-01");
-        assert_eq!(date_utc(946_684_800), "2000-01-01");
-        assert_eq!(date_utc(1_609_459_200), "2021-01-01");
-        assert_eq!(date_utc(1_756_944_000), "2025-09-04");
+    fn current_date_is_iso_and_uuids_are_well_formed() {
+        let date = current_date();
+        assert_eq!(date.len(), 10);
+        assert_eq!((&date[4..5], &date[7..8]), ("-", "-"));
+        for id in [new_uuid(), derive_uuid(b"seed")] {
+            assert_eq!(id.len(), 36);
+            assert_eq!(
+                id.match_indices('-').map(|(i, _)| i).collect::<Vec<_>>(),
+                [8, 13, 18, 23]
+            );
+        }
+    }
+
+    #[test]
+    fn mask_api_key_keeps_up_to_eight_chars_each_side() {
+        // 生成的托管 Key（sk- + 64 位十六进制）：前后各 8 个字符。
+        let generated = format!("sk-{}", "0123456789abcdef".repeat(4));
+        assert_eq!(mask_api_key(&generated), "sk-01234****89abcdef");
+        // 短 Key 每侧不超过四分之一，至少一半内容保持隐藏。
+        assert_eq!(mask_api_key("abcdefghijklmnop"), "abcd****mnop");
+        assert_eq!(mask_api_key("abcdefghi"), "ab****hi");
+        // 8 个字符及以下不泄露任何内容；按字符而非字节切片，多字节字符不会 panic。
+        assert_eq!(mask_api_key("abcdefgh"), "****");
+        assert_eq!(mask_api_key(""), "****");
+        assert_eq!(mask_api_key("密钥密钥密钥密钥密钥"), "密钥****密钥");
     }
 }

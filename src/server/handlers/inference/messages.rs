@@ -21,5 +21,5 @@ pub async fn messages(
     Json(request): Json<MessagesRequest>,
 ) -> Result<Response, GatewayError> {
     let canonical = MessagesInbound::parse(request)?;
-    pipeline::run::<MessagesOutbound>(&state, canonical).await
+    pipeline::run_admitted::<MessagesOutbound>(&state, canonical).await
 }

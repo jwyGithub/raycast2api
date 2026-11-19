@@ -12,20 +12,47 @@ const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
 /// Wrap JSON responses from gateway API routes in the shared REST envelope.
 /// Inference protocol routes and health probes keep their existing contracts.
 pub async fn response_format(request: Request, next: Next) -> Response {
+    let no_store = request.uri().path().starts_with("/v1/api-keys/");
+    let mut response = format_response(request, next, no_store).await;
+    if no_store {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        );
+    }
+    response
+}
+
+async fn format_response(request: Request, next: Next, api_keys: bool) -> Response {
     let path = request.uri().path();
     if !is_rest_api_path(path) || request.method() == Method::HEAD {
         return next.run(request).await;
     }
 
     let response = next.run(request).await;
-    let status = response.status();
+    let invalid_key_payload = api_keys
+        && matches!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY | StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+    let status = if invalid_key_payload {
+        StatusCode::BAD_REQUEST
+    } else {
+        response.status()
+    };
     let is_json = response
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("application/json"));
     let (mut parts, body) = response.into_parts();
-    let (body, error_message) = if status.is_client_error() || status.is_server_error() {
+    parts.status = status;
+    let (body, error_message) = if invalid_key_payload {
+        (
+            Body::empty(),
+            Some("API Key 请求字段无效，请检查 JSON 参数。".to_owned()),
+        )
+    } else if status.is_client_error() || status.is_server_error() {
         let bytes = match to_bytes(body, MAX_ERROR_RESPONSE_BYTES).await {
             Ok(bytes) => bytes,
             Err(error) => {

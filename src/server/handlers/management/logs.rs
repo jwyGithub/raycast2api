@@ -5,6 +5,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 
+use crate::core::page::page_params;
 use crate::error::GatewayError;
 use crate::log::wire::LogDetail;
 use crate::server::state::SharedState;
@@ -30,17 +31,10 @@ pub async fn list(
     State(state): State<SharedState>,
     Json(params): Json<ListParams>,
 ) -> Result<axum::response::Response, GatewayError> {
-    let page = params.page.unwrap_or(1);
-    let page_size = params.page_size.unwrap_or(10);
-    if page == 0 || !(1..=100).contains(&page_size) {
-        return Err(GatewayError::BadRequest(
-            "page must be positive and page_size must be in 1..=100".into(),
-        ));
-    }
     let result = state
         .log
         .list(
-            (page, page_size),
+            page_params(params.page, params.page_size)?,
             params.created_at,
             params.request_id.as_deref(),
         )

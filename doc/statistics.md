@@ -19,7 +19,7 @@
 | --- | --- |
 | `id` | 上游调用 ID：网关每次实际向上游发送调用时生成，唯一标识一条统计记录；详情按此字段查询 |
 | `request_id` | 请求 ID：网关收到客户端推理请求时生成，同一次请求的摘要、重试等上游调用共享此 ID，可用于关联请求日志 |
-| `api_key`、`api_key_masked` | 请求时使用的原始 key 与脱敏值；Bearer 优先，`x-api-key` 次之；无 key 时为 `null`。长度大于 8 时保留前后各 4 个字符，否则显示 `****` |
+| `api_key`、`api_key_masked` | 请求时使用的原始 key 与脱敏值；Bearer 优先，`x-api-key` 次之；无 key 时为 `null`。长度大于 8 时保留前后各 N 个字符（N 为长度的四分之一，最多 8），否则显示 `****` |
 | `requested_at`、`started_at`、`finished_at` | 客户端到达、尝试开始、尝试完成时间；数据库为 UTC 秒级整数，接口为 `Asia/Shanghai` 的 `YYYY-MM-DD HH:mm:ss` 字符串；未完成时 `finished_at` 为 `null` |
 | `request_ip` | 连接 IP；配置可信反向代理后可解析转发链。缺少连接信息时为 `null` |
 | `account_email` | 本次发送实际选用的账号邮箱快照；后续删除账号不删除统计 |

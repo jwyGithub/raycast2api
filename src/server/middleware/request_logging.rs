@@ -70,18 +70,8 @@ fn request_context(request: &Request) -> RequestContext {
         request_id: String::new(),
         requested_at: util::unix_secs() as i64,
         api_key: key.clone(),
-        api_key_masked: key.as_ref().map(|key| {
-            let chars: Vec<_> = key.chars().collect();
-            if chars.len() <= 8 {
-                "****".into()
-            } else {
-                format!(
-                    "{}****{}",
-                    chars[..4].iter().collect::<String>(),
-                    chars[chars.len() - 4..].iter().collect::<String>()
-                )
-            }
-        }),
+        managed_key_id: request.extensions().get::<crate::apikey::KeyId>().cloned(),
+        api_key_masked: key.as_deref().map(util::mask_api_key),
         request_ip: peer.map(|ip| ip.to_string()),
     }
 }
@@ -275,7 +265,7 @@ mod tests {
         let settings = Arc::new(Settings {
             raycast_device_id: "device".into(),
             raycast_signature_secret: "secret".into(),
-            api_key: None,
+            api_key: "test-key".into(),
             dashboard_password: None,
             dashboard_session_secret: None,
             bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -292,7 +282,7 @@ mod tests {
             log.clone(),
             statistics,
         );
-        let state = Arc::new(AppState::new(settings, client, accounts, log.clone()));
+        let state = Arc::new(AppState::new(settings, client, accounts, log.clone()).unwrap());
         let app = Router::new()
             .route("/v1/chat/completions", post(echo_size))
             .layer(DefaultBodyLimit::disable())

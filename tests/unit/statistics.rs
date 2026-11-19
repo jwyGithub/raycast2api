@@ -20,8 +20,7 @@ use wire::ListParams;
 fn call(request_id: &str, kind: &'static str) -> CallContext {
     let mut request = CanonicalRequest::new(Protocol::Responses, "client-model");
     request.requested_effort = Some("max".into());
-    let upstream = build_chat_request(&request, "openai", "upstream-model");
-    let mut call = CallContext::new(&request, &upstream, kind);
+    let mut call = CallContext::new(&request, "openai", "upstream-model", kind);
     call.request.request_id = request_id.into();
     call.request.requested_at = 0;
     call
@@ -58,24 +57,44 @@ fn idempotent_completion_retains_costs_and_is_independent_of_log_cleanup() {
     let store = Arc::new(StatisticsStore::new(db.clone()));
     let context = call("same-request", "compact");
     store
-        .start("summary", &context, "summary@example.com")
+        .start("summary", &context, Some("summary@example.com"))
         .unwrap();
     assert!(
         store
-            .start("summary", &context, "other@example.com")
+            .start("summary", &context, Some("other@example.com"))
             .is_err()
     );
     store
-        .finish("summary", "completed", Some(200), None, Some(&usage()))
+        .finish(
+            "summary",
+            &Terminal {
+                status: "completed".into(),
+                http_status: Some(200),
+                error: None,
+                usage: Some(usage()),
+                amounts: None,
+            },
+            None,
+        )
         .unwrap();
     store
-        .finish("summary", "failed", Some(500), Some("duplicate"), None)
+        .finish(
+            "summary",
+            &Terminal {
+                status: "failed".into(),
+                http_status: Some(500),
+                error: Some("duplicate".into()),
+                usage: None,
+                amounts: None,
+            },
+            None,
+        )
         .unwrap();
     store
         .start(
             "inference",
             &call("same-request", "inference"),
-            "main@example.com",
+            Some("main@example.com"),
         )
         .unwrap();
     db.lock()
@@ -391,7 +410,7 @@ async fn three_protocols_capture_metadata_for_streaming_and_non_streaming_reques
                 .method("POST")
                 .uri(path)
                 .header("content-type", "application/json")
-                .header("x-api-key", "caller-key-123456")
+                .header("x-api-key", "test-key")
                 .header("x-forwarded-for", "192.0.2.1")
                 .body(Body::from(body.to_string()))
                 .unwrap();
@@ -422,7 +441,7 @@ async fn three_protocols_capture_metadata_for_streaming_and_non_streaming_reques
                     "max"
                 })
             );
-            assert_eq!(row.api_key.as_deref(), Some("caller-key-123456"));
+            assert_eq!(row.api_key.as_deref(), Some("test-key"));
             assert_ne!(row.request_id, "-");
             assert!(state.log.detail(&row.request_id).is_some());
             assert_eq!(
@@ -446,7 +465,7 @@ async fn responses_summary_and_inference_share_request_but_keep_separate_usage()
             .method("POST")
             .uri("/v1/responses")
             .header("content-type", "application/json")
-            .header("x-api-key", "caller-key-123456")
+            .header("x-api-key", "test-key")
             .body(Body::from(body.to_string()))
             .unwrap();
         let response = build_router(state.clone()).oneshot(request).await.unwrap();
@@ -486,22 +505,30 @@ async fn responses_summary_and_inference_share_request_but_keep_separate_usage()
 
 #[tokio::test]
 async fn authenticated_endpoints_paginate_filter_validate_and_return_details() {
-    let mut state = compact_test_state();
-    Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().settings).api_key =
-        Some("test-key".into());
+    let state = compact_test_state();
     let mut context = call("request", "inference");
     context.request.api_key = Some("fingerprint".into());
     state
         .statistics
-        .start("first", &context, "a@example.com")
+        .start("first", &context, Some("a@example.com"))
         .unwrap();
     state
         .statistics
-        .finish("first", "completed", Some(200), None, Some(&usage()))
+        .finish(
+            "first",
+            &Terminal {
+                status: "completed".into(),
+                http_status: Some(200),
+                error: None,
+                usage: Some(usage()),
+                amounts: None,
+            },
+            None,
+        )
         .unwrap();
     state
         .statistics
-        .start("second", &call("other", "compact"), "b@example.com")
+        .start("second", &call("other", "compact"), Some("b@example.com"))
         .unwrap();
     let app = build_router(state.clone());
     let (status, page) = query(&app, "/v1/statistics/list", json!({}), true).await;
@@ -568,3 +595,6 @@ async fn authenticated_endpoints_paginate_filter_validate_and_return_details() {
     );
     assert_eq!(state.log.count().unwrap(), 0);
 }
+
+#[path = "api_keys.rs"]
+mod api_keys;

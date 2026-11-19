@@ -1,7 +1,7 @@
 //! `GET /v1/models` — OpenAI-compatible model listing.
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::response::{IntoResponse, Response};
 
 use crate::error::GatewayError;
@@ -27,8 +27,16 @@ pub(crate) fn model_entries(models: &[RaycastRawModel]) -> Vec<ModelEntry> {
     data
 }
 
-pub async fn list_models(State(state): State<SharedState>) -> Result<Response, GatewayError> {
-    let models = state.models().await?;
+pub(crate) async fn list_models(
+    State(state): State<SharedState>,
+    key: Option<Extension<crate::apikey::KeyId>>,
+) -> Result<Response, GatewayError> {
+    let mut models = state.models().await?;
+    if let Some(Extension(key)) = key
+        && let Some(allowed) = state.api_keys.permitted_models(&key)?
+    {
+        models.retain(|model| allowed.contains(&model.id));
+    }
 
     Ok(Json(ModelList {
         object: "list",

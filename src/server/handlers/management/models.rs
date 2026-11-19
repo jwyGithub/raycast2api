@@ -8,7 +8,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use crate::core::page::Page;
+use crate::core::page::{Page, page_params};
 use crate::error::GatewayError;
 use crate::model::store::CreateError;
 use crate::protocol::chat_completions::wire::ModelEntry;
@@ -44,17 +44,19 @@ fn str_field<'a>(entry: &'a ModelEntry, key: &str) -> Option<&'a str> {
     entry.extra.get(key).and_then(serde_json::Value::as_str)
 }
 
-/// 条目是否满足筛选条件;字段缺失的模型视为 Pro 与 Pro Plus 均可使用(false)。
-fn matches(entry: &ModelEntry, brand: Option<&str>, plus_only: Option<bool>) -> bool {
+/// 模型是否仅 Pro Plus 可用(`in_better_ai_subscription`);字段缺失视为 Pro 与 Pro Plus 均可使用(false)。
+/// 模型面板的筛选与 API Key 面板的模型标识共用这一处判断。
+pub(super) fn plus_only(extra: &serde_json::Map<String, serde_json::Value>) -> bool {
+    extra
+        .get("in_better_ai_subscription")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// 条目是否满足筛选条件。
+fn matches(entry: &ModelEntry, brand: Option<&str>, plus: Option<bool>) -> bool {
     brand.is_none_or(|b| str_field(entry, "provider_brand") == Some(b))
-        && plus_only.is_none_or(|plus| {
-            entry
-                .extra
-                .get("in_better_ai_subscription")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-                == plus
-        })
+        && plus.is_none_or(|plus| plus_only(&entry.extra) == plus)
 }
 
 /// 按 provider_brand 去重。同一 brand 下有多个 provider_name(openai → OpenAI/Groq)
@@ -100,13 +102,7 @@ pub async fn list(
     State(state): State<SharedState>,
     Json(params): Json<ListParams>,
 ) -> Result<Json<ModelsPage>, GatewayError> {
-    let page = params.page.unwrap_or(1);
-    let page_size = params.page_size.unwrap_or(10);
-    if page == 0 || !(1..=100).contains(&page_size) {
-        return Err(GatewayError::BadRequest(
-            "page must be positive and page_size must be in 1..=100".into(),
-        ));
-    }
+    let (page, page_size) = page_params(params.page, params.page_size)?;
 
     let entries = model_entries(&state.models().await?);
     let providers = providers(&entries);

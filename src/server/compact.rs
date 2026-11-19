@@ -408,23 +408,6 @@ pub(crate) enum Compaction {
     Cached(String),
 }
 
-/// Inspect an incoming request and, when the conversation has outgrown the
-/// model's context window, rewrite it into the compacted form. `send` runs a
-/// model completion (used for the summarization call itself).
-pub async fn maybe_compact(
-    state: &SharedState,
-    request: CanonicalRequest,
-    send: impl FnOnce(
-        CanonicalRequest,
-    ) -> futures_util::future::BoxFuture<
-        'static,
-        Result<String, crate::error::GatewayError>,
-    >,
-) -> Result<CanonicalRequest, crate::error::GatewayError> {
-    let plan = plan(state, &request).await;
-    apply(state, request, plan, send).await
-}
-
 pub(crate) async fn apply(
     state: &SharedState,
     mut request: CanonicalRequest,
@@ -510,19 +493,13 @@ pub(crate) async fn summarize_messages(
 
 /// Decide whether the request needs compaction, and compute the rewritten
 /// history when it does (without the summary yet).
-pub(crate) async fn plan(state: &SharedState, request: &CanonicalRequest) -> Compaction {
-    let models = match state.models().await {
-        Ok(models) => models,
-        Err(_) => return Compaction::NotNeeded,
-    };
-    // Same alias step as `resolve_model`, else an aliased model never matches
-    // and compaction is silently skipped.
-    let upstream_id = state.apply_model_override(&request.model);
-    let Some(entry) = models.iter().find(|m| m.id == upstream_id) else {
-        return Compaction::NotNeeded;
-    };
-    // `context` is in K tokens (Raycast `GET /models`); lives in the passthrough `extra`.
-    let Some(context_k) = entry
+pub(crate) async fn plan(
+    state: &SharedState,
+    request: &CanonicalRequest,
+    model: &crate::raycast::wire::RaycastRawModel,
+) -> Compaction {
+    // The authorized catalog entry carries the context window in K tokens.
+    let Some(context_k) = model
         .extra
         .get("context")
         .and_then(serde_json::Value::as_u64)
@@ -655,6 +632,32 @@ fn message_bytes(messages: &[Message]) -> usize {
 }
 
 #[cfg(test)]
+async fn plan_for_test(state: &SharedState, request: &CanonicalRequest) -> Compaction {
+    match state.resolve_model(&request.model).await {
+        Ok(model) => plan(state, request, &model).await,
+        Err(_) => Compaction::NotNeeded,
+    }
+}
+
+#[cfg(test)]
+/// Inspect an incoming request and, when the conversation has outgrown the
+/// model's context window, rewrite it into the compacted form. `send` runs a
+/// model completion (used for the summarization call itself).
+async fn maybe_compact(
+    state: &SharedState,
+    request: CanonicalRequest,
+    send: impl FnOnce(
+        CanonicalRequest,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<String, crate::error::GatewayError>,
+    >,
+) -> Result<CanonicalRequest, crate::error::GatewayError> {
+    let plan = plan_for_test(state, &request).await;
+    apply(state, request, plan, send).await
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::protocol::Protocol;
@@ -702,12 +705,15 @@ mod tests {
         // as the real id; an unknown id still skips compaction.
         for model in ["test-model", "alias"] {
             assert!(
-                matches!(plan(&state, &build(model)).await, Compaction::Summarize(_)),
+                matches!(
+                    plan_for_test(&state, &build(model)).await,
+                    Compaction::Summarize(_)
+                ),
                 "{model} should trigger compaction"
             );
         }
         assert!(matches!(
-            plan(&state, &build("unknown")).await,
+            plan_for_test(&state, &build("unknown")).await,
             Compaction::NotNeeded
         ));
     }
@@ -1019,7 +1025,10 @@ mod tests {
                 Message::text(Role::User, "next"),
             ]);
             assert_eq!(
-                matches!(plan(&state, &original).await, Compaction::Summarize(_)),
+                matches!(
+                    plan_for_test(&state, &original).await,
+                    Compaction::Summarize(_)
+                ),
                 should_compact,
             );
         }
@@ -1049,7 +1058,7 @@ mod tests {
             Message::text(Role::User, "NEXT_TASK"),
         ]);
         assert!(matches!(
-            plan(&state, &original).await,
+            plan_for_test(&state, &original).await,
             Compaction::Summarize(_)
         ));
         let mut continued = compacted;

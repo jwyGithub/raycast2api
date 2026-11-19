@@ -35,7 +35,7 @@ cd raycast2api
 cp config.example.json config.json
 ```
 
-编辑 `config.json`，填写必需的 `raycast_device_id` 和 `raycast_signature_secret`，并设置供客户端使用的 `api_key`。需要网页登录时，设置 `dashboard_password` 和至少 32 字节的随机 `dashboard_session_secret`，并准备可连接的 Redis。字段和默认值见[配置说明](#配置说明)。
+编辑 `config.json`，填写必需的 `raycast_device_id`、`raycast_signature_secret` 和全局 `api_key`。需要网页登录时，设置 `dashboard_password` 和至少 32 字节的随机 `dashboard_session_secret`，并准备可连接的 Redis。字段和默认值见[配置说明](#配置说明)。
 
 设备 ID 可使用仓库脚本获取：Windows 执行 `pwsh ./deploy/get_device_id.ps1`；macOS 执行 `./deploy/get_device_id.sh`，输出请与本机客户端使用的设备 ID 核对。
 
@@ -76,7 +76,7 @@ curl http://localhost:8787/v1/accounts/create \
 
 ## 请求示例
 
-以下示例使用默认地址 `http://localhost:8787`。将 `<api_key>` 替换为网关配置中的 API Key，将 `<模型 ID>` 替换为模型列表返回的 `data[].id`。网关接受 `Authorization: Bearer <api_key>` 或 `x-api-key: <api_key>` 两种鉴权头。
+以下示例使用默认地址 `http://localhost:8787`。将 `<api_key>` 替换为全局 Key 或控制台创建的托管 Key，将 `<模型 ID>` 替换为模型列表返回的 `data[].id`。网关接受 `Authorization: Bearer <api_key>` 或 `x-api-key: <api_key>` 两种鉴权头。
 
 ### 查询可用模型
 
@@ -135,11 +135,11 @@ curl http://localhost:8787/v1/responses \
 | --- | --- | --- |
 | `raycast_device_id` | 无 | 必填，Raycast 设备 ID。 |
 | `raycast_signature_secret` | 无 | 必填，Raycast 请求签名密钥。 |
-| `api_key` | 无 | 网关 API Key。未配置时，推理和模型接口无需鉴权，管理接口仍需有效的控制台会话。 |
+| `api_key` | 必填 | 全局 Key，允许管理和推理。使用不含空白的可见 ASCII 字符，不能与已有托管 Key 相同。 |
 | `dashboard_password` | 无 | 控制台登录密码。未配置时无法登录控制台。 |
 | `dashboard_session_secret` | 无 | 启用控制台时必填，至少 32 字节，可用 `openssl rand -hex 32` 生成。 |
 | `host` / `port` | `0.0.0.0` / `8787` | HTTP 监听地址和端口。 |
-| `accounts_db` | `store/store.db` | 账号、请求日志和调用统计共用的 SQLite 文件。 |
+| `accounts_db` | `store/store.db` | 账号、托管 API Key、请求日志和调用统计共用的 SQLite 文件。 |
 | `upstream_timeout_secs` | `20` | 转发请求的超时秒数，须为正整数。流式响应持续有输出时，总时长可超过此值。 |
 | `proxies` | `[]` | 代理 URL 列表，支持 HTTP、HTTPS 和 SOCKS5。 |
 | `proxies_mode` | `direct` | 上游通道模式：`direct` 只直连，失败即失败；`proxy` 只走代理（按序尝试），全部失败即失败，不回退直连；`proxy_fallback_direct` 先走代理，全部失败再回退直连。`proxy` 和 `proxy_fallback_direct` 要求 `proxies` 非空，否则启动失败。 |

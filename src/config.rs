@@ -69,7 +69,6 @@ pub struct ConfigFile {
     /// 上游超时（秒），必须大于零，默认 20。
     pub upstream_timeout_secs: Option<std::num::NonZeroU64>,
     /// 上游代理链(可选):`http://`/`https://`/`socks5://` URL 列表。
-    #[serde(default, alias = "proxies")]
     pub proxies: Option<Vec<String>>,
     /// 代理模式 `direct`(缺省) / `proxy` / `proxy_fallback_direct`,
     /// 语义与校验见 [`crate::proxies`]。
@@ -84,8 +83,8 @@ pub struct Settings {
     pub raycast_device_id: String,
     /// Signing secret for `X-Raycast-Signature-v2` (required, no built-in default).
     pub raycast_signature_secret: String,
-    /// Gateway's own API key. When absent, inference and models are public.
-    pub api_key: Option<String>,
+    /// Required global gateway API key.
+    pub api_key: String,
     /// Console login password. When absent, dashboard login is disabled.
     pub dashboard_password: Option<String>,
     /// Signs dashboard session cookies independently of the gateway API key.
@@ -131,6 +130,12 @@ impl Settings {
             .ok_or_else(|| "missing raycast_device_id in config.json".to_string())?;
         let raycast_signature_secret = non_empty(config.raycast_signature_secret)
             .ok_or_else(|| "missing raycast_signature_secret in config.json".to_string())?;
+        let api_key = non_empty(config.api_key)
+            .filter(|key| key.bytes().all(|b| b.is_ascii_graphic()))
+            .ok_or_else(|| {
+                "api_key in config.json is required and must use visible ASCII without whitespace"
+                    .to_string()
+            })?;
 
         let accounts_db = config
             .accounts_db
@@ -175,7 +180,7 @@ impl Settings {
         Ok(Self {
             raycast_device_id,
             raycast_signature_secret,
-            api_key: non_empty(config.api_key),
+            api_key,
             dashboard_password,
             dashboard_session_secret,
             bind_addr,
@@ -211,6 +216,7 @@ mod proxy_tests {
             let result = Settings::from_config_file(ConfigFile {
                 raycast_device_id: Some("device".into()),
                 raycast_signature_secret: Some("secret".into()),
+                api_key: Some("test-key".into()),
                 dashboard_password: Some("password".into()),
                 dashboard_session_secret: secret,
                 ..Default::default()
@@ -229,6 +235,7 @@ mod proxy_tests {
             let settings = Settings::from_config_file(ConfigFile {
                 raycast_device_id: Some("device".into()),
                 raycast_signature_secret: Some("secret".into()),
+                api_key: Some("test-key".into()),
                 dashboard_password: password.map(str::to_owned),
                 dashboard_session_secret: Some("s".repeat(32)),
                 ..Default::default()
@@ -242,11 +249,11 @@ mod proxy_tests {
     fn upstream_timeout_defaults_and_accepts_positive_seconds_only() {
         for (json, expected) in [
             (
-                r#"{"raycast_device_id":"test","raycast_signature_secret":"s"}"#,
+                r#"{"raycast_device_id":"test","raycast_signature_secret":"s","api_key":"test-key"}"#,
                 20,
             ),
             (
-                r#"{"raycast_device_id":"test","raycast_signature_secret":"s","upstream_timeout_secs":45}"#,
+                r#"{"raycast_device_id":"test","raycast_signature_secret":"s","api_key":"test-key","upstream_timeout_secs":45}"#,
                 45,
             ),
         ] {
@@ -273,7 +280,7 @@ mod proxy_tests {
     fn leftover_model_overrides_key_is_ignored() {
         // 模型映射已改为控制台维护;旧 config.json 里没删的键不应让启动失败。
         let config = serde_json::from_str(
-            r#"{"raycast_device_id":"d","raycast_signature_secret":"s","model_overrides":{"a":"b"},"modelOverrides":{"a":"b"}}"#,
+            r#"{"raycast_device_id":"d","raycast_signature_secret":"s","api_key":"test-key","model_overrides":{"a":"b"},"modelOverrides":{"a":"b"}}"#,
         )
         .unwrap();
         assert!(Settings::from_config_file(config).is_ok());
@@ -302,9 +309,36 @@ mod proxy_tests {
     }
 
     #[test]
+    fn global_api_key_is_required_and_header_safe() {
+        for api_key in [
+            None,
+            Some(""),
+            Some(" "),
+            Some("key with space"),
+            Some("wrong\nkey"),
+            Some("valid-key"),
+        ] {
+            let result = Settings::from_config_file(ConfigFile {
+                api_key: api_key.map(str::to_owned),
+                raycast_device_id: Some("device".into()),
+                raycast_signature_secret: Some("secret".into()),
+                ..Default::default()
+            });
+            if api_key == Some("valid-key") {
+                assert_eq!(result.unwrap().api_key, "valid-key");
+            } else {
+                assert!(result.unwrap_err().contains("api_key"));
+            }
+        }
+    }
+
+    #[test]
     fn device_id_and_signature_secret_are_required() {
         for (json, missing) in [
-            (r#"{"raycast_signature_secret":"s"}"#, "raycast_device_id"),
+            (
+                r#"{"raycast_signature_secret":"s","api_key":"test-key"}"#,
+                "raycast_device_id",
+            ),
             (r#"{"raycast_device_id":"d"}"#, "raycast_signature_secret"),
             (
                 r#"{"raycast_device_id":"d","raycast_signature_secret":""}"#,
@@ -322,7 +356,7 @@ mod proxy_tests {
         let parse = |extra: &str| {
             Settings::from_config_file(
                 serde_json::from_str(&format!(
-                    r#"{{"raycast_device_id":"d","raycast_signature_secret":"s"{extra}}}"#
+                    r#"{{"raycast_device_id":"d","raycast_signature_secret":"s","api_key":"test-key"{extra}}}"#
                 ))
                 .unwrap(),
             )

@@ -38,7 +38,7 @@ pub(crate) fn canonical_events_with_retry(
     retry_once(response, log, timeout, move || {
         Box::pin(async move {
             debug::REQUEST_ID
-                .scope(id, client.send_chat(&request, &call))
+                .scope(id, client.send_chat(&request, &call, None))
                 .await
         })
     })
@@ -333,8 +333,7 @@ mod tests {
             crate::core::protocol::Protocol::Responses,
             "client",
         );
-        let upstream = crate::raycast::builder::build_chat_request(&request, "openai", "upstream");
-        let call = crate::statistics::CallContext::new(&request, &upstream, "compact");
+        let call = crate::statistics::CallContext::new(&request, "openai", "upstream", "compact");
         let first =
             crate::statistics::Attempt::start(state.statistics.clone(), &call, "first@example.com")
                 .unwrap();
@@ -392,8 +391,7 @@ mod tests {
             crate::core::protocol::Protocol::Responses,
             "client",
         );
-        let upstream = crate::raycast::builder::build_chat_request(&request, "openai", "upstream");
-        let call = crate::statistics::CallContext::new(&request, &upstream, "inference");
+        let call = crate::statistics::CallContext::new(&request, "openai", "upstream", "inference");
         let attempt =
             crate::statistics::Attempt::start(state.statistics.clone(), &call, "slow@example.com")
                 .unwrap();

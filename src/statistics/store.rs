@@ -2,14 +2,18 @@
 use diesel::{connection::SimpleConnection, prelude::*};
 
 use super::{
-    CallContext,
+    CallContext, Terminal,
     wire::{ListParams, Statistic},
 };
 use crate::{
+    apikey::{Accounting, ApiKeyStore},
     core::page::Page,
     storage::{db::Db, schema::statistics as s},
     util::unix_secs,
 };
+
+// A reservation has no start time until an upstream attempt is about to run.
+const RESERVED_START: i64 = 0;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS statistics (
@@ -42,7 +46,12 @@ impl StatisticsStore {
         Self { db }
     }
 
-    pub(crate) fn start(&self, id: &str, call: &CallContext, email: &str) -> Result<(), String> {
+    pub(crate) fn start(
+        &self,
+        id: &str,
+        call: &CallContext,
+        email: Option<&str>,
+    ) -> Result<(), String> {
         crate::storage::db::blocking(|| {
             diesel::insert_into(s::table)
                 .values((
@@ -51,9 +60,9 @@ impl StatisticsStore {
                     s::api_key.eq(&call.request.api_key),
                     s::api_key_masked.eq(&call.request.api_key_masked),
                     s::requested_at.eq(call.request.requested_at),
-                    s::started_at.eq(unix_secs() as i64),
+                    s::started_at.eq(email.map_or(RESERVED_START, |_| unix_secs() as i64)),
                     s::request_ip.eq(&call.request.request_ip),
-                    s::account_email.eq(email),
+                    s::account_email.eq(email.unwrap_or_default()),
                     s::requested_model.eq(&call.requested_model),
                     s::upstream_provider.eq(&call.upstream_provider),
                     s::upstream_model.eq(&call.upstream_model),
@@ -69,44 +78,84 @@ impl StatisticsStore {
         })
     }
 
-    pub(crate) fn finish(
+    pub(super) fn finish(
         &self,
         id: &str,
-        status: &str,
-        http_status: Option<i32>,
-        error: Option<&str>,
-        usage: Option<&serde_json::Value>,
-    ) -> Result<(), String> {
+        terminal: &Terminal,
+        settlement: Option<(&Accounting, (i64, i64))>,
+    ) -> Result<usize, String> {
         crate::storage::db::blocking(|| {
-            let usage = usage.map(serde_json::Value::to_string);
-            diesel::update(
-                s::table
-                    .filter(s::id.eq(id))
-                    .filter(s::finished_at.is_null()),
-            )
-            .set((
-                s::status.eq(status),
-                s::finished_at.eq(unix_secs() as i64),
-                s::http_status.eq(http_status),
-                s::error_message.eq(error),
-                s::usage_json.eq(usage),
-            ))
-            .execute(&mut *self.db.lock())
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            let usage = terminal.usage.as_ref().map(serde_json::Value::to_string);
+            let mut conn = self.db.lock();
+            let (updated, totals) = conn
+                .transaction::<_, diesel::result::Error, _>(|conn| {
+                    let updated =
+                        diesel::update(s::table.find(id).filter(s::finished_at.is_null()))
+                            .set((
+                                s::status.eq(&terminal.status),
+                                s::finished_at.eq(unix_secs() as i64),
+                                s::http_status.eq(terminal.http_status),
+                                s::error_message.eq(terminal.error.as_deref()),
+                                s::usage_json.eq(usage),
+                            ))
+                            .execute(conn)?;
+                    let totals = match settlement {
+                        Some((key, (credits, cost))) if updated != 0 => {
+                            ApiKeyStore::add_usage(conn, &key.id, credits, cost)?
+                        }
+                        _ => None,
+                    };
+                    Ok((updated, totals))
+                })
+                .map_err(|e| e.to_string())?;
+            if let (Some((key, _)), Some(totals)) = (settlement, totals) {
+                key.store.publish_usage(&key.id, totals);
+            }
+            Ok(updated)
+        })
+    }
+
+    pub(super) fn bind_account(&self, id: &str, email: &str) -> QueryResult<()> {
+        crate::storage::db::blocking(|| {
+            let updated =
+                diesel::update(s::table.find(id).filter(s::started_at.eq(RESERVED_START)))
+                    .set((
+                        s::account_email.eq(email),
+                        s::started_at.eq(unix_secs() as i64),
+                    ))
+                    .execute(&mut *self.db.lock())?;
+            if updated == 0 {
+                return Err(diesel::result::Error::NotFound);
+            }
+            Ok(())
+        })
+    }
+
+    pub(super) fn discard_reservation(&self, id: &str) -> QueryResult<usize> {
+        crate::storage::db::blocking(|| {
+            diesel::delete(s::table.find(id).filter(s::started_at.eq(RESERVED_START)))
+                .execute(&mut *self.db.lock())
         })
     }
 
     /// Called once during startup, before serving traffic after an unclean shutdown.
     pub fn interrupt_unfinished(&self) -> Result<usize, String> {
         crate::storage::db::blocking(|| {
+            let mut conn = self.db.lock();
+            diesel::delete(
+                s::table
+                    .filter(s::started_at.eq(RESERVED_START))
+                    .filter(s::finished_at.is_null()),
+            )
+            .execute(&mut *conn)
+            .map_err(|e| e.to_string())?;
             diesel::update(s::table.filter(s::finished_at.is_null()))
                 .set((
                     s::status.eq("interrupted"),
                     s::finished_at.eq(unix_secs() as i64),
                     s::error_message.eq("gateway restarted before this attempt finished"),
                 ))
-                .execute(&mut *self.db.lock())
+                .execute(&mut *conn)
                 .map_err(|e| e.to_string())
         })
     }
@@ -115,6 +164,7 @@ impl StatisticsStore {
         crate::storage::db::blocking(|| {
             s::table
                 .find(id)
+                .filter(s::started_at.ne(RESERVED_START))
                 .select(Statistic::as_select())
                 .first(&mut *self.db.lock())
                 .optional()
@@ -126,7 +176,9 @@ impl StatisticsStore {
         let (page, size) = params.pagination()?;
         crate::storage::db::blocking(|| {
             let filtered = || {
-                let mut query = s::table.into_boxed::<diesel::sqlite::Sqlite>();
+                let mut query = s::table
+                    .filter(s::started_at.ne(RESERVED_START))
+                    .into_boxed::<diesel::sqlite::Sqlite>();
                 if let Some(from) = params.requested_at_from {
                     query = query.filter(s::requested_at.ge(from));
                 }

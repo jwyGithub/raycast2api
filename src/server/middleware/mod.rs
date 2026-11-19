@@ -1,6 +1,6 @@
 //! Cross-cutting HTTP middleware.
 
-mod auth;
+pub(super) mod auth;
 mod request_logging;
 mod response_format;
 

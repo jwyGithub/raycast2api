@@ -1,5 +1,6 @@
 import { LitElement, html } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 import './views/accounts.js';
+import './views/api-keys.js';
 import './views/logs.js';
 import './views/models.js';
 import './views/statistics.js';
@@ -56,6 +57,8 @@ class AccountConsole extends LitElement {
         this.restoringSession = restoringSession;
         this.dashboardPassword = '';
         this.loginAttempt = null;
+        this.sessionEpoch = {};
+        this.querySelector('api-keys-panel')?.clear();
         this.loggingIn = false;
         this.querySelector('logs-panel')?.closeDetail();
         this.querySelector('models-panel')?.closeDetail();
@@ -145,6 +148,7 @@ class AccountConsole extends LitElement {
     }
     async request(path, body, resource = 'accounts') {
         if (!this.authenticated) throw new Error('请先输入控制台密码登录。');
+        const session = this.sessionEpoch;
         const response = await fetch('/v1/' + resource + '/' + path, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Dashboard-Request': '1' },
@@ -153,6 +157,7 @@ class AccountConsole extends LitElement {
             body: JSON.stringify(body)
         });
         const result = await response.json().catch(() => ({}));
+        if (!this.authenticated || this.sessionEpoch !== session) throw new Error('会话已结束。');
         if (response.status === 401) {
             this.lockConsole('登录已失效，请重新输入控制台密码。');
             throw new Error('登录已失效，请重新输入控制台密码。');
@@ -164,6 +169,8 @@ class AccountConsole extends LitElement {
         this.querySelectorAll('ui-date-picker').forEach(picker => picker.picker?.close());
         this.panel = panel;
         await this.updateComplete;
+        if (!this.authenticated || this.panel !== panel) return;
+        if (panel === 'api-keys') this.querySelector('api-keys-panel')?.load();
         if (panel === 'logs') this.querySelector('logs-panel').load();
         if (panel === 'models') this.querySelector('models-panel').load();
         if (panel === 'statistics') this.querySelector('statistics-panel').load();
@@ -223,10 +230,11 @@ class AccountConsole extends LitElement {
                             >R</span
                         ><span>Raycast<span class="text-muted">2API</span></span>
                     </div>
-                    <nav class="flex justify-self-center gap-1 rounded-lg bg-slate-100 p-1" aria-label="面板切换">
+                    <nav class="flex max-w-full flex-wrap justify-self-center gap-1 rounded-lg bg-slate-100 p-1" aria-label="面板切换">
                         ${[
                             ['accounts', '账号面板'],
                             ['models', '模型面板'],
+                            ['api-keys', 'API Key'],
                             ['statistics', '统计面板'],
                             ['logs', '日志面板']
                         ].map(
@@ -261,6 +269,10 @@ class AccountConsole extends LitElement {
                 ?inert=${this.panel !== 'models'}
                 .request=${(path, body) => this.request(path, body, 'models')}
             ></models-panel>
+            ${this.panel === 'api-keys' ? html`<api-keys-panel
+                class="block min-h-0 flex-1 overflow-hidden"
+                .request=${(path, body) => this.request(path, body, 'api-keys')}
+            ></api-keys-panel>` : ''}
             <statistics-panel
                 class="min-h-0 flex-1 overflow-hidden ${this.panel === 'statistics' ? 'block' : 'hidden'}"
                 ?inert=${this.panel !== 'statistics'}

@@ -1,6 +1,7 @@
 //! Console login and account, request-log, and usage-statistics management.
 
 pub mod accounts;
+mod api_keys;
 pub mod login;
 pub mod logs;
 pub mod models;
@@ -23,6 +24,13 @@ pub(crate) fn routes() -> Router<SharedState> {
         .route("/accounts/restore", post(accounts::restore))
         .route("/accounts/export", get(accounts::export))
         .route("/accounts/refresh", post(accounts::refresh))
+        .route("/api-keys/list", post(api_keys::list))
+        .route("/api-keys/create", post(api_keys::create))
+        .route("/api-keys/update", post(api_keys::update))
+        .route("/api-keys/model-options", post(api_keys::model_options))
+        .route("/api-keys/update-models", post(api_keys::update_models))
+        .route("/api-keys/reset-usage", post(api_keys::reset_usage))
+        .route("/api-keys/delete", post(api_keys::delete))
         .route("/logs/list", post(logs::list))
         .route("/logs/detail", post(logs::detail))
         .route("/models/list", post(models::list))

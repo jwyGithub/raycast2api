@@ -35,6 +35,7 @@ pub struct AppState {
     pub log: Arc<RequestLogStore>,
     /// 模型别名(控制台维护,请求路径读内存缓存)。
     pub aliases: ModelAliasStore,
+    pub(crate) api_keys: Arc<crate::apikey::ApiKeyStore>,
     pub statistics: Arc<crate::statistics::store::StatisticsStore>,
     /// auto-compact 本地摘要缓存(Redis 不可用时保留)。
     pub summary_cache: SummaryCache,
@@ -56,10 +57,14 @@ impl AppState {
         client: RaycastClient,
         accounts: Arc<AccountStore>,
         log: Arc<RequestLogStore>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         // 与其他 store 共用同一个 SQLite 连接。
         let aliases = ModelAliasStore::new(log.db.clone());
-        Self {
+        let api_keys = Arc::new(crate::apikey::ApiKeyStore::new(
+            log.db.clone(),
+            &settings.api_key,
+        )?);
+        Ok(Self {
             statistics: client.statistics.clone(),
             settings,
             redis: None,
@@ -70,12 +75,13 @@ impl AppState {
             accounts,
             log,
             aliases,
+            api_keys,
             summary_cache: SummaryCache::default(),
             usage_cache: UsageCache::default(),
             models_cache: RwLock::new(None),
             models_refresh: Mutex::new(()),
             models_failed_at: Mutex::new(None),
-        }
+        })
     }
 
     /// Return the model list, serving a cached copy while it is fresh and
@@ -136,18 +142,17 @@ impl AppState {
             .unwrap_or_else(|| requested_id.to_owned())
     }
 
-    /// Resolve an OpenAI-facing model id to `(provider, internal_model)`,
+    /// Resolve an OpenAI-facing model id to its catalog entry,
     /// applying the console-managed model aliases first, then looking up
     /// the upstream model list. Unknown models are rejected before inference.
-    pub async fn resolve_model(
-        &self,
-        requested_id: &str,
-    ) -> Result<(String, String), GatewayError> {
+    pub async fn resolve_model(&self, requested_id: &str) -> Result<RaycastRawModel, GatewayError> {
         let client_id = requested_id;
         let requested_id = self.apply_model_override(requested_id);
-        let resolved = crate::raycast::models::resolve(&self.models().await?, &requested_id)
-            .ok_or_else(|| GatewayError::NotFound(format!("Model '{client_id}' was not found")))?;
-        Ok((resolved.provider, resolved.model))
+        self.models()
+            .await?
+            .into_iter()
+            .find(|model| model.id == requested_id)
+            .ok_or_else(|| crate::apikey::model_not_found(client_id))
     }
 }
 
@@ -160,7 +165,7 @@ pub(crate) fn compact_test_state() -> SharedState {
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
-        api_key: None,
+        api_key: "test-key".into(),
         dashboard_password: None,
         dashboard_session_secret: None,
         bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -177,7 +182,7 @@ pub(crate) fn compact_test_state() -> SharedState {
         log.clone(),
         statistics,
     );
-    let mut state = AppState::new(settings, client, accounts, log);
+    let mut state = AppState::new(settings, client, accounts, log).unwrap();
     state.models_cache = RwLock::new(Some(ModelsCache {
         fetched_at: Instant::now(),
         models: vec![
@@ -199,9 +204,14 @@ mod tests {
         let state = compact_test_state();
         state.aliases.create("alias", "test-model").unwrap();
         state.aliases.create("bad-alias", "missing").unwrap();
+        let model = state.resolve_model("alias").await.unwrap();
         assert_eq!(
-            state.resolve_model("alias").await.unwrap(),
-            ("openai".into(), "test".into())
+            (
+                model.id.as_str(),
+                model.provider.as_str(),
+                model.model.as_str()
+            ),
+            ("test-model", "openai", "test")
         );
         for model in ["missing", "bad-alias"] {
             let error = state.resolve_model(model).await.unwrap_err();
@@ -219,7 +229,10 @@ mod tests {
         let inner = Arc::get_mut(&mut state).unwrap();
         inner.models_cache.get_mut().as_mut().unwrap().fetched_at =
             Instant::now() - MODELS_CACHE_TTL;
-        let (provider, model) = state.resolve_model("test-model").await.unwrap();
-        assert_eq!((provider.as_str(), model.as_str()), ("openai", "test"));
+        let model = state.resolve_model("test-model").await.unwrap();
+        assert_eq!(
+            (model.provider.as_str(), model.model.as_str()),
+            ("openai", "test")
+        );
     }
 }

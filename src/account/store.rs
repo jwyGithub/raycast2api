@@ -121,11 +121,6 @@ struct NewAccount<'a> {
     updated_at: &'a str,
 }
 
-pub enum AccountList {
-    All(Vec<AccountRow>),
-    Page(Page<AccountRow>),
-}
-
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS accounts (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,12 +280,26 @@ impl AccountStore {
     }
 
     /// 全部账号(含不可用的;refresh 需要它们的 token)。
-    pub fn list(
+    pub fn list_all(&self) -> Result<Vec<AccountRow>, GatewayError> {
+        crate::storage::db::blocking(|| {
+            Ok(accounts::table
+                .order(accounts::id.asc())
+                .select(StoredAccount::as_select())
+                .load::<StoredAccount>(&mut *self.db.lock())
+                .map_err(sql_err)?
+                .into_iter()
+                .map(AccountRow::from)
+                .collect())
+        })
+    }
+
+    /// 分页查询,可按 `available` / `cooldown` / `unavailable` 过滤(`all` 或空串不过滤)。
+    pub fn list_page(
         &self,
-        page: Option<u32>,
-        page_size: Option<u32>,
+        page: u32,
+        page_size: u32,
         status: Option<&str>,
-    ) -> Result<AccountList, GatewayError> {
+    ) -> Result<Page<AccountRow>, GatewayError> {
         crate::storage::db::blocking(|| {
             let mut conn = self.db.lock();
             let status = status.filter(|value| !value.is_empty() && *value != "all");
@@ -327,33 +336,21 @@ impl AccountStore {
                 }
                 _ => {}
             }
-            if let (Some(page), Some(page_size)) = (page, page_size) {
-                let total = count_query
-                    .count()
-                    .get_result::<i64>(&mut *conn)
-                    .map_err(sql_err)? as u64;
-                let rows = query
-                    .order(accounts::id.asc())
-                    .limit(i64::from(page_size))
-                    .offset(i64::from(page - 1) * i64::from(page_size))
-                    .select(StoredAccount::as_select())
-                    .load::<StoredAccount>(&mut *conn)
-                    .map_err(sql_err)?
-                    .into_iter()
-                    .map(AccountRow::from)
-                    .collect();
-                Ok(AccountList::Page(Page::new(rows, total, page, page_size)))
-            } else {
-                let rows = query
-                    .order(accounts::id.asc())
-                    .select(StoredAccount::as_select())
-                    .load::<StoredAccount>(&mut *conn)
-                    .map_err(sql_err)?
-                    .into_iter()
-                    .map(AccountRow::from)
-                    .collect();
-                Ok(AccountList::All(rows))
-            }
+            let total = count_query
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .map_err(sql_err)? as u64;
+            let rows = query
+                .order(accounts::id.asc())
+                .limit(i64::from(page_size))
+                .offset(i64::from(page - 1) * i64::from(page_size))
+                .select(StoredAccount::as_select())
+                .load::<StoredAccount>(&mut *conn)
+                .map_err(sql_err)?
+                .into_iter()
+                .map(AccountRow::from)
+                .collect();
+            Ok(Page::new(rows, total, page, page_size))
         })
     }
 
@@ -694,10 +691,7 @@ mod tests {
     }
 
     fn all(store: &AccountStore) -> Vec<AccountRow> {
-        match store.list(None, None, None).unwrap() {
-            AccountList::All(rows) => rows,
-            AccountList::Page(_) => unreachable!("unpaged list returns all rows"),
-        }
+        store.list_all().unwrap()
     }
 
     #[test]

@@ -89,7 +89,7 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
     assert!(reader.summary_cache.entries.lock().await.is_empty());
     assert_eq!(reader.estimate_input_tokens(&original).await, Some(25_000));
     assert!(matches!(
-        plan(&reader, &original).await,
+        plan_for_test(&reader, &original).await,
         Compaction::Cached(_)
     ));
     let reused = maybe_compact(&reader, original.clone(), |_| {
@@ -176,7 +176,7 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
     assert_eq!(reader.estimate_input_tokens(&extended).await, Some(30_001));
     // A partial hit must pass only the unsummarized suffix to the next summary.
     branch.messages[3].text = "uncached branch".into();
-    match plan(&reader, &branch).await {
+    match plan_for_test(&reader, &branch).await {
         Compaction::Summarize(messages) => {
             assert_eq!(messages[0].text, summary("shared summary"));
             assert_eq!(messages[1].text, "CURRENT_TASK");

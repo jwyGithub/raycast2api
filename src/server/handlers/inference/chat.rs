@@ -38,7 +38,7 @@ pub async fn chat_completions(
         }
     };
     let result = match ChatCompletionsInbound::parse(request) {
-        Ok(canonical) => pipeline::run::<ChatCompletionsOutbound>(&state, canonical).await,
+        Ok(canonical) => pipeline::run_admitted::<ChatCompletionsOutbound>(&state, canonical).await,
         Err(error) => Err(error),
     };
     result.unwrap_or_else(ChatCompletionsOutbound::render_error)
@@ -106,6 +106,7 @@ mod tests {
             }
             for turn in 0..2 {
                 let request = Request::post("/v1/chat/completions")
+                    .header("x-api-key", "test-key")
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap();
@@ -216,7 +217,7 @@ mod tests {
                 413,
             ),
         ] {
-            let mut request = Request::post("/v1/chat/completions");
+            let mut request = Request::post("/v1/chat/completions").header("x-api-key", "test-key");
             if let Some(content_type) = content_type {
                 request = request.header("content-type", content_type);
             }

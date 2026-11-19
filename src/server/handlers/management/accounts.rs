@@ -6,9 +6,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::account::store::{AccountList, AccountRow, AccountStore, UpsertOutcome};
+use crate::account::store::{AccountRow, AccountStore, UpsertOutcome};
 use crate::account::wire::{AccountRecord, AccountView, mask_token};
-use crate::core::page::Page;
+use crate::core::page::{Page, page_params};
 use crate::error::GatewayError;
 use crate::server::state::SharedState;
 
@@ -52,27 +52,17 @@ pub struct DeleteParams {
 pub async fn list(
     State(state): State<SharedState>,
     Json(params): Json<AccountListParams>,
-) -> Result<axum::response::Response, GatewayError> {
-    let page = params.page.unwrap_or(1);
-    let page_size = params.page_size.unwrap_or(10);
-    if page == 0 || !(1..=100).contains(&page_size) {
-        return Err(GatewayError::BadRequest(
-            "page must be positive and page_size must be in 1..=100".into(),
-        ));
-    }
-    let result = state
+) -> Result<Json<Page<AccountView>>, GatewayError> {
+    let (page, page_size) = page_params(params.page, params.page_size)?;
+    let page = state
         .accounts
-        .list(Some(page), Some(page_size), params.status.as_deref())?;
-    Ok(match result {
-        AccountList::All(_) => unreachable!("paged account query returns page"),
-        AccountList::Page(page) => Json(Page::new(
-            page.items.into_iter().map(account_view).collect(),
-            page.total,
-            page.page,
-            page.page_size,
-        ))
-        .into_response(),
-    })
+        .list_page(page, page_size, params.status.as_deref())?;
+    Ok(Json(Page::new(
+        page.items.into_iter().map(account_view).collect(),
+        page.total,
+        page.page,
+        page.page_size,
+    )))
 }
 
 fn account_view(row: AccountRow) -> AccountView {
@@ -104,11 +94,6 @@ fn account_view(row: AccountRow) -> AccountView {
 pub async fn export(
     State(state): State<SharedState>,
 ) -> Result<Json<Vec<AccountRecord>>, GatewayError> {
-    if state.settings.api_key.is_none() {
-        return Err(GatewayError::Unauthorized(
-            "account export requires api_key to be configured".into(),
-        ));
-    }
     Ok(Json(state.accounts.export_records()?))
 }
 

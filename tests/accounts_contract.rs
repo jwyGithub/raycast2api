@@ -13,10 +13,10 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 fn app() -> (axum::Router, Arc<AccountStore>) {
-    app_with_api_key(Some("test-key"))
+    app_with_api_key("test-key")
 }
 
-fn app_with_api_key(api_key: Option<&str>) -> (axum::Router, Arc<AccountStore>) {
+fn app_with_api_key(api_key: &str) -> (axum::Router, Arc<AccountStore>) {
     let db = Db::open(":memory:").unwrap();
     let store = Arc::new(AccountStore::new(db.clone()));
     let statistics = Arc::new(raycast2api::statistics::store::StatisticsStore::new(
@@ -25,7 +25,7 @@ fn app_with_api_key(api_key: Option<&str>) -> (axum::Router, Arc<AccountStore>) 
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
-        api_key: api_key.map(str::to_owned),
+        api_key: api_key.into(),
         dashboard_password: None,
         dashboard_session_secret: None,
         bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -43,12 +43,10 @@ fn app_with_api_key(api_key: Option<&str>) -> (axum::Router, Arc<AccountStore>) 
         log_store.clone(),
         statistics,
     );
-    let state = Arc::new(raycast2api::server::state::AppState::new(
-        settings,
-        client,
-        store.clone(),
-        log_store,
-    ));
+    let state = Arc::new(
+        raycast2api::server::state::AppState::new(settings, client, store.clone(), log_store)
+            .unwrap(),
+    );
     (build_router(state), store)
 }
 
@@ -415,20 +413,22 @@ async fn export_can_be_posted_directly_to_upsert() {
         response["data"]["results"],
         serde_json::json!(["inserted", "inserted"])
     );
-    let imported = match destination_store.list(None, None, None).unwrap() {
-        raycast2api::account::store::AccountList::All(rows) => rows,
-        raycast2api::account::store::AccountList::Page(_) => unreachable!(),
-    };
+    let imported = destination_store.list_all().unwrap();
     assert_eq!(imported.len(), 2);
     assert_eq!(imported[0].access_token, "rca_secret");
     assert_eq!(imported[1].refresh_token.as_deref(), Some("refresh-2"));
 }
 
 #[tokio::test]
-async fn export_requires_configured_api_key() {
-    let (app, _) = app_with_api_key(None);
-    let (status, _) = call(&app, Method::GET, "/v1/accounts/export", None).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+async fn export_requires_authentication() {
+    let (app, _) = app();
+    let request = Request::get("/v1/accounts/export")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.oneshot(request).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]

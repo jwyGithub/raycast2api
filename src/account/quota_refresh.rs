@@ -58,17 +58,12 @@ pub fn trial_expired(info: &AccountInfo) -> bool {
 /// 刷新所有账号(含不可用的 —— 它们的 token 可能已恢复)。单个账号
 /// 失败只记日志,不影响其余。
 pub async fn refresh_all(store: &Arc<AccountStore>, client: &RaycastClient) {
-    let accounts = match store.list(None, None, None) {
+    let accounts = match store.list_all() {
         Ok(accounts) => accounts,
         Err(err) => {
             tracing::error!("account refresh: list failed: {err}");
             return;
         }
-    };
-
-    let accounts = match accounts {
-        crate::account::store::AccountList::All(accounts) => accounts,
-        crate::account::store::AccountList::Page(_) => unreachable!("refresh query is unpaged"),
     };
     for account in &accounts {
         if let Err(err) = refresh_account(store, client, account).await {

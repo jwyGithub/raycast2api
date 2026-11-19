@@ -24,7 +24,7 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
     let settings = Arc::new(Settings {
         raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
-        api_key: api_key.map(str::to_owned),
+        api_key: api_key.unwrap_or("fixture-global-key").into(),
         dashboard_password: password.map(str::to_owned),
         dashboard_session_secret: Some("s".repeat(32)),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -41,7 +41,7 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
         log.clone(),
         statistics,
     );
-    AppState::new(settings, client, accounts, log)
+    AppState::new(settings, client, accounts, log).unwrap()
 }
 
 fn app(password: Option<&str>, api_key: Option<&str>) -> axum::Router {
@@ -163,11 +163,17 @@ async fn redis_session_lifecycle_and_authentication_boundaries() {
     assert!(!keys[0].contains(cookie.split('=').nth(1).unwrap()));
     let ttl: i64 = connection.ttl(&keys[0]).await.unwrap();
     assert!((86390..=86400).contains(&ttl));
+    let (status, headers, body) =
+        send(&app, "/v1/api-keys/create", json!({"mode":"random"}), &auth).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["cache-control"], "no-store");
+    assert!(body["data"]["api_key"].as_str().unwrap().starts_with("sk-"));
     for path in [
         "/v1/session",
         "/v1/accounts/list",
         "/v1/logs/list",
         "/v1/statistics/list",
+        "/v1/api-keys/list",
     ] {
         assert_eq!(
             send(&app, path, json!({}), &auth).await.0,
@@ -292,7 +298,7 @@ async fn redis_session_lifecycle_and_authentication_boundaries() {
 }
 
 #[tokio::test]
-async fn login_compares_exact_password_without_requiring_api_key() {
+async fn login_compares_exact_password_without_api_key_header() {
     let app = app(Some(" 控制台 password "), Some("api-key"));
     let (status, body) = call(
         &app,
@@ -351,7 +357,7 @@ async fn login_requires_post_and_a_string_password() {
 }
 
 #[tokio::test]
-async fn management_requires_auth_even_without_an_api_key() {
+async fn management_requires_auth_without_credentials() {
     let app = app(Some("password"), None);
     for path in [
         "/v1/accounts/list",
@@ -359,9 +365,14 @@ async fn management_requires_auth_even_without_an_api_key() {
         "/v1/statistics/list",
         "/v1/session",
         "/v1/logout",
+        "/v1/api-keys/list",
     ] {
-        let (status, _) = call(&app, path, json!({}), None).await;
+        let (status, body) = call(&app, path, json!({}), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        assert!(
+            body["message"].as_str().unwrap().contains("登录已失效"),
+            "{path}: {body}"
+        );
     }
 }
 
@@ -445,6 +456,7 @@ async fn console_page_and_assets_are_served_without_auth() {
         ("/components/select.js", "text/javascript"),
         ("/components/date-picker.js", "text/javascript"),
         ("/views.js", "text/javascript"),
+        ("/views/api-keys.js", "text/javascript"),
         ("/views/accounts.js", "text/javascript"),
         ("/views/logs.js", "text/javascript"),
         ("/views/statistics.js", "text/javascript"),

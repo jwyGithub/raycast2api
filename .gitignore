@@ -10,7 +10,6 @@ protocol_doc
 config.json
 account.json
 store/
-.claude
 .codegraph
 scripts
 # 账号 token 文件(含敏感凭据,只放本地/由配置导入)

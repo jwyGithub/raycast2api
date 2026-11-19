@@ -7,6 +7,7 @@ impl RaycastClient {
         &self,
         request: reqwest::Request,
         context: Option<(&crate::statistics::CallContext, &str)>,
+        mut reserved: Option<crate::statistics::Attempt>,
     ) -> Result<reqwest::Response, GatewayError> {
         let channels =
             crate::proxies::channels(self.settings.proxies_mode, &self.http, &self.proxies);
@@ -20,9 +21,22 @@ impl RaycastClient {
             let replay = request
                 .try_clone()
                 .ok_or_else(|| GatewayError::Internal("upstream body is not replayable".into()))?;
-            let attempt = context.and_then(|(call, email)| {
-                crate::statistics::Attempt::start(self.statistics.clone(), call, email)
-            });
+            let attempt = if let Some((call, email)) = context {
+                if let Some(attempt) = reserved.take() {
+                    attempt.bind_account(email)?;
+                    Some(attempt)
+                } else {
+                    let attempt =
+                        crate::statistics::Attempt::start(self.statistics.clone(), call, email);
+                    if attempt.is_none() && call.accounting.as_ref().is_some_and(|key| key.required)
+                    {
+                        return Err(GatewayError::UsageTrackingUnavailable);
+                    }
+                    attempt
+                }
+            } else {
+                None
+            };
             // 失败日志带耗时:瞬间失败(复用到死连接)与等几秒才失败(上游收下
             // 请求后主动断开)是两种不同成因,排查 "connection closed before
             // message completed" 时靠它区分。
@@ -131,16 +145,15 @@ mod tests {
             crate::core::protocol::Protocol::Responses,
             "client",
         );
-        let upstream =
-            crate::raycast::builder::build_chat_request(&canonical, "openai", "upstream");
-        let call = crate::statistics::CallContext::new(&canonical, &upstream, "inference");
+        let call =
+            crate::statistics::CallContext::new(&canonical, "openai", "upstream", "inference");
         let request = client
             .http
             .get(format!("http://{address}/"))
             .build()
             .unwrap();
         let response = client
-            .send(request, Some((&call, "a@example.com")))
+            .send(request, Some((&call, "a@example.com")), None)
             .await
             .unwrap();
         assert_eq!(state.statistics.list(&Default::default()).unwrap().total, 2);
@@ -155,7 +168,7 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(30),
-                client.send(request, Some((&call, "b@example.com")))
+                client.send(request, Some((&call, "b@example.com")), None)
             )
             .await
             .is_err()
@@ -208,7 +221,7 @@ mod tests {
             .unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.send(request, None),
+            client.send(request, None, None),
         )
         .await
         .unwrap();
@@ -257,13 +270,27 @@ mod tests {
         mode(&mut client, ProxyMode::ProxyFallbackDirect);
         client.http = direct_ok();
         client.proxies = vec![("dead".into(), dead())];
-        assert_eq!(client.send(get(&client), None).await.unwrap().status(), 429);
+        assert_eq!(
+            client
+                .send(get(&client), None, None)
+                .await
+                .unwrap()
+                .status(),
+            429
+        );
         // proxy:代理全挂即失败,不回退直连(直连本身是通的)。
         mode(&mut client, ProxyMode::Proxy);
-        assert!(client.send(get(&client), None).await.is_err());
+        assert!(client.send(get(&client), None, None).await.is_err());
         // proxy:第二个代理可用则换用成功。
         client.proxies = vec![("dead".into(), dead()), ("ok".into(), direct_ok())];
-        assert_eq!(client.send(get(&client), None).await.unwrap().status(), 429);
+        assert_eq!(
+            client
+                .send(get(&client), None, None)
+                .await
+                .unwrap()
+                .status(),
+            429
+        );
         // direct:直连失败即失败,不使用(可用的)代理。
         mode(&mut client, ProxyMode::Direct);
         client.http = dead();
@@ -273,7 +300,7 @@ mod tests {
             .get(format!("http://{address}/"))
             .build()
             .unwrap();
-        assert!(client.send(request, None).await.is_err());
+        assert!(client.send(request, None, None).await.is_err());
         server.abort();
     }
 }

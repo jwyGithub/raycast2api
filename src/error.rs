@@ -15,10 +15,20 @@ pub enum GatewayError {
     Unauthorized(String),
     /// Unknown route (404).
     NotFound(String),
+    Conflict(String),
+    Admission {
+        status: StatusCode,
+        code: &'static str,
+        message: String,
+    },
+    UsageTrackingUnavailable,
     /// Server misconfiguration, e.g. missing credentials (500).
     Config(String),
     /// An upstream error; account authentication failures remain gateway errors.
-    Upstream { status: u16, message: String },
+    Upstream {
+        status: u16,
+        message: String,
+    },
     /// The account's access_token was rejected (upstream 401). Callers use
     /// this as a semantic signal to rotate accounts / attempt a refresh,
     /// instead of destructuring `Upstream` and comparing the status field.
@@ -56,6 +66,23 @@ impl GatewayError {
             GatewayError::NotFound(m) => {
                 (StatusCode::NOT_FOUND, "invalid_request_error", m.clone())
             }
+            GatewayError::Conflict(m) => (StatusCode::CONFLICT, "invalid_request_error", m.clone()),
+            GatewayError::Admission {
+                status, message, ..
+            } => {
+                let kind = match *status {
+                    StatusCode::UNAUTHORIZED => "authentication_error",
+                    StatusCode::FORBIDDEN => "permission_error",
+                    StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
+                    _ => "invalid_request_error",
+                };
+                (*status, kind, message.clone())
+            }
+            GatewayError::UsageTrackingUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "API key usage tracking is unavailable.".into(),
+            ),
             GatewayError::Config(m) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "server_error", m.clone())
             }
@@ -128,7 +155,7 @@ struct ErrorDetail {
     message: String,
     #[serde(rename = "type")]
     kind: &'static str,
-    code: Option<String>,
+    code: Option<&'static str>,
 }
 
 impl IntoResponse for GatewayError {
@@ -141,7 +168,11 @@ impl IntoResponse for GatewayError {
             error: ErrorDetail {
                 message,
                 kind,
-                code: None,
+                code: match &self {
+                    GatewayError::Admission { code, .. } => Some(code),
+                    GatewayError::UsageTrackingUnavailable => Some("usage_tracking_unavailable"),
+                    _ => None,
+                },
             },
         };
         let mut response = (status, Json(body)).into_response();
@@ -163,7 +194,16 @@ impl IntoResponse for GatewayError {
                         .insert(axum::http::header::RETRY_AFTER, value);
                 }
             }
-            GatewayError::NoAccount(_) => {
+            GatewayError::Admission {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                ..
+            } => {
+                response.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static("1"),
+                );
+            }
+            GatewayError::NoAccount(_) | GatewayError::UsageTrackingUnavailable => {
                 response.headers_mut().insert(
                     axum::http::HeaderName::from_static("x-should-retry"),
                     axum::http::HeaderValue::from_static("false"),
@@ -224,7 +264,10 @@ mod tests {
 
     #[tokio::test]
     async fn reqwest_error_keeps_source_chain() {
-        let e = reqwest::Client::new()
+        let e = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
             .get("http://127.0.0.1:1/")
             .send()
             .await
