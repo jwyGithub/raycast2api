@@ -1,6 +1,6 @@
 //! Shared network channels and safe OAuth transport policy.
 use super::client::RaycastClient;
-use crate::{error::GatewayError, log::context as debug};
+use crate::{error::GatewayError, log::context as debug, proxies::ProxyMode};
 impl RaycastClient {
     /// 所有端点共享通道顺序；仅网络错误换通道，HTTP 业务错误不重放。
     pub(super) async fn send(
@@ -8,16 +8,8 @@ impl RaycastClient {
         request: reqwest::Request,
         context: Option<(&crate::statistics::CallContext, &str)>,
     ) -> Result<reqwest::Response, GatewayError> {
-        let direct = std::iter::once(("direct", &self.http));
-        let proxies = self
-            .proxies
-            .iter()
-            .map(|(url, client)| (url.as_str(), client));
-        let channels: Vec<_> = if self.settings.proxies_enabled {
-            proxies.chain(direct).collect()
-        } else {
-            direct.chain(proxies).collect()
-        };
+        let channels =
+            crate::proxies::channels(self.settings.proxies_mode, &self.http, &self.proxies);
         let mut last = None;
         let body_bytes = request
             .body()
@@ -35,7 +27,8 @@ impl RaycastClient {
             // 请求后主动断开)是两种不同成因,排查 "connection closed before
             // message completed" 时靠它区分。
             let started = std::time::Instant::now();
-            match tokio::time::timeout(self.settings.upstream_timeout, client.execute(replay)).await
+            match tokio::time::timeout(self.settings.upstream_timeout(), client.execute(replay))
+                .await
             {
                 Ok(Ok(mut response)) => {
                     if let Some(attempt) = attempt {
@@ -78,25 +71,25 @@ impl RaycastClient {
                 attempt.fail(error);
             }
         }
-        Err(last.expect("direct channel always exists"))
+        Err(last.expect("at least one channel is always configured"))
     }
 
     pub(crate) async fn oauth_token(
         &self,
         body: &serde_json::Value,
     ) -> Result<reqwest::Response, GatewayError> {
-        let http = if self.settings.proxies_enabled {
-            self.proxies
+        // OAuth 轮换不可重放:只用一个通道。direct 走直连,其余模式用首个代理。
+        let http = match self.settings.proxies_mode {
+            ProxyMode::Direct => &self.http,
+            _ => self
+                .proxies
                 .first()
-                .map(|(_, client)| client)
-                .unwrap_or(&self.http)
-        } else {
-            &self.http
+                .map_or(&self.http, |(_, client)| client),
         };
         let request = http
             .post(crate::config::OAUTH_TOKEN_URL)
             .json(body)
-            .timeout(self.settings.upstream_timeout)
+            .timeout(self.settings.upstream_timeout())
             .build()?;
         // OAuth rotation cannot safely replay after an ambiguous transport failure.
         Ok(http.execute(request).await?)
@@ -105,6 +98,7 @@ impl RaycastClient {
 
 #[cfg(test)]
 mod tests {
+    use crate::proxies::ProxyMode;
     use axum::{Router, routing::get};
     #[tokio::test]
     async fn statistics_record_each_network_channel_and_pending_header_cancellation() {
@@ -123,13 +117,15 @@ mod tests {
         });
         let state = crate::server::state::compact_test_state();
         let mut client = state.client.clone();
-        client.http = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
-            .build()
-            .unwrap();
+        std::sync::Arc::make_mut(&mut client.settings).proxies_mode =
+            crate::proxies::ProxyMode::ProxyFallbackDirect;
+        client.http = reqwest::Client::builder().no_proxy().build().unwrap();
         client.proxies = vec![(
-            "fallback".into(),
-            reqwest::Client::builder().no_proxy().build().unwrap(),
+            "unreachable".into(),
+            reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+                .build()
+                .unwrap(),
         )];
         let canonical = crate::core::request::CanonicalRequest::new(
             crate::core::protocol::Protocol::Responses,
@@ -203,8 +199,7 @@ mod tests {
         });
         let state = crate::server::state::compact_test_state();
         let mut client = state.client.clone();
-        std::sync::Arc::make_mut(&mut client.settings).upstream_timeout =
-            std::time::Duration::from_millis(5);
+        std::sync::Arc::make_mut(&mut client.settings).upstream_timeout_secs = 1;
         client.http = reqwest::Client::builder().no_proxy().build().unwrap();
         let request = client
             .http
@@ -212,7 +207,7 @@ mod tests {
             .build()
             .unwrap();
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
             client.send(request, None),
         )
         .await
@@ -241,34 +236,44 @@ mod tests {
         });
         let state = crate::server::state::compact_test_state();
         let mut client = state.client.clone();
-        client.http = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
-            .build()
-            .unwrap();
-        client.proxies = vec![(
-            "test-fallback".into(),
-            reqwest::Client::builder().no_proxy().build().unwrap(),
-        )];
-        let request = client
-            .http
-            .get(format!("http://{address}/"))
-            .build()
-            .unwrap();
-        assert_eq!(client.send(request, None).await.unwrap().status(), 429);
-        client.http = reqwest::Client::builder().no_proxy().build().unwrap();
-        client.proxies = vec![(
-            "unreachable".into(),
+        let direct_ok = || reqwest::Client::builder().no_proxy().build().unwrap();
+        let dead = || {
             reqwest::Client::builder()
                 .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
                 .build()
-                .unwrap(),
-        )];
+                .unwrap()
+        };
+        let mode = |client: &mut crate::raycast::client::RaycastClient, mode| {
+            std::sync::Arc::make_mut(&mut client.settings).proxies_mode = mode;
+        };
+        let get = |client: &crate::raycast::client::RaycastClient| {
+            client
+                .http
+                .get(format!("http://{address}/"))
+                .build()
+                .unwrap()
+        };
+        // proxy_fallback_direct:代理网络失败 -> 回退直连;HTTP 429 不重放。
+        mode(&mut client, ProxyMode::ProxyFallbackDirect);
+        client.http = direct_ok();
+        client.proxies = vec![("dead".into(), dead())];
+        assert_eq!(client.send(get(&client), None).await.unwrap().status(), 429);
+        // proxy:代理全挂即失败,不回退直连(直连本身是通的)。
+        mode(&mut client, ProxyMode::Proxy);
+        assert!(client.send(get(&client), None).await.is_err());
+        // proxy:第二个代理可用则换用成功。
+        client.proxies = vec![("dead".into(), dead()), ("ok".into(), direct_ok())];
+        assert_eq!(client.send(get(&client), None).await.unwrap().status(), 429);
+        // direct:直连失败即失败,不使用(可用的)代理。
+        mode(&mut client, ProxyMode::Direct);
+        client.http = dead();
+        client.proxies = vec![("ok".into(), direct_ok())];
         let request = client
             .http
             .get(format!("http://{address}/"))
             .build()
             .unwrap();
-        assert_eq!(client.send(request, None).await.unwrap().status(), 429);
+        assert!(client.send(request, None).await.is_err());
         server.abort();
     }
 }

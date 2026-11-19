@@ -34,7 +34,7 @@ pub(crate) fn canonical_events_with_retry(
     call: crate::statistics::CallContext,
 ) -> impl Stream<Item = CanonicalEvent> + Send + 'static {
     let id = debug::current_request_id();
-    let timeout = client.upstream_timeout();
+    let timeout = client.settings.upstream_timeout();
     retry_once(response, log, timeout, move || {
         Box::pin(async move {
             debug::REQUEST_ID

@@ -103,7 +103,7 @@ SQLite 保持 WAL、busy_timeout=5000 和共享连接。生产二进制使用多
 | 响应日志 | 2 MiB 后附截断标记，不截断实际输出 |
 | 摘要缓存 | 30 分钟，每模型最多 128 条，最多 32 个模型键 |
 | 配置错误 | 损坏/不可读文件启动失败 |
-| 纯环境 PROXIES | 和文件模式一致，默认直连优先；代理优先需配置文件显式 proxies_enabled=true |
+| 纯环境 PROXIES | 已取消；代理仅由配置文件的 proxies / proxies_mode（direct、proxy、proxy_fallback_direct）控制，默认 direct |
 | Rust 内部模块 | debug 迁至 log/context；删除仓库内无调用 API，仓库外调用方需调整 |
 
 超时统一由 config.json 的 upstream_timeout_secs 配置，正整数，默认 20 秒；修改后重启生效。其他限制暂为固定值。持续输出的长任务没有统一总时长硬截止。

@@ -25,12 +25,7 @@ async fn main() {
         }
     };
 
-    let http = reqwest::Client::builder()
-        .connect_timeout(settings.upstream_timeout)
-        .read_timeout(settings.upstream_timeout)
-        .pool_idle_timeout(raycast2api::config::UPSTREAM_POOL_IDLE_TIMEOUT)
-        .build()
-        .expect("failed to build HTTP client");
+    let http = raycast2api::proxies::direct_client(settings.upstream_timeout());
 
     let db = raycast2api::storage::db::Db::open(&settings.accounts_db).unwrap_or_else(|e| {
         eprintln!("accounts db error: {e}");

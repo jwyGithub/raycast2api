@@ -142,7 +142,7 @@ curl http://localhost:8787/v1/responses \
 | `accounts_db` | `store/store.db` | 账号、请求日志和调用统计共用的 SQLite 文件。 |
 | `upstream_timeout_secs` | `20` | 转发请求的超时秒数，须为正整数。流式响应持续有输出时，总时长可超过此值。 |
 | `proxies` | `[]` | 代理 URL 列表，支持 HTTP、HTTPS 和 SOCKS5。 |
-| `proxies_enabled` | `false` | 有代理时，`true` 为代理优先，`false` 为直连优先。 |
+| `proxies_mode` | `direct` | 上游通道模式：`direct` 只直连，失败即失败；`proxy` 只走代理（按序尝试），全部失败即失败，不回退直连；`proxy_fallback_direct` 先走代理，全部失败再回退直连。`proxy` 和 `proxy_fallback_direct` 要求 `proxies` 非空，否则启动失败。 |
 
 可通过环境变量 `RUST_LOG` 调整日志级别，默认 `info,tower_http=info`。
 

@@ -165,10 +165,10 @@ pub(crate) fn compact_test_state() -> SharedState {
         dashboard_session_secret: None,
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,
-        upstream_timeout: std::time::Duration::from_secs(20),
+        upstream_timeout_secs: 20,
         accounts_db: ":memory:".into(),
         proxies: Vec::new(),
-        proxies_enabled: false,
+        proxies_mode: crate::proxies::ProxyMode::Direct,
     });
     let client = RaycastClient::new(
         reqwest::Client::new(),

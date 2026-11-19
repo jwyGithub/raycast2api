@@ -29,10 +29,10 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
         dashboard_session_secret: None,
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         bind_addr_dual: None,
-        upstream_timeout: std::time::Duration::from_secs(20),
+        upstream_timeout_secs: 20,
         accounts_db: ":memory:".into(),
         proxies: Vec::new(),
-        proxies_enabled: false,
+        proxies_mode: raycast2api::proxies::ProxyMode::Direct,
     });
     let client = raycast2api::raycast::client::RaycastClient::new(
         reqwest::Client::new(),

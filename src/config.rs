@@ -4,6 +4,7 @@
 //! `source/src/config.ts`. Runtime settings are read from `config.json` only;
 //! Redis connection settings are read separately from `REDIS_*` environment variables.
 
+use crate::proxies::ProxyMode;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 
@@ -68,13 +69,12 @@ pub struct ConfigFile {
     /// 上游超时（秒），必须大于零，默认 20。
     pub upstream_timeout_secs: Option<std::num::NonZeroU64>,
     /// 上游代理链(可选):`http://`/`https://`/`socks5://` URL 列表。
-    /// `proxies_enabled` 决定代理是首选还是回退通道;缺省/空 = 纯直连。
     #[serde(default, alias = "proxies")]
     pub proxies: Option<Vec<String>>,
-    /// 代理通道模式:`true` = 代理优先,全挂回退直连;`false`(缺省) =
-    /// 直连优先,网络失败换代理。两种模式都要求代理链非空才生效。
-    #[serde(default, alias = "proxiesEnabled")]
-    pub proxies_enabled: Option<bool>,
+    /// 代理模式 `direct`(缺省) / `proxy` / `proxy_fallback_direct`,
+    /// 语义与校验见 [`crate::proxies`]。
+    #[serde(default, alias = "proxiesMode")]
+    pub proxies_mode: Option<ProxyMode>,
 }
 
 /// Runtime configuration, loaded once at startup via [`Settings::from_path`].
@@ -96,12 +96,13 @@ pub struct Settings {
     pub bind_addr_dual: Option<SocketAddr>,
     /// SQLite 账号库路径(账号表与后续模块共用)。
     pub accounts_db: String,
-    pub upstream_timeout: std::time::Duration,
-    /// 上游代理链:按顺序尝试的代理 URL;空 = 纯直连。
+    /// 上游超时秒数(config.json 的同名键,缺省 20)。运行时统一通过
+    /// [`Settings::upstream_timeout`] 取 `Duration`,不要直接换算。
+    pub upstream_timeout_secs: u64,
+    /// 上游代理链:按顺序尝试的代理 URL。
     pub proxies: Vec<String>,
-    /// 代理通道模式:`true` = 代理优先(全挂回退直连),`false` = 直连优先
-    /// (网络失败换代理)。
-    pub proxies_enabled: bool,
+    /// 代理模式;`proxy` / `proxy_fallback_direct` 保证 `proxies` 非空。
+    pub proxies_mode: ProxyMode,
 }
 
 impl Settings {
@@ -117,6 +118,11 @@ impl Settings {
         Self::from_config_file(
             serde_json::from_str(&content).map_err(|e| format!("invalid config.json: {e}"))?,
         )
+    }
+
+    /// 上游超时(连接、响应头、首个 payload、流空闲、OAuth 共用这一个值)。
+    pub fn upstream_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.upstream_timeout_secs)
     }
 
     /// Create Settings from a parsed ConfigFile.
@@ -154,8 +160,8 @@ impl Settings {
             None
         };
 
-        let proxies = parse_proxies(config.proxies)?;
-        let proxies_enabled = config.proxies_enabled.unwrap_or(false);
+        let (proxies_mode, proxies) =
+            crate::proxies::validate(config.proxies_mode, config.proxies)?;
         let dashboard_password = non_empty(config.dashboard_password);
         let dashboard_session_secret = non_empty(config.dashboard_session_secret);
         if dashboard_password.is_some()
@@ -174,36 +180,14 @@ impl Settings {
             dashboard_session_secret,
             bind_addr,
             bind_addr_dual,
-            upstream_timeout: std::time::Duration::from_secs(
-                config
-                    .upstream_timeout_secs
-                    .map_or(20, std::num::NonZeroU64::get),
-            ),
+            upstream_timeout_secs: config
+                .upstream_timeout_secs
+                .map_or(20, std::num::NonZeroU64::get),
             accounts_db,
             proxies,
-            proxies_enabled,
+            proxies_mode,
         })
     }
-}
-
-/// 解析代理配置:去空项,校验 `http://` / `https://` / `socks5://` 前缀。
-/// 写错配置在启动时就报错,而不是第一次网络抖动时才发现代理根本没生效。
-fn parse_proxies(from_file: Option<Vec<String>>) -> Result<Vec<String>, String> {
-    let proxies = from_file
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>();
-    for p in &proxies {
-        let ok =
-            p.starts_with("http://") || p.starts_with("https://") || p.starts_with("socks5://");
-        if !ok {
-            return Err(format!(
-                "invalid proxy '{p}': must start with http://, https:// or socks5://"
-            ));
-        }
-    }
-    Ok(proxies)
 }
 
 /// Treat an empty string in `config.json` the same as an absent key.
@@ -270,7 +254,7 @@ mod proxy_tests {
             assert_eq!(
                 Settings::from_config_file(config)
                     .unwrap()
-                    .upstream_timeout
+                    .upstream_timeout()
                     .as_secs(),
                 expected
             );
@@ -334,20 +318,26 @@ mod proxy_tests {
     }
 
     #[test]
-    fn parse_proxies_validates_scheme_and_skips_empty() {
-        assert!(parse_proxies(None).unwrap().is_empty());
-        assert!(parse_proxies(Some(vec![])).unwrap().is_empty());
-        assert!(parse_proxies(Some(vec!["".into()])).unwrap().is_empty());
-
-        let ok = parse_proxies(Some(vec![
-            "http://127.0.0.1:7897".into(),
-            "socks5://user:pass@1.2.3.4:1080".into(),
-            "https://proxy.example.com".into(),
-        ]))
-        .unwrap();
-        assert_eq!(ok.len(), 3);
-
-        let err = parse_proxies(Some(vec!["ftp://1.2.3.4".into()])).unwrap_err();
-        assert!(err.contains("invalid proxy"));
+    fn proxies_mode_is_validated_against_proxies_at_startup() {
+        let parse = |extra: &str| {
+            Settings::from_config_file(
+                serde_json::from_str(&format!(
+                    r#"{{"raycast_device_id":"d","raycast_signature_secret":"s"{extra}}}"#
+                ))
+                .unwrap(),
+            )
+        };
+        assert_eq!(parse("").unwrap().proxies_mode, ProxyMode::Direct);
+        let ok =
+            parse(r#","proxies_mode":"proxy_fallback_direct","proxies":["http://127.0.0.1:7897"]"#)
+                .unwrap();
+        assert_eq!(ok.proxies_mode, ProxyMode::ProxyFallbackDirect);
+        assert!(
+            parse(r#","proxies_mode":"proxy""#)
+                .unwrap_err()
+                .contains("proxies_mode")
+        );
+        // 旧布尔键已移除,值写错类型直接拒绝。
+        assert!(serde_json::from_str::<ConfigFile>(r#"{"proxies_mode":true}"#).is_err());
     }
 }

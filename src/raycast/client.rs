@@ -32,7 +32,7 @@ use super::wire::{
 #[derive(Clone)]
 pub struct RaycastClient {
     pub(super) http: Client,
-    /// 代理客户端链,与 `settings.proxies` 一一对应;直连失败时按顺序换用。
+    /// 代理客户端链,与 `settings.proxies` 一一对应;通道顺序由 `proxies_mode` 决定。
     pub(super) proxies: Vec<(String, Client)>,
     pub(super) settings: Arc<Settings>,
     /// 账号池:每次请求轮询取一个可用账号的 token。
@@ -52,23 +52,7 @@ impl RaycastClient {
         log: Arc<RequestLogStore>,
         statistics: Arc<StatisticsStore>,
     ) -> Self {
-        // 每个代理一个共享客户端(连接池复用);构造失败视为配置错误,启动即崩。
-        let proxies = settings
-            .proxies
-            .iter()
-            .map(|url| {
-                let proxy = reqwest::Proxy::all(url)
-                    .unwrap_or_else(|e| panic!("invalid proxy '{url}': {e}"));
-                let client = Client::builder()
-                    .proxy(proxy)
-                    .connect_timeout(settings.upstream_timeout)
-                    .read_timeout(settings.upstream_timeout)
-                    .pool_idle_timeout(crate::config::UPSTREAM_POOL_IDLE_TIMEOUT)
-                    .build()
-                    .unwrap_or_else(|e| panic!("failed to build proxy client '{url}': {e}"));
-                (url.clone(), client)
-            })
-            .collect();
+        let proxies = crate::proxies::build_clients(&settings.proxies, settings.upstream_timeout());
         Self {
             http,
             proxies,
@@ -79,10 +63,6 @@ impl RaycastClient {
             #[cfg(test)]
             chat_url: None,
         }
-    }
-
-    pub(crate) fn upstream_timeout(&self) -> std::time::Duration {
-        self.settings.upstream_timeout
     }
 
     /// Common headers shared by every request. When `signature` is `Some`, the
@@ -164,7 +144,7 @@ impl RaycastClient {
                     // 上游部分错误(限额)藏在 200 SSE 流内:偷看首 payload,
                     // 是限额错误则冷却该账号并换号重试,否则把流原样还给调用方。
                     let (peeked, response) =
-                        peek_first_payload(response, self.settings.upstream_timeout).await;
+                        peek_first_payload(response, self.settings.upstream_timeout()).await;
                     if let Some(err) = peeked {
                         let message = err.message();
                         if let Some(attempt) = response.extensions().get::<Attempt>() {
@@ -423,7 +403,7 @@ impl RaycastClient {
             .http
             .get(url)
             .headers(headers)
-            .timeout(self.settings.upstream_timeout)
+            .timeout(self.settings.upstream_timeout())
             .build()?;
         let response = self.send(request, None).await?;
         let response = ensure_success(response).await?;
