@@ -136,6 +136,47 @@ class LogsPanel extends LitElement {
         if (value < 1048576) return (value / 1024).toFixed(1) + ' KB';
         return (value / 1048576).toFixed(1) + ' MB';
     }
+    columns() {
+        const mono = (key, width) => ({
+            class: `${width} truncate font-mono`,
+            title: item => item[key] || '',
+            render: item => item[key] || '—'
+        });
+        const size = key => ({ class: 'tabular-nums text-muted', render: item => this.bytes(item[key]) });
+        return [
+            {
+                label: '请求 ID',
+                render: item => html`<button
+                    class="max-w-64 truncate text-left font-mono hover:underline"
+                    title=${item.request_id}
+                    @click=${() => this.openDetail(item.request_id)}
+                >
+                    ${item.request_id}
+                </button>`
+            },
+            { label: '创建时间', class: 'tabular-nums', render: item => formatDate(item.created_at) },
+            {
+                label: '方法',
+                render: item => html`<span class="rounded bg-slate-100 px-1.5 py-0.5 font-mono">${item.method || '—'}</span>`
+            },
+            { label: '路径', ...mono('path', 'max-w-64') },
+            { label: '模型', ...mono('model', 'max-w-48') },
+            { label: '上游模型', ...mono('upstream_model', 'max-w-48') },
+            { label: '推理强度', ...mono('effort', 'max-w-40') },
+            { label: '入站大小', ...size('inbound_bytes') },
+            { label: '上游大小', ...size('upstream_bytes') },
+            { label: '响应大小', ...size('response_bytes') },
+            {
+                label: '操作',
+                render: item => html`<button
+                    class="rounded-md border border-line px-2 py-1 hover:bg-slate-100"
+                    @click=${() => this.openDetail(item.request_id)}
+                >
+                    详情
+                </button>`
+            }
+        ];
+    }
     render() {
         return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5">
             <form class="mb-4 flex shrink-0 flex-wrap items-center gap-3" @submit=${this.search}>
@@ -170,118 +211,26 @@ class LogsPanel extends LitElement {
                     @button-click=${this.load}
                 ></ui-button>
             </form>
-            <div
-                class="min-h-0 flex-1 overflow-auto rounded-xl border border-line bg-white"
-                aria-busy=${this.loading ? 'true' : 'false'}
-            >
-                <table class="w-full whitespace-nowrap text-left text-xs">
-                    <caption class="sr-only">
-                        请求日志，按创建顺序倒序显示
-                    </caption>
-                    <thead class="border-b border-line bg-slate-50 text-muted">
-                        <tr>
-                            ${[
-                                '请求 ID',
-                                '创建时间',
-                                '方法',
-                                '路径',
-                                '模型',
-                                '上游模型',
-                                '推理强度',
-                                '入站大小',
-                                '上游大小',
-                                '响应大小',
-                                '操作'
-                            ].map(label => html`<th scope="col" class="px-3 py-3 font-medium">${label}</th>`)}
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-line">
-                        ${this.items.length
-                            ? this.items.map(
-                                  item =>
-                                      html`<tr class="hover:bg-slate-50/70">
-                                          <td class="px-3 py-2">
-                                              <button
-                                                  class="max-w-64 truncate text-left font-mono hover:underline"
-                                                  title=${item.request_id}
-                                                  @click=${() => this.openDetail(item.request_id)}
-                                              >
-                                                  ${item.request_id}
-                                              </button>
-                                          </td>
-                                          <td class="px-3 py-2 tabular-nums">${formatDate(item.created_at)}</td>
-                                          <td class="px-3 py-2">
-                                              <span class="rounded bg-slate-100 px-1.5 py-0.5 font-mono"
-                                                  >${item.method || '—'}</span
-                                              >
-                                          </td>
-                                          <td class="max-w-64 truncate px-3 py-2 font-mono" title=${item.path || ''}>
-                                              ${item.path || '—'}
-                                          </td>
-                                          <td class="max-w-48 truncate px-3 py-2 font-mono" title=${item.model || ''}>
-                                              ${item.model || '—'}
-                                          </td>
-                                          <td class="max-w-48 truncate px-3 py-2 font-mono" title=${item.upstream_model || ''}>
-                                              ${item.upstream_model || '—'}
-                                          </td>
-                                          <td class="max-w-40 truncate px-3 py-2 font-mono" title=${item.effort || ''}>
-                                              ${item.effort || '—'}
-                                          </td>
-                                          <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.inbound_bytes)}</td>
-                                          <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.upstream_bytes)}</td>
-                                          <td class="px-3 py-2 tabular-nums text-muted">${this.bytes(item.response_bytes)}</td>
-                                          <td class="px-3 py-2">
-                                              <button
-                                                  class="rounded-md border border-line px-2 py-1 hover:bg-slate-100"
-                                                  @click=${() => this.openDetail(item.request_id)}
-                                              >
-                                                  详情
-                                              </button>
-                                          </td>
-                                      </tr>`
-                              )
-                            : html`<tr>
-                                  <td colspan="11" class="py-16 text-center text-muted" role="status">
-                                      ${this.loading
-                                          ? '正在加载日志…'
-                                          : this.error
-                                            ? '日志加载失败，请重试'
-                                            : '暂无符合条件的日志'}
-                                  </td>
-                              </tr>`}
-                    </tbody>
-                </table>
-            </div>
-            <footer class="flex shrink-0 flex-wrap items-center justify-between gap-3 py-4 text-xs text-muted">
-                <p>共 ${this.total} 条日志 · 日志保留 7 天</p>
-                <div class="flex items-center gap-2">
-                    <ui-select
-                        class="block"
-                        label="每页条数"
-                        .options=${[10, 20, 50, 100].map(size => [String(size), '每页 ' + size + ' 条'])}
-                        .value=${String(this.pageSize)}
-                        .disabled=${this.loading}
-                        @select-change=${e => {
-                            this.pageSize = Number(e.detail.value);
-                            this.page = 1;
-                            this.load();
-                        }}
-                    ></ui-select
-                    ><ui-button
-                        class="inline-flex"
-                        label="上一页"
-                        .disabled=${this.loading || this.page <= 1}
-                        @button-click=${() => this.changePage(this.page - 1)}
-                    ></ui-button
-                    ><span>${this.page} / ${this.pages || 1}</span
-                    ><ui-button
-                        class="inline-flex"
-                        label="下一页"
-                        .disabled=${this.loading || this.page >= this.pages}
-                        @button-click=${() => this.changePage(this.page + 1)}
-                    ></ui-button>
-                </div>
-            </footer>
+            <ui-table
+                class="min-h-0 flex-1"
+                caption="请求日志，按创建顺序倒序显示"
+                .columns=${this.columns()}
+                .rows=${this.items}
+                .loading=${this.loading}
+                .empty=${this.loading ? '正在加载日志…' : this.error ? '日志加载失败，请重试' : '暂无符合条件的日志'}
+                pagination
+                .page=${this.page}
+                .pages=${this.pages}
+                .total=${this.total}
+                .pageSize=${this.pageSize}
+                .summary=${`共 ${this.total} 条日志 · 日志保留 7 天`}
+                @page-change=${e => this.changePage(e.detail.page)}
+                @page-size-change=${e => {
+                    this.pageSize = e.detail.pageSize;
+                    this.page = 1;
+                    this.load();
+                }}
+            ></ui-table>
             <dialog
                 class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-5xl overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
                 aria-labelledby="log-detail-title"

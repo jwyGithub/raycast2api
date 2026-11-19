@@ -10,6 +10,18 @@ const abilityTags = [
     ['联网', a => a.web_search],
     ['生图', a => a.image_generation]
 ];
+// 映射预览与模型配置两个弹窗共用:行形如 { alias, model_id, model_name, created_at }。
+const mappingColumns = [
+    { label: '映射名称', class: 'max-w-56 truncate font-mono text-ink', title: r => r.alias, render: r => r.alias },
+    {
+        label: '模型名称',
+        class: 'max-w-40 truncate',
+        title: r => r.model_name || r.model_id,
+        render: r => r.model_name || r.model_id
+    },
+    { label: '模型ID', class: 'max-w-48 truncate font-mono', title: r => r.model_id, render: r => r.model_id },
+    { label: '创建时间', class: 'tabular-nums text-muted', render: r => formatDate(r.created_at) }
+];
 const usd = value => (value == null || value === '' ? '—' : '$' + Number(value));
 // 订阅等级(in_better_ai_subscription):true = 仅 Pro Plus 可用,false = Pro 与 Pro Plus 均可使用。
 const tierOptions = [
@@ -203,7 +215,6 @@ class ModelsPanel extends LitElement {
         this.load();
     }
     render() {
-        const headers = ['模型', '供应商', '能力', '推理强度', '状态', '别名', '操作'];
         return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5">
             <div class="mb-4 flex shrink-0 flex-wrap items-center gap-3">
                 <div class="flex items-center gap-3">
@@ -245,64 +256,26 @@ class ModelsPanel extends LitElement {
                     <ui-button class="inline-flex" label="映射预览" @button-click=${this.openPreview}></ui-button>
                 </div>
             </div>
-            <div
-                class="min-h-0 flex-1 overflow-auto rounded-xl border border-line bg-white"
-                aria-busy=${this.loading ? 'true' : 'false'}
-            >
-                <table class="w-full whitespace-nowrap text-left text-xs">
-                    <caption class="sr-only">
-                        Raycast 模型列表，按模型 ID 升序显示
-                    </caption>
-                    <thead class="border-b border-line bg-slate-50 text-muted">
-                        <tr>
-                            ${headers.map(label => html`<th scope="col" class="px-3 py-3 font-medium">${label}</th>`)}
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-line">
-                        ${this.items.length
-                            ? this.items.map(item => this.renderRow(item))
-                            : html`<tr>
-                                  <td colspan=${headers.length} class="py-16 text-center text-muted" role="status">
-                                      ${this.loading
-                                          ? '正在加载模型…'
-                                          : this.error
-                                            ? '模型加载失败，请重试'
-                                            : '暂无符合条件的模型'}
-                                  </td>
-                              </tr>`}
-                    </tbody>
-                </table>
-            </div>
-            <footer class="flex shrink-0 flex-wrap items-center justify-between gap-3 py-4 text-xs text-muted">
-                <p>共 ${this.total} 个模型</p>
-                <div class="flex items-center gap-2">
-                    <ui-select
-                        class="block"
-                        label="每页条数"
-                        .options=${[10, 20, 50, 100].map(size => [String(size), '每页 ' + size + ' 条'])}
-                        .value=${String(this.pageSize)}
-                        .disabled=${this.loading}
-                        @select-change=${e => {
-                            this.pageSize = Number(e.detail.value);
-                            this.page = 1;
-                            this.load();
-                        }}
-                    ></ui-select
-                    ><ui-button
-                        class="inline-flex"
-                        label="上一页"
-                        .disabled=${this.loading || this.page <= 1}
-                        @button-click=${() => this.changePage(this.page - 1)}
-                    ></ui-button
-                    ><span>${this.page} / ${this.pages || 1}</span
-                    ><ui-button
-                        class="inline-flex"
-                        label="下一页"
-                        .disabled=${this.loading || this.page >= this.pages}
-                        @button-click=${() => this.changePage(this.page + 1)}
-                    ></ui-button>
-                </div>
-            </footer>
+            <ui-table
+                class="min-h-0 flex-1"
+                caption="Raycast 模型列表，按模型 ID 升序显示"
+                .columns=${this.columns()}
+                .rows=${this.items}
+                .loading=${this.loading}
+                .empty=${this.loading ? '正在加载模型…' : this.error ? '模型加载失败，请重试' : '暂无符合条件的模型'}
+                pagination
+                .page=${this.page}
+                .pages=${this.pages}
+                .total=${this.total}
+                .pageSize=${this.pageSize}
+                .summary=${`共 ${this.total} 个模型`}
+                @page-change=${e => this.changePage(e.detail.page)}
+                @page-size-change=${e => {
+                    this.pageSize = e.detail.pageSize;
+                    this.page = 1;
+                    this.load();
+                }}
+            ></ui-table>
             <dialog
                 id="model-detail-dialog"
                 class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-sm overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
@@ -347,130 +320,97 @@ class ModelsPanel extends LitElement {
                 </button>
             </div>
             <div class="p-5">
-                <div class="max-h-[60dvh] overflow-auto rounded-lg border border-line">
-                    <table class="w-full whitespace-nowrap text-left text-xs">
-                        <caption class="sr-only">
-                            全部模型映射
-                        </caption>
-                        <thead class="sticky top-0 border-b border-line bg-slate-50 text-muted">
-                            <tr>
-                                ${['映射名称', '模型名称', '模型ID', '创建时间'].map(
-                                    label => html`<th scope="col" class="px-3 py-2.5 font-medium">${label}</th>`
-                                )}
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-line">
-                            ${this.previewItems.length
-                                ? this.previewItems.map(
-                                      ({ alias, model_id, model_name, created_at }) =>
-                                          html`<tr>
-                                              <td class="max-w-56 truncate px-3 py-2 font-mono text-ink" title=${alias}>
-                                                  ${alias}
-                                              </td>
-                                              <td class="max-w-40 truncate px-3 py-2" title=${model_name || model_id}>
-                                                  ${model_name || model_id}
-                                              </td>
-                                              <td class="max-w-48 truncate px-3 py-2 font-mono" title=${model_id}>
-                                                  ${model_id}
-                                              </td>
-                                              <td class="px-3 py-2 tabular-nums text-muted">${formatDate(created_at)}</td>
-                                          </tr>`
-                                  )
-                                : html`<tr>
-                                      <td colspan="4" class="py-10 text-center text-muted" role="status">
-                                          ${this.previewLoading ? '正在加载映射…' : '暂无映射'}
-                                      </td>
-                                  </tr>`}
-                        </tbody>
-                    </table>
-                </div>
+                <ui-table
+                    class="max-h-[60dvh]"
+                    caption="全部模型映射"
+                    .columns=${mappingColumns}
+                    .rows=${this.previewItems}
+                    .empty=${this.previewLoading ? '正在加载映射…' : '暂无映射'}
+                ></ui-table>
             </div>
         </dialog>`;
     }
-    renderRow(item) {
-        const aliasCount = item.aliases?.length ?? 0;
-        const abilities = item.abilities || {};
-        const tags = abilityTags.filter(([, test]) => test(abilities));
-        const { supported, options = [], default: defaultEffort } = abilities.reasoning_effort || {};
-        const efforts = supported ? options : [];
-        const replacement = item.deprecation_replacement_model_id;
-        return html`<tr class="hover:bg-slate-50/70">
-            <td class="max-w-72 px-3 py-2" title=${(item.description || '').trim()}>
-                <div class="flex items-center gap-2">
+    columns() {
+        const tag = (cls, text, title) => html`<span class="rounded px-1.5 py-0.5 ${cls}" title=${title ?? ''}>${text}</span>`;
+        return [
+            {
+                label: '模型',
+                class: 'max-w-72',
+                title: item => (item.description || '').trim(),
+                render: item => html`<div class="flex items-center gap-2">
                     ${tierIcon(item.in_better_ai_subscription === true)}
                     <div class="min-w-0">
                         <div class="truncate font-medium text-ink">${item.name || item.id}</div>
                         <div class="truncate font-mono text-[11px] text-muted">${item.id}</div>
                     </div>
-                </div>
-            </td>
-            <td class="px-3 py-2">
-                ${item.provider_name || '—'}<span class="ml-1 font-mono text-[11px] text-muted"
-                    >${item.provider_brand || ''}</span
-                >
-            </td>
-            <td class="px-3 py-2">
-                <div class="flex gap-1">
-                    ${tags.length
-                        ? tags.map(([label]) => html`<span class="rounded bg-slate-100 px-1.5 py-0.5">${label}</span>`)
-                        : '—'}
-                </div>
-            </td>
-            <td class="px-3 py-2">
-                <div class="flex gap-1">
-                    ${efforts.length
-                        ? efforts.map(
-                              option =>
-                                  html`<span
-                                      class="rounded px-1.5 py-0.5 ${option === defaultEffort
-                                          ? 'bg-emerald-50 text-emerald-700'
-                                          : 'bg-slate-100'}"
-                                      title=${option === defaultEffort ? '默认' : ''}
-                                      >${option}</span
-                                  >`
-                          )
-                        : '—'}
-                </div>
-            </td>
-            <td class="px-3 py-2">
-                <div class="flex gap-1">
-                    ${item.status
-                        ? html`<span class="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">${item.status}</span>`
-                        : ''}
-                    ${replacement
-                        ? html`<span
-                              class="rounded bg-red-50 px-1.5 py-0.5 text-red-700"
-                              title=${'替代模型：' + replacement}
-                              >即将下线</span
-                          >`
-                        : ''}
-                    ${item.status || replacement ? '' : html`<span class="text-muted">—</span>`}
-                </div>
-            </td>
-            <td class="px-3 py-2">
-                <span
-                    class="rounded px-1.5 py-0.5 tabular-nums ${aliasCount
-                        ? 'bg-sky-50 text-sky-700'
-                        : 'bg-slate-100 text-muted'}"
-                    title=${aliasCount ? `已映射 ${aliasCount} 个别名` : '没有别名映射'}
-                    >${aliasCount}</span
-                >
-            </td>
-            <td class="px-3 py-2">
-                <button
-                    class="rounded-md border border-line px-2 py-1 hover:bg-slate-100"
-                    @click=${() => this.openDetail(item)}
-                >
-                    价格
-                </button>
-                <button
-                    class="ml-1 rounded-md border border-line px-2 py-1 hover:bg-slate-100"
-                    @click=${() => this.openConfig(item)}
-                >
-                    配置
-                </button>
-            </td>
-        </tr>`;
+                </div>`
+            },
+            {
+                label: '供应商',
+                render: item =>
+                    html`${item.provider_name || '—'}<span class="ml-1 font-mono text-[11px] text-muted">${item.provider_brand || ''}</span>`
+            },
+            {
+                label: '能力',
+                render: item => {
+                    const tags = abilityTags.filter(([, test]) => test(item.abilities || {}));
+                    return html`<div class="flex gap-1">${tags.length ? tags.map(([label]) => tag('bg-slate-100', label)) : '—'}</div>`;
+                }
+            },
+            {
+                label: '推理强度',
+                render: item => {
+                    const { supported, options = [], default: defaultEffort } = item.abilities?.reasoning_effort || {};
+                    const efforts = supported ? options : [];
+                    return html`<div class="flex gap-1">
+                        ${efforts.length
+                            ? efforts.map(option =>
+                                  option === defaultEffort
+                                      ? tag('bg-emerald-50 text-emerald-700', option, '默认')
+                                      : tag('bg-slate-100', option)
+                              )
+                            : '—'}
+                    </div>`;
+                }
+            },
+            {
+                label: '状态',
+                render: item => {
+                    const replacement = item.deprecation_replacement_model_id;
+                    return html`<div class="flex gap-1">
+                        ${item.status ? tag('bg-amber-50 text-amber-700', item.status) : ''}
+                        ${replacement ? tag('bg-red-50 text-red-700', '即将下线', '替代模型：' + replacement) : ''}
+                        ${item.status || replacement ? '' : html`<span class="text-muted">—</span>`}
+                    </div>`;
+                }
+            },
+            {
+                label: '别名',
+                render: item => {
+                    const count = item.aliases?.length ?? 0;
+                    return tag(
+                        'tabular-nums ' + (count ? 'bg-sky-50 text-sky-700' : 'bg-slate-100 text-muted'),
+                        count,
+                        count ? `已映射 ${count} 个别名` : '没有别名映射'
+                    );
+                }
+            },
+            {
+                label: '操作',
+                render: item => html`<button
+                        class="rounded-md border border-line px-2 py-1 hover:bg-slate-100"
+                        @click=${() => this.openDetail(item)}
+                    >
+                        价格
+                    </button>
+                    <button
+                        class="ml-1 rounded-md border border-line px-2 py-1 hover:bg-slate-100"
+                        @click=${() => this.openConfig(item)}
+                    >
+                        配置
+                    </button>`
+            }
+        ];
     }
     renderConfig() {
         const model = this.config;
@@ -516,53 +456,31 @@ class ModelsPanel extends LitElement {
                 </button>
             </form>
             <div class="p-5">
-                <div class="max-h-[50dvh] overflow-auto rounded-lg border border-line">
-                    <table class="w-full whitespace-nowrap text-left text-xs">
-                        <caption class="sr-only">
-                            模型映射列表
-                        </caption>
-                        <thead class="sticky top-0 border-b border-line bg-slate-50 text-muted">
-                            <tr>
-                                ${['映射名称', '模型名称', '模型ID', '创建时间', ''].map(
-                                    label =>
-                                        html`<th scope="col" class="px-3 py-2.5 font-medium">
-                                            ${label || html`<span class="sr-only">操作</span>`}
-                                        </th>`
-                                )}
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-line">
-                            ${aliases.length
-                                ? aliases.map(
-                                      ({ alias, created_at }) =>
-                                          html`<tr>
-                                              <td class="max-w-56 truncate px-3 py-2 font-mono text-ink" title=${alias}>
-                                                  ${alias}
-                                              </td>
-                                              <td class="max-w-40 truncate px-3 py-2" title=${model?.name || model?.id}>
-                                                  ${model?.name || model?.id}
-                                              </td>
-                                              <td class="max-w-48 truncate px-3 py-2 font-mono" title=${model?.id}>
-                                                  ${model?.id}
-                                              </td>
-                                              <td class="px-3 py-2 tabular-nums text-muted">${formatDate(created_at)}</td>
-                                              <td class="px-3 py-2 text-right">
-                                                  <button
-                                                      class="rounded-md border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50 disabled:opacity-40"
-                                                      ?disabled=${this.aliasBusy}
-                                                      @click=${() => this.removeAlias(alias)}
-                                                  >
-                                                      删除
-                                                  </button>
-                                              </td>
-                                          </tr>`
-                                  )
-                                : html`<tr>
-                                      <td colspan="5" class="py-10 text-center text-muted" role="status">暂无映射</td>
-                                  </tr>`}
-                        </tbody>
-                    </table>
-                </div>
+                <ui-table
+                    class="max-h-[50dvh]"
+                    caption="模型映射列表"
+                    .columns=${[
+                        ...mappingColumns,
+                        {
+                            label: html`<span class="sr-only">操作</span>`,
+                            class: 'text-right',
+                            render: ({ alias }) => html`<button
+                                class="rounded-md border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50 disabled:opacity-40"
+                                ?disabled=${this.aliasBusy}
+                                @click=${() => this.removeAlias(alias)}
+                            >
+                                删除
+                            </button>`
+                        }
+                    ]}
+                    .rows=${aliases.map(({ alias, created_at }) => ({
+                        alias,
+                        created_at,
+                        model_id: model?.id,
+                        model_name: model?.name
+                    }))}
+                    empty="暂无映射"
+                ></ui-table>
             </div>
         </dialog>`;
     }

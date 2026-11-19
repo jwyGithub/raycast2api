@@ -173,6 +173,52 @@ class StatisticsPanel extends LitElement {
         ];
         return html`<span class="inline-flex rounded-md px-2 py-1 font-medium ${color}">${label || '—'}</span>`;
     }
+    columns() {
+        const text = (key, width) => ({ class: `${width} truncate`, title: item => item[key], render: item => item[key] });
+        return [
+            { label: '请求时间', class: 'tabular-nums', key: 'requested_at' },
+            {
+                label: '请求 ID',
+                render: item => html`<button
+                    class="max-w-48 truncate text-left font-mono hover:underline"
+                    title=${item.request_id}
+                    @click=${() => this.openDetail(item.id)}
+                >
+                    ${item.request_id}
+                </button>`
+            },
+            { label: '账号', ...text('account_email', 'max-w-48') },
+            {
+                label: '请求模型 / 上游模型',
+                class: 'max-w-64 font-mono',
+                render: item => html`<p class="truncate" title=${item.requested_model}>${item.requested_model}</p>
+                    <p class="mt-1 truncate text-muted" title=${item.upstream_model}>${item.upstream_model}</p>`
+            },
+            {
+                label: '类型',
+                render: item =>
+                    item.call_type === 'inference' ? '正式推理' : item.call_type === 'compact' ? '压缩摘要' : item.call_type
+            },
+            { label: '状态', render: item => this.statusBadge(item.status) },
+            { label: 'HTTP', class: 'font-mono', render: item => item.http_status ?? '—' },
+            {
+                label: '输入 / 输出 Token',
+                class: 'tabular-nums',
+                render: item => `${this.number(item.usage_json?.input_tokens)} / ${this.number(item.usage_json?.output_tokens)}`
+            },
+            { label: 'Cost', class: 'tabular-nums', render: item => this.number(item.usage_json?.total_cost, 6) },
+            { label: 'Credits', class: 'tabular-nums', render: item => this.number(item.usage_json?.total_credits, 4) },
+            {
+                label: '操作',
+                render: item => html`<button
+                    class="rounded-md border border-line px-2 py-1 hover:bg-slate-100"
+                    @click=${() => this.openDetail(item.id)}
+                >
+                    详情
+                </button>`
+            }
+        ];
+    }
     render() {
         const detail = this.detail;
         const requestedReasoning = [
@@ -272,121 +318,26 @@ class StatisticsPanel extends LitElement {
             ${this.error
                 ? html`<p role="alert" class="mb-3 shrink-0 text-xs text-red-700">${this.error}，请刷新列表重试。</p>`
                 : ''}
-            <div class="min-h-0 flex-1 overflow-auto rounded-xl border border-line bg-white" aria-busy=${String(this.loading)}>
-                <table class="w-full whitespace-nowrap text-left text-xs">
-                    <caption class="sr-only">
-                        上游调用尝试，按开始时间倒序显示
-                    </caption>
-                    <thead class="border-b border-line bg-slate-50 text-muted">
-                        <tr>
-                            ${[
-                                '请求时间',
-                                '请求 ID',
-                                '账号',
-                                '请求模型 / 上游模型',
-                                '类型',
-                                '状态',
-                                'HTTP',
-                                '输入 / 输出 Token',
-                                'Cost',
-                                'Credits',
-                                '操作'
-                            ].map(label => html`<th scope="col" class="px-3 py-3 font-medium">${label}</th>`)}
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-line">
-                        ${this.items.length
-                            ? this.items.map(
-                                  item =>
-                                      html`<tr class="hover:bg-slate-50/70">
-                                          <td class="px-3 py-3 tabular-nums">${item.requested_at}</td>
-                                          <td class="px-3 py-3">
-                                              <button
-                                                  class="max-w-48 truncate text-left font-mono hover:underline"
-                                                  title=${item.request_id}
-                                                  @click=${() => this.openDetail(item.id)}
-                                              >
-                                                  ${item.request_id}
-                                              </button>
-                                          </td>
-                                          <td class="max-w-48 truncate px-3 py-3" title=${item.account_email}>
-                                              ${item.account_email}
-                                          </td>
-                                          <td class="max-w-64 px-3 py-3 font-mono">
-                                              <p class="truncate" title=${item.requested_model}>${item.requested_model}</p>
-                                              <p class="mt-1 truncate text-muted" title=${item.upstream_model}>
-                                                  ${item.upstream_model}
-                                              </p>
-                                          </td>
-                                          <td class="px-3 py-3">
-                                              ${item.call_type === 'inference'
-                                                  ? '正式推理'
-                                                  : item.call_type === 'compact'
-                                                    ? '压缩摘要'
-                                                    : item.call_type}
-                                          </td>
-                                          <td class="px-3 py-3">${this.statusBadge(item.status)}</td>
-                                          <td class="px-3 py-3 font-mono">${item.http_status ?? '—'}</td>
-                                          <td class="px-3 py-3 tabular-nums">
-                                              ${this.number(item.usage_json?.input_tokens)} /
-                                              ${this.number(item.usage_json?.output_tokens)}
-                                          </td>
-                                          <td class="px-3 py-3 tabular-nums">${this.number(item.usage_json?.total_cost, 6)}</td>
-                                          <td class="px-3 py-3 tabular-nums">
-                                              ${this.number(item.usage_json?.total_credits, 4)}
-                                          </td>
-                                          <td class="px-3 py-3">
-                                              <button
-                                                  class="rounded-md border border-line px-2 py-1 hover:bg-slate-100"
-                                                  @click=${() => this.openDetail(item.id)}
-                                              >
-                                                  详情
-                                              </button>
-                                          </td>
-                                      </tr>`
-                              )
-                            : html`<tr>
-                                  <td colspan="11" class="py-16 text-center text-muted" role="status">
-                                      ${this.loading
-                                          ? '正在加载统计…'
-                                          : this.error
-                                            ? '统计加载失败，请重试'
-                                            : '暂无符合条件的调用记录'}
-                                  </td>
-                              </tr>`}
-                    </tbody>
-                </table>
-            </div>
-            <footer class="flex shrink-0 flex-wrap items-center justify-between gap-3 py-4 text-xs text-muted">
-                <p>共 ${this.total} 次上游调用</p>
-                <div class="flex flex-wrap items-center gap-2">
-                    <ui-select
-                        class="block"
-                        label="统计每页条数"
-                        .options=${[10, 20, 50, 100].map(size => [String(size), '每页 ' + size + ' 条'])}
-                        .value=${String(this.pageSize)}
-                        .disabled=${this.loading}
-                        @select-change=${e => {
-                            this.pageSize = Number(e.detail.value);
-                            this.page = 1;
-                            this.load();
-                        }}
-                    ></ui-select>
-                    <ui-button
-                        class="inline-flex"
-                        label="上一页"
-                        .disabled=${this.loading || this.page <= 1}
-                        @button-click=${() => this.changePage(this.page - 1)}
-                    ></ui-button>
-                    <span>${this.page} / ${this.pages || 1}</span>
-                    <ui-button
-                        class="inline-flex"
-                        label="下一页"
-                        .disabled=${this.loading || this.page >= this.pages}
-                        @button-click=${() => this.changePage(this.page + 1)}
-                    ></ui-button>
-                </div>
-            </footer>
+            <ui-table
+                class="min-h-0 flex-1"
+                caption="上游调用尝试，按开始时间倒序显示"
+                .columns=${this.columns()}
+                .rows=${this.items}
+                .loading=${this.loading}
+                .empty=${this.loading ? '正在加载统计…' : this.error ? '统计加载失败，请重试' : '暂无符合条件的调用记录'}
+                pagination
+                .page=${this.page}
+                .pages=${this.pages}
+                .total=${this.total}
+                .pageSize=${this.pageSize}
+                .summary=${`共 ${this.total} 次上游调用`}
+                @page-change=${e => this.changePage(e.detail.page)}
+                @page-size-change=${e => {
+                    this.pageSize = e.detail.pageSize;
+                    this.page = 1;
+                    this.load();
+                }}
+            ></ui-table>
             <dialog
                 class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-5xl overflow-auto rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
                 aria-labelledby="statistic-detail-title"

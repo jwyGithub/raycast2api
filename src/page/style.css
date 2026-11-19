@@ -57,3 +57,8 @@
     border-color: #262b33;
     color: white;
 }
+
+ui-table {
+    display: flex;
+    flex-direction: column;
+}
