@@ -130,7 +130,7 @@ mod tests {
             .unwrap();
         });
         let state = crate::server::state::compact_test_state();
-        let mut client = state.client.clone();
+        let mut client = state.dispatcher.client.clone();
         std::sync::Arc::make_mut(&mut client.settings).proxies_mode =
             crate::proxies::ProxyMode::ProxyFallbackDirect;
         client.http = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -211,7 +211,7 @@ mod tests {
             .unwrap();
         });
         let state = crate::server::state::compact_test_state();
-        let mut client = state.client.clone();
+        let mut client = state.dispatcher.client.clone();
         std::sync::Arc::make_mut(&mut client.settings).upstream_timeout_secs = 1;
         client.http = reqwest::Client::builder().no_proxy().build().unwrap();
         let request = client
@@ -248,7 +248,7 @@ mod tests {
             .unwrap();
         });
         let state = crate::server::state::compact_test_state();
-        let mut client = state.client.clone();
+        let mut client = state.dispatcher.client.clone();
         let direct_ok = || reqwest::Client::builder().no_proxy().build().unwrap();
         let dead = || {
             reqwest::Client::builder()

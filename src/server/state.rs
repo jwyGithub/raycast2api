@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, RwLock};
 
+use crate::account::dispatcher::AccountDispatcher;
 use crate::account::store::AccountStore;
 use crate::config::Settings;
 use crate::error::GatewayError;
@@ -27,7 +28,8 @@ pub struct AppState {
     pub settings: Arc<Settings>,
     /// Redis 句柄(会话撤销使用);compact 缓存持有它的另一份克隆。
     pub redis: Option<RedisKv>,
-    pub client: RaycastClient,
+    /// 账号调度 + 上游传输(`dispatcher.client` 是纯传输层)。
+    pub dispatcher: AccountDispatcher,
     pub health: BackendHealth,
     pub inference_slots: std::sync::Arc<tokio::sync::Semaphore>,
     /// 账号池(账号 CRUD 接口与刷新触发使用)。
@@ -83,7 +85,7 @@ impl AppState {
             statistics,
             settings,
             redis: None,
-            client,
+            dispatcher: AccountDispatcher::new(accounts.clone(), client),
             health: BackendHealth::default(),
             inference_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             accounts,
@@ -134,7 +136,7 @@ impl AppState {
                 message: "model registry refresh temporarily unavailable".into(),
             });
         }
-        match self.client.fetch_models().await {
+        match self.dispatcher.fetch_models().await {
             Ok(models) => {
                 *self.models_failed_at.lock().await = None;
                 *self.models_cache.write().await = Some(ModelsCache {
@@ -196,13 +198,7 @@ pub(crate) fn compact_test_state() -> SharedState {
         proxies: Vec::new(),
         proxies_mode: crate::proxies::ProxyMode::Direct,
     });
-    let client = RaycastClient::new(
-        reqwest::Client::new(),
-        settings.clone(),
-        accounts.clone(),
-        log.clone(),
-        statistics.clone(),
-    );
+    let client = RaycastClient::new(reqwest::Client::new(), settings.clone(), statistics.clone());
     let mut state = AppState::new(AppDeps {
         settings,
         client,

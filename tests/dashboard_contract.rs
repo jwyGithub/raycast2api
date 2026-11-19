@@ -34,13 +34,7 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
         proxies: Vec::new(),
         proxies_mode: raycast2api::proxies::ProxyMode::Direct,
     });
-    let client = RaycastClient::new(
-        reqwest::Client::new(),
-        settings.clone(),
-        accounts.clone(),
-        log.clone(),
-        statistics.clone(),
-    );
+    let client = RaycastClient::new(reqwest::Client::new(), settings.clone(), statistics.clone());
     AppState::new(raycast2api::server::state::AppDeps {
         settings,
         client,

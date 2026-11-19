@@ -4,7 +4,7 @@
 //! 用词约定:本模块管 **额度刷新**(quota refresh,查额度/决策可用性);
 //! token 换新(renewal,oauth token 轮换)在 [`crate::account::token_renewal`]。
 //!
-//! 由 `main` 装配调用(避免 raycast ↔ account 循环依赖):启动立即一遍,
+//! 由 `main` 装配调用:启动立即一遍,
 //! 之后每 [`REFRESH_INTERVAL`] 一遍;`POST /v1/accounts/refresh` 可手动刷新单个账号。
 
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::account::store::{AccountRow, AccountStore};
 use crate::account::wire::AccountInfo;
 use crate::error::GatewayError;
-use crate::raycast::client::{RaycastClient, is_account_dead_upstream};
+use crate::raycast::client::RaycastClient;
 
 /// 定时刷新间隔(6 小时)。
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -144,7 +144,7 @@ pub(crate) fn record_refresh_error(
     email: &str,
     err: GatewayError,
 ) -> GatewayError {
-    if is_account_dead_upstream(&err) {
+    if err.is_account_dead() {
         store.mark_unavailable(email, &format!("账号不可用 ({err})"));
     }
     err
@@ -195,7 +195,7 @@ pub async fn fetch_info(
                     status.trial_limits.and_then(|l| l.ai_requests_per_hour);
             }
             Err(GatewayError::TokenInvalid { .. }) => return Ok(None),
-            Err(err) if is_account_dead_upstream(&err) => return Err(err),
+            Err(err) if err.is_account_dead() => return Err(err),
             Err(GatewayError::Upstream { status, .. }) => {
                 tracing::debug!(
                     "account refresh: /me/trial_status returned {status} (非试用号属正常)"

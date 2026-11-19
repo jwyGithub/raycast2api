@@ -37,7 +37,7 @@ pub async fn ready(State(state): State<SharedState>) -> Response {
             .into_response();
     }
 
-    match state.client.fetch_models().await {
+    match state.dispatcher.fetch_models().await {
         Ok(models) if !models.is_empty() => {
             state.health.mark_working();
             Json(json!({ "status": "ready" })).into_response()

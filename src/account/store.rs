@@ -448,7 +448,7 @@ impl AccountStore {
         })
     }
 
-    /// 当前可选(未摘除、不在冷却)的账号数,作为 `send_chat` 换号重试的上限。
+    /// 当前可选(未摘除、不在冷却)的账号数,作为 `AccountDispatcher::send_chat` 换号重试的上限。
     pub fn count_available(&self) -> usize {
         crate::storage::db::blocking(|| {
             let now = unix_secs() as i64;

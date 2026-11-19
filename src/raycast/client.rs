@@ -1,67 +1,55 @@
-//! Async client for the Raycast AI backend.
+//! Async client for the Raycast AI backend — transport only.
 //!
-//! Builds signed requests (see [`crate::signature`]) and talks to the two
-//! endpoints the gateway needs: streaming chat completions and the model list.
+//! Builds signed requests (see [`crate::signature`]) and talks to the upstream
+//! endpoints with an *explicit* token. Which account to use, rotation,
+//! cooldowns and token renewal belong to [`crate::account::dispatcher`].
 
 use std::sync::Arc;
 
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 
-use crate::account::store::{AccountRow, AccountStore};
 use crate::config::{
-    DEFAULT_COOLDOWN_SECS, MAX_COOLDOWN_SECS, MIN_COOLDOWN_SECS, RAYCAST_AI_CREDITS_DETAILS_URL,
-    RAYCAST_AI_CREDITS_URL, RAYCAST_API_URL, RAYCAST_ME_URL, RAYCAST_MODELS_URL,
-    RAYCAST_TRIAL_STATUS_URL, Settings, USER_AGENT,
+    RAYCAST_AI_CREDITS_DETAILS_URL, RAYCAST_AI_CREDITS_URL, RAYCAST_API_URL, RAYCAST_ME_URL,
+    RAYCAST_MODELS_URL, RAYCAST_TRIAL_STATUS_URL, Settings, USER_AGENT,
 };
 use crate::error::GatewayError;
-use crate::log::context as debug;
-use crate::log::store::RequestLogStore;
 use crate::signature::calculate_signature_v2;
 use crate::statistics::{Attempt, CallContext, store::StatisticsStore};
 use crate::util::unix_secs;
 
 use super::parser::content_policy_hint;
-use super::peek::{peek_first_payload, restore_payload};
 use super::wire::{
-    RaycastChatRequest, RaycastCredits, RaycastCreditsDetails, RaycastMe, RaycastModelsResponse,
-    RaycastRawModel, RaycastSseError, RaycastTrialStatus,
+    RaycastCredits, RaycastCreditsDetails, RaycastMe, RaycastModelsResponse, RaycastRawModel,
+    RaycastSseError, RaycastTrialStatus,
 };
 
 /// Cheap-to-clone handle to the Raycast backend (wraps a shared `reqwest::Client`).
 #[derive(Clone)]
 pub struct RaycastClient {
-    pub(super) http: Client,
+    pub(crate) http: Client,
     /// 代理客户端链,与 `settings.proxies` 一一对应;通道顺序由 `proxies_mode` 决定。
     pub(super) proxies: Vec<(String, Client)>,
-    pub(super) settings: Arc<Settings>,
-    /// 账号池:每次请求轮询取一个可用账号的 token。
-    accounts: Arc<AccountStore>,
-    /// 请求日志存储:补写发给上游的请求体。
-    log: Arc<RequestLogStore>,
+    pub(crate) settings: Arc<Settings>,
     pub(crate) statistics: Arc<StatisticsStore>,
     #[cfg(test)]
     pub(crate) chat_url: Option<String>,
+    #[cfg(test)]
+    pub(crate) models_url: Option<String>,
 }
 
 impl RaycastClient {
-    pub fn new(
-        http: Client,
-        settings: Arc<Settings>,
-        accounts: Arc<AccountStore>,
-        log: Arc<RequestLogStore>,
-        statistics: Arc<StatisticsStore>,
-    ) -> Self {
+    pub fn new(http: Client, settings: Arc<Settings>, statistics: Arc<StatisticsStore>) -> Self {
         let proxies = crate::proxies::build_clients(&settings.proxies, settings.upstream_timeout());
         Self {
             http,
             proxies,
             settings,
-            accounts,
-            log,
             statistics,
             #[cfg(test)]
             chat_url: None,
+            #[cfg(test)]
+            models_url: None,
         }
     }
 
@@ -98,198 +86,13 @@ impl RaycastClient {
         headers
     }
 
-    /// POST a chat request. Returns the streaming response on success (status
-    /// already validated); the caller consumes `bytes_stream()`.
-    ///
-    /// 账号故障切换:401 摘号换下一个重试;200 但流内首 payload 是限额错误
-    /// 时给账号设冷却期(取上游 `retry_after`)再换号重试。池内全部不可用
-    /// 时把最后一个真实错误透传给客户端。
-    pub(crate) async fn send_chat(
+    /// One signed chat POST with an explicit account (`email` is only used to
+    /// label statistics). Status is validated; account rotation, token renewal
+    /// and in-stream error handling live in [`crate::account::dispatcher`].
+    pub(crate) async fn chat(
         &self,
-        request: &RaycastChatRequest,
-        call: &CallContext,
-        mut reserved: Option<Attempt>,
-    ) -> Result<reqwest::Response, GatewayError> {
-        let body = serde_json::to_string(request)?;
-        let attempts = self.accounts.count_available().max(1);
-        let mut last_error: Option<GatewayError> = None;
-
-        for _ in 0..attempts {
-            let mut account = match self.accounts.next_available() {
-                Ok(account) => account,
-                Err(error) => {
-                    // 池空且从未拿到上游错误:用冷却 ETA 充实 503,让客户端
-                    // 知道这是限流而非永久故障,以及什么时候能恢复。
-                    return Err(
-                        last_error.unwrap_or_else(|| enrich_no_account(error, &self.accounts))
-                    );
-                }
-            };
-            tracing::info!(account = %account.email, tag = ?account.tag, "→ using account");
-            let result = self.try_chat(&account, &body, call, reserved.take()).await;
-            let result = if matches!(result, Err(GatewayError::TokenInvalid { .. })) {
-                match crate::account::token_renewal::auto_renew(&self.accounts, self, &account)
-                    .await
-                {
-                    Ok(token) => {
-                        account.access_token = token;
-                        self.try_chat(&account, &body, call, reserved.take()).await
-                    }
-                    Err(error) => Err(error),
-                }
-            } else {
-                result
-            };
-            match result {
-                Ok(response) => {
-                    // 上游部分错误(限额)藏在 200 SSE 流内:偷看首 payload,
-                    // 是限额错误则冷却该账号并换号重试,否则把流原样还给调用方。
-                    let (peeked, response) =
-                        peek_first_payload(response, self.settings.upstream_timeout()).await;
-                    if let Some(err) = peeked {
-                        let message = err.message();
-                        if let Some(attempt) = response.extensions().get::<Attempt>() {
-                            attempt.observe_payload(&err.raw);
-                            attempt.finish("failed", Some(&message));
-                        }
-                        let status = if err.parsed.http_status != 0 {
-                            err.parsed.http_status
-                        } else {
-                            502
-                        };
-                        if err.parsed.is_content_policy_blocked() {
-                            // 内容策略拦截:与账号无关,换号重试纯属浪费 ——
-                            // 立即终止,附排查提示后透传给客户端。
-                            tracing::warn!(
-                                account = %account.email,
-                                "→ upstream content-policy block (request content, not account): {message}"
-                            );
-                            return Err(GatewayError::Upstream {
-                                status,
-                                message: format!(
-                                    "{message}{}",
-                                    crate::raycast::parser::content_policy_hint()
-                                ),
-                            });
-                        }
-                        if err.parsed.is_usage_limit() {
-                            // 限额:冷却该账号(到期自动恢复进池)并换号重试。
-                            let cooldown = err
-                                .parsed
-                                .retry_after
-                                .unwrap_or(DEFAULT_COOLDOWN_SECS)
-                                .clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS);
-                            let until = unix_secs() as i64 + cooldown as i64;
-                            tracing::warn!(
-                                account = %account.email,
-                                cooldown_secs = cooldown,
-                                "→ account rate-limited, cooling down and rotating: {message}"
-                            );
-                            self.accounts.mark_cooldown(
-                                &account.email,
-                                until,
-                                &format!("限额冷却 {}s ({message})", cooldown),
-                            );
-                            last_error = Some(GatewayError::Upstream { status, message });
-                            continue;
-                        }
-                        if err.parsed.is_flagged() {
-                            // 账号被上游风控标记:摘号换下一个(token 有效
-                            // 但账号已废,重试无意义)。mark_unavailable
-                            // 会把原因写进 unavailable_reason 供排查。
-                            tracing::warn!(
-                                account = %account.email,
-                                "→ account flagged by upstream, removing from pool: {message}"
-                            );
-                            self.accounts.mark_unavailable(
-                                &account.email,
-                                &format!("账号被风控 ({message})"),
-                            );
-                            last_error = Some(GatewayError::Upstream { status, message });
-                            continue;
-                        }
-                        if err.parsed.is_subscription_required() {
-                            // 订阅缺失(402):账号没有/已失去 Pro,token 有效
-                            // 但 AI 用不了 —— 同风控语义,摘号换下一个。
-                            tracing::warn!(
-                                account = %account.email,
-                                "→ subscription required, removing account and rotating: {message}"
-                            );
-                            self.accounts.mark_unavailable(
-                                &account.email,
-                                &format!("订阅缺失/已失效 ({message})"),
-                            );
-                            last_error = Some(GatewayError::Upstream { status, message });
-                            continue;
-                        }
-                        if err.parsed.is_unconfirmed() {
-                            // 邮箱未确认:不摘号(token 有效),但冷却 24h ——
-                            // 用户去确认邮箱后,下次手动/定时刷新会恢复可用。
-                            tracing::warn!(
-                                account = %account.email,
-                                "→ email not confirmed, cooling down 24h and rotating: {message}"
-                            );
-                            self.accounts.mark_cooldown(
-                                &account.email,
-                                unix_secs() as i64 + 24 * 60 * 60,
-                                &format!("邮箱未确认 ({message})"),
-                            );
-                            last_error = Some(GatewayError::Upstream { status, message });
-                            continue;
-                        }
-                        tracing::warn!(
-                            account = %account.email,
-                            "→ upstream in-stream error (not rate-limit): {message}"
-                        );
-                        // 其他流内错误:还原 payload,交由解析层上报。
-                        return Ok(restore_payload(response, &err.raw));
-                    }
-                    return Ok(response);
-                }
-                Err(err @ GatewayError::TokenInvalid { .. }) => {
-                    self.accounts
-                        .mark_unavailable(&account.email, "token 失效，无法续期");
-                    last_error = Some(err);
-                }
-                Err(err) => {
-                    // HTTP 层错误(非流内):若为账号本身不可用(风控 403 /
-                    // 订阅缺失 402),摘号换下一个继续,否则透传终止。
-                    if is_account_dead_upstream(&err) {
-                        tracing::warn!(
-                            account = %account.email,
-                            "→ account unusable upstream (HTTP error), removing from pool: {err}"
-                        );
-                        self.accounts
-                            .mark_unavailable(&account.email, &format!("账号不可用 ({err})"));
-                        last_error = Some(err);
-                        continue;
-                    }
-                    tracing::error!(account = %account.email, "→ upstream request failed: {err}");
-                    return Err(err);
-                }
-            }
-        }
-
-        // 池内账号全部 401 / 限额:透传最后一个真实错误。
-        tracing::error!(
-            attempts,
-            "all available accounts failed; surfacing last error to client"
-        );
-        Err(last_error.unwrap_or_else(|| {
-            enrich_no_account(
-                GatewayError::NoAccount(
-                    "no available Raycast account; add or refresh one via POST /v1/accounts/create"
-                        .into(),
-                ),
-                &self.accounts,
-            )
-        }))
-    }
-
-    /// 单次上游请求(签名 + 发送 + 状态校验),供 [`Self::send_chat`] 轮换调用。
-    async fn try_chat(
-        &self,
-        account: &AccountRow,
+        email: &str,
+        token: &str,
         body: &str,
         call: &CallContext,
         reserved: Option<Attempt>,
@@ -302,18 +105,9 @@ impl RaycastClient {
             &self.settings.raycast_signature_secret,
         );
 
-        let mut headers =
-            self.base_headers(&account.access_token, Some(&timestamp), Some(&signature));
+        let mut headers = self.base_headers(token, Some(&timestamp), Some(&signature));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         headers.insert("Accept", HeaderValue::from_static("text/event-stream"));
-
-        // Record the outgoing upstream body in the request-log store,
-        // correlated to the inbound request via the task-local id set by
-        // `log_request`. Best-effort synchronous capture in a blocking section.
-        self.log.update_upstream(
-            &debug::current_request_id(),
-            &debug::body_to_value(body.as_bytes()),
-        );
 
         #[cfg(test)]
         let url = self.chat_url.as_deref().unwrap_or(RAYCAST_API_URL);
@@ -325,9 +119,7 @@ impl RaycastClient {
             .headers(headers)
             .body(body.to_owned())
             .build()?;
-        let response = self
-            .send(request, Some((call, &account.email)), reserved)
-            .await?;
+        let response = self.send(request, Some((call, email)), reserved).await?;
         let attempt = response.extensions().get::<Attempt>().cloned();
         let result = ensure_success(response).await;
         if let (Err(error), Some(attempt)) = (&result, attempt) {
@@ -336,12 +128,13 @@ impl RaycastClient {
         result
     }
 
-    /// Fetch the raw list of models available to the account.
-    pub async fn fetch_models(&self) -> Result<Vec<RaycastRawModel>, GatewayError> {
-        let account = self.accounts.next_available()?;
-        let parsed: RaycastModelsResponse = self
-            .get_json(RAYCAST_MODELS_URL, &account.access_token)
-            .await?;
+    /// Fetch the raw list of models available to the account owning `token`.
+    pub async fn fetch_models(&self, token: &str) -> Result<Vec<RaycastRawModel>, GatewayError> {
+        #[cfg(test)]
+        let url = self.models_url.as_deref().unwrap_or(RAYCAST_MODELS_URL);
+        #[cfg(not(test))]
+        let url = RAYCAST_MODELS_URL;
+        let parsed: RaycastModelsResponse = self.get_json(url, token).await?;
         Ok(parsed.models)
     }
 
@@ -432,44 +225,6 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
     Err(GatewayError::Upstream { status, message })
 }
 
-/// 池全空的 [`GatewayError::NoAccount`] 充实:查最早已恢复的冷却账号。
-/// 有账号在冷却 → [`GatewayError::RateLimited`] (429 + `Retry-After`),
-/// harness 读头精确等待并显示 "rate limited until …";全被摘除/池空 →
-/// 保持 503 但附 `x-should-retry: false`,harness 立即放弃而不是指数退避
-/// 反复打。
-fn enrich_no_account(error: GatewayError, accounts: &AccountStore) -> GatewayError {
-    let GatewayError::NoAccount(message) = error else {
-        return error;
-    };
-    match accounts.earliest_cooldown_secs() {
-        Some(secs) if secs > 0 => {
-            let mins = (secs as f64 / 60.0).ceil() as u64;
-            GatewayError::RateLimited {
-                retry_after_secs: secs,
-                message: format!(
-                    "all Raycast accounts are rate-limited; earliest recovers in ~{secs}s (~{mins} min)"
-                ),
-            }
-        }
-        _ => GatewayError::NoAccount(format!(
-            "{message}; no account is in cooldown — every account was removed (flagged/unavailable) or the pool is empty"
-        )),
-    }
-}
-
-/// HTTP 层(非流内)错误是否为账号本身不可用(风控/订阅缺失):`ensure_success`
-pub(crate) fn is_account_dead_upstream(err: &GatewayError) -> bool {
-    let GatewayError::Upstream { status, message } = err else {
-        return false;
-    };
-    // 订阅缺失:402 + "subscription is required"。
-    if *status == 402 || message.contains("subscription is required") {
-        return true;
-    }
-    // 风控封禁:403 + subcode / message 特征。
-    message.contains("account_unavailable") || message.contains("flagged for suspicious")
-}
-
 /// 时区名(IANA,如 `Asia/Shanghai`),与客户端一致;取不到回退 UTC。
 fn tz_name() -> String {
     // `TZ` 环境变量是容器/服务器场景下最可靠的信号;Windows 上通常没设,
@@ -489,126 +244,4 @@ fn encode_query_value(s: &str) -> String {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures_util::StreamExt;
-    use serde_json::json;
-
-    #[tokio::test]
-    async fn statistics_follow_account_rotation_http_failures_and_sse_rejections() {
-        for failure in ["quota", "http", "token", "policy", "other"] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                axum::serve(listener, axum::Router::new().route("/", axum::routing::post(
-                    move |headers: axum::http::HeaderMap| async move {
-                        if headers.get("authorization").unwrap() == "Bearer first" {
-                            let (status, payload) = match failure {
-                                "quota" => (200, json!({"error":{"http_status":429,"message":"quota"},"usage":{"total_cost":0.1}})),
-                                "http" => (402, json!({"error":"subscription is required"})),
-                                "token" => (401, json!({"error":"invalid token"})),
-                                "policy" => (200, json!({"error":{"http_status":403,"code":"content_policy_blocked","message":"blocked"}})),
-                                _ => (200, json!({"error":{"http_status":502,"message":"other"}})),
-                            };
-                            (axum::http::StatusCode::from_u16(status).unwrap(), format!("data: {payload}\n\n"))
-                        } else {
-                            (axum::http::StatusCode::OK, "data: {\"finish_reason\":\"stop\",\"usage\":{\"input_tokens\":3,\"total_credits\":2.5}}\n\n".into())
-                        }
-                    }
-                ))).await.unwrap();
-            });
-            let state = crate::server::state::compact_test_state();
-            for (email, token) in [("a@example.com", "first"), ("b@example.com", "second")] {
-                state
-                    .accounts
-                    .upsert(
-                        &serde_json::from_value(
-                            json!({"user":{"email":email},"access_token":token}),
-                        )
-                        .unwrap(),
-                    )
-                    .unwrap();
-            }
-            let mut client = state.client.clone();
-            client.http = reqwest::Client::builder().no_proxy().build().unwrap();
-            client.chat_url = Some(format!("http://{address}/"));
-            let request = crate::core::request::CanonicalRequest::new(
-                crate::core::protocol::Protocol::Responses,
-                "client",
-            );
-            let upstream =
-                crate::raycast::builder::build_chat_request(&request, "openai", "upstream");
-            let call = CallContext::new(&request, &upstream.provider, &upstream.model, "inference");
-            let result = client.send_chat(&upstream, &call, None).await;
-            if failure == "policy" {
-                assert!(result.is_err());
-            } else {
-                let stream = crate::raycast::stream::canonical_events_with_retry(
-                    result.unwrap(),
-                    client,
-                    upstream,
-                    state.log.clone(),
-                    call,
-                );
-                let _: Vec<_> = stream.collect().await;
-            }
-            let rows = state.statistics.list(&Default::default()).unwrap().items;
-            let rotated = matches!(failure, "quota" | "http" | "token");
-            assert_eq!(rows.len(), if rotated { 2 } else { 1 }, "{failure}");
-            let failed = rows
-                .iter()
-                .find(|row| row.account_email == "a@example.com")
-                .unwrap();
-            assert_eq!(failed.status, "failed", "{failure}");
-            assert!(failed.finished_at.is_some());
-            assert_eq!(
-                failed.http_status,
-                Some(match failure {
-                    "http" => 402,
-                    "token" => 401,
-                    _ => 200,
-                })
-            );
-            if failure == "quota" {
-                assert_eq!(
-                    serde_json::from_str::<serde_json::Value>(failed.usage_json.as_ref().unwrap())
-                        .unwrap()["total_cost"],
-                    0.1
-                );
-            }
-            if rotated {
-                let completed = rows
-                    .iter()
-                    .find(|row| row.account_email == "b@example.com")
-                    .unwrap();
-                assert_eq!(completed.status, "completed");
-                assert_eq!(
-                    serde_json::from_str::<serde_json::Value>(
-                        completed.usage_json.as_ref().unwrap()
-                    )
-                    .unwrap()["total_credits"],
-                    2.5
-                );
-                assert_eq!(failed.request_id, completed.request_id);
-            }
-            server.abort();
-        }
-    }
-
-    #[test]
-    fn cooldown_clamps_to_configured_bounds() {
-        // 上游给的 retry_after 会被夹到配置的上下限内。
-        assert_eq!(999.clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS), 999);
-        assert_eq!(
-            5.clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS),
-            MIN_COOLDOWN_SECS
-        );
-        assert_eq!(
-            (30 * 60 * 60).clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS),
-            MAX_COOLDOWN_SECS
-        );
-    }
 }

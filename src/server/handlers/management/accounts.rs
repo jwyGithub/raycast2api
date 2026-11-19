@@ -179,7 +179,8 @@ pub async fn restore(
     Json(request): Json<EmailRequest>,
 ) -> Result<Response, GatewayError> {
     let (row, upstream_note) =
-        crate::account::service::restore(&state.accounts, &state.client, &request.email).await?;
+        crate::account::service::restore(&state.accounts, &state.dispatcher.client, &request.email)
+            .await?;
     let mut view = account_view(row);
     view.unavailable_reason = upstream_note.clone();
     // note 不该污染 available 语义:查询成功时 reason 已是 None。
@@ -191,8 +192,12 @@ pub async fn refresh(
     State(state): State<SharedState>,
     Json(request): Json<EmailRequest>,
 ) -> Result<Json<AccountView>, GatewayError> {
-    crate::account::quota_refresh::refresh_one(&state.accounts, &state.client, &request.email)
-        .await?;
+    crate::account::quota_refresh::refresh_one(
+        &state.accounts,
+        &state.dispatcher.client,
+        &request.email,
+    )
+    .await?;
     let row = state.accounts.get(&request.email)?.ok_or_else(|| {
         GatewayError::NotFound(format!("no account with email {}", request.email))
     })?;

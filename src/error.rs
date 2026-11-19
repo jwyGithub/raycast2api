@@ -54,6 +54,21 @@ pub enum GatewayError {
 }
 
 impl GatewayError {
+    /// Whether an upstream HTTP-level error means the *account* is unusable
+    /// (flagged 403 / subscription missing 402) rather than a transient or
+    /// request-specific failure.
+    pub fn is_account_dead(&self) -> bool {
+        let GatewayError::Upstream { status, message } = self else {
+            return false;
+        };
+        // 订阅缺失:402 + "subscription is required"。
+        if *status == 402 || message.contains("subscription is required") {
+            return true;
+        }
+        // 风控封禁:403 + subcode / message 特征。
+        message.contains("account_unavailable") || message.contains("flagged for suspicious")
+    }
+
     /// Map the error to an HTTP status, an OpenAI error `type`, and a message.
     fn parts(&self) -> (StatusCode, &'static str, String) {
         match self {

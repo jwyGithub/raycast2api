@@ -10,7 +10,6 @@
 //! Missing terminal events are distinguished from explicit upstream errors so
 //! callers can retry a truncated response once, but only before any output is delivered.
 
-use super::{client::RaycastClient, wire::RaycastChatRequest};
 use crate::error::GatewayError;
 use async_stream::stream;
 use futures_util::{Stream, StreamExt, future::BoxFuture};
@@ -25,25 +24,6 @@ use super::sse::SseDecoder;
 
 use std::sync::Arc;
 
-/// Retry unexpected SSE truncation once only if no output has been delivered.
-pub(crate) fn canonical_events_with_retry(
-    response: reqwest::Response,
-    client: RaycastClient,
-    request: RaycastChatRequest,
-    log: Arc<RequestLogStore>,
-    call: crate::statistics::CallContext,
-) -> impl Stream<Item = CanonicalEvent> + Send + 'static {
-    let id = debug::current_request_id();
-    let timeout = client.settings.upstream_timeout();
-    retry_once(response, log, timeout, move || {
-        Box::pin(async move {
-            debug::REQUEST_ID
-                .scope(id, client.send_chat(&request, &call, None))
-                .await
-        })
-    })
-}
-
 fn premature_error() -> CanonicalEvent {
     CanonicalEvent::Error {
         status: 502,
@@ -51,7 +31,9 @@ fn premature_error() -> CanonicalEvent {
     }
 }
 
-fn retry_once(
+/// Retry unexpected SSE truncation once only if no output has been delivered;
+/// `resend` re-issues the identical upstream request.
+pub(crate) fn canonical_events_with_retry(
     response: reqwest::Response,
     log: Arc<RequestLogStore>,
     timeout: std::time::Duration,
@@ -289,7 +271,7 @@ mod tests {
     #[tokio::test]
     async fn large_output_is_preserved_without_retry() {
         let text = "x".repeat(2 * 1024 * 1024 + 1);
-        let events: Vec<_> = retry_once(
+        let events: Vec<_> = canonical_events_with_retry(
             response(&[json!({"text":text})]),
             log(),
             std::time::Duration::from_secs(20),
@@ -346,7 +328,7 @@ mod tests {
         let mut second_response = response(&[json!({"text":"partial done"}), finish()]);
         second.set_http_status(200);
         second_response.extensions_mut().insert(second);
-        let events: Vec<_> = retry_once(
+        let events: Vec<_> = canonical_events_with_retry(
             first_response,
             state.log.clone(),
             std::time::Duration::from_secs(1),
@@ -406,7 +388,7 @@ mod tests {
         attempt.set_http_status(200);
         stalled.extensions_mut().insert(attempt);
         // 超时后会重发一次;让重发返回 Err,保持测试只关心首个 attempt。
-        let events: Vec<_> = retry_once(
+        let events: Vec<_> = canonical_events_with_retry(
             stalled,
             state.log.clone(),
             std::time::Duration::from_millis(50),
@@ -424,7 +406,7 @@ mod tests {
     async fn retries_truncation_before_output_once_ignoring_empty_payloads_and_pings() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let retried = attempts.clone();
-        let events: Vec<_> = retry_once(
+        let events: Vec<_> = canonical_events_with_retry(
             response(&[
                 json!({"reasoning":"", "text":""}),
                 json!({"notification_type":"ping", "text":""}),
@@ -467,7 +449,7 @@ mod tests {
             vec![json!({"text":"ok"}), finish()],
             vec![json!({"error":{"http_status":502,"message":"explicit error"}})],
         ] {
-            let events: Vec<_> = retry_once(
+            let events: Vec<_> = canonical_events_with_retry(
                 response(&payloads),
                 log(),
                 std::time::Duration::from_secs(20),
@@ -484,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn second_truncation_is_failure_without_third_attempt() {
-        let events: Vec<_> = retry_once(
+        let events: Vec<_> = canonical_events_with_retry(
             response(&[]),
             log(),
             std::time::Duration::from_secs(20),
@@ -520,7 +502,7 @@ mod tests {
                 }),
             ),
         ] {
-            let events: Vec<_> = retry_once(
+            let events: Vec<_> = canonical_events_with_retry(
                 response(&[payload]),
                 log(),
                 std::time::Duration::from_secs(20),
@@ -539,7 +521,7 @@ mod tests {
     #[tokio::test]
     async fn retry_connection_failure_or_business_error_is_terminal() {
         for connection_error in [true, false] {
-            let events: Vec<_> = retry_once(
+            let events: Vec<_> = canonical_events_with_retry(
                 response(&[]),
                 log(),
                 std::time::Duration::from_secs(20),
@@ -582,7 +564,7 @@ mod tests {
         store.insert_request("retry-id", "POST", "/v1/responses", &json!({}));
         let events = debug::REQUEST_ID
             .scope("retry-id".into(), async {
-                retry_once(
+                canonical_events_with_retry(
                     first,
                     store.clone(),
                     std::time::Duration::from_secs(20),
@@ -618,7 +600,7 @@ mod tests {
             store.insert_request("timeout-id", "POST", "/v1/responses", &json!({}));
             let events = debug::REQUEST_ID
                 .scope("timeout-id".into(), async {
-                    retry_once(
+                    canonical_events_with_retry(
                         first,
                         store.clone(),
                         std::time::Duration::from_millis(5),
@@ -655,7 +637,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_first_stream_never_starts_retry() {
-        let events = retry_once(
+        let events = canonical_events_with_retry(
             response(&[json!({"text":"A"})]),
             log(),
             std::time::Duration::from_secs(20),
@@ -670,7 +652,7 @@ mod tests {
     async fn responses_adapter_completes_retry_before_output_and_reports_partial_stream_failure() {
         use crate::protocol::{OutboundAdapter, responses::ResponsesOutbound};
         for partial in [false, true] {
-            let events = retry_once(
+            let events = canonical_events_with_retry(
                 response(&if partial {
                     vec![json!({"text":"A"})]
                 } else {

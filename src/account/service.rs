@@ -29,7 +29,7 @@ pub async fn restore(
                 store.mark_unavailable(email, "token 失效 (401)");
                 upstream_note = Some("token 已失效 (401),恢复后仍不可用;需重新授权".into());
             }
-            Err(err) if crate::raycast::client::is_account_dead_upstream(&err) => {
+            Err(err) if err.is_account_dead() => {
                 let err = crate::account::quota_refresh::record_refresh_error(store, email, err);
                 upstream_note = Some(err.to_string());
             }

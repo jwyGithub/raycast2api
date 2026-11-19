@@ -33,7 +33,7 @@ pub fn body_to_value(bytes: &[u8]) -> Value {
 }
 
 /// 上游通道登记:request_id → 最终成功送达上游的通道("direct" 或代理 URL)。
-/// `try_chat` 成功后写入,中间件的完成日志读取后打印,让 trace 能看出这条
+/// `RaycastClient::send` 成功后写入,中间件的完成日志读取后打印,让 trace 能看出这条
 /// 请求走的是直连还是哪个代理。无论是否配置代理都上报(直连即 "direct")。
 ///
 /// 进程内旁路表(与请求日志 store 同级),条目由中间件在请求结束后取走,

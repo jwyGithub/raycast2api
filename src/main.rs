@@ -65,13 +65,7 @@ async fn run() -> Result<(), String> {
         });
     }
 
-    let client = RaycastClient::new(
-        http,
-        settings.clone(),
-        accounts.clone(),
-        request_log.clone(),
-        statistics.clone(),
-    );
+    let client = RaycastClient::new(http, settings.clone(), statistics.clone());
     let redis = raycast2api::storage::redis_store::connect_from_env()
         .await
         .map_err(|error| format!("Redis configuration error: {error}"))?;

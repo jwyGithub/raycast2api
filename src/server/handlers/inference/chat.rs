@@ -78,14 +78,8 @@ mod tests {
             });
             let mut state = crate::server::state::compact_test_state();
             let inner = Arc::get_mut(&mut state).unwrap();
-            inner.client = crate::raycast::client::RaycastClient::new(
-                reqwest::Client::builder().no_proxy().build().unwrap(),
-                inner.settings.clone(),
-                inner.accounts.clone(),
-                inner.log.clone(),
-                inner.statistics.clone(),
-            );
-            inner.client.chat_url = Some(format!("http://{address}/"));
+            inner.dispatcher.client.http = reqwest::Client::builder().no_proxy().build().unwrap();
+            inner.dispatcher.client.chat_url = Some(format!("http://{address}/"));
             inner
                 .accounts
                 .upsert(

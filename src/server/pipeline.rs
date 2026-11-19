@@ -22,7 +22,6 @@ use crate::core::response::CanonicalResponse;
 use crate::error::GatewayError;
 use crate::protocol::OutboundAdapter;
 use crate::raycast::builder::build_chat_request;
-use crate::raycast::stream::canonical_events_with_retry;
 use crate::raycast::wire::RaycastRawModel;
 use crate::statistics::{Attempt, CallContext, REQUEST_CONTEXT};
 
@@ -145,8 +144,13 @@ pub(crate) async fn events(
     call.accounting = accounting;
     let usage_key = UsageKey::new(request);
 
+    // 记录发给上游的请求体(与入站请求按 request id 关联)。
+    state.log.update_upstream(
+        &crate::log::context::current_request_id(),
+        &serde_json::to_value(&raycast_request).unwrap_or_default(),
+    );
     let response = match state
-        .client
+        .dispatcher
         .send_chat(&raycast_request, &call, reserved)
         .await
     {
@@ -162,13 +166,9 @@ pub(crate) async fn events(
     Ok(track_usage(
         state.clone(),
         usage_key,
-        canonical_events_with_retry(
-            response,
-            state.client.clone(),
-            raycast_request,
-            state.log.clone(),
-            call,
-        ),
+        state
+            .dispatcher
+            .events(response, raycast_request, state.log.clone(), call),
     ))
 }
 

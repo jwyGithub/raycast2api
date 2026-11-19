@@ -39,8 +39,6 @@ fn app_with_api_key(api_key: &str) -> (axum::Router, Arc<AccountStore>) {
     let client = raycast2api::raycast::client::RaycastClient::new(
         reqwest::Client::new(),
         settings.clone(),
-        store.clone(),
-        log_store.clone(),
         statistics.clone(),
     );
     let state = Arc::new(

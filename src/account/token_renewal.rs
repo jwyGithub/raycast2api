@@ -184,8 +184,8 @@ mod tests {
         let old = state.accounts.get("renew@test").unwrap().unwrap();
         let lock = state.accounts.renewal_lock("renew@test");
         let guard = lock.lock().await;
-        let a = auto_renew(&state.accounts, &state.client, &old);
-        let b = auto_renew(&state.accounts, &state.client, &old);
+        let a = auto_renew(&state.accounts, &state.dispatcher.client, &old);
+        let b = auto_renew(&state.accounts, &state.dispatcher.client, &old);
         state
             .accounts
             .update_tokens("renew@test", "rca_new", Some("new"))

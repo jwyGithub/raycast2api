@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     core::{event::CanonicalEvent, protocol::Protocol},
     protocol::{InboundAdapter, messages::MessagesInbound, responses::ResponsesInbound},
-    raycast::{builder::build_chat_request, stream::canonical_events_with_retry},
+    raycast::builder::build_chat_request,
     server::{build_router, state::compact_test_state},
     storage::db::Db,
 };
@@ -166,13 +166,9 @@ async fn costs_settle_before_terminal_delta_and_survive_response_peeking() {
         "openai",
         "m",
     );
-    let events = canonical_events_with_retry(
-        response,
-        state.client.clone(),
-        upstream,
-        state.log.clone(),
-        context,
-    );
+    let events = state
+        .dispatcher
+        .events(response, upstream, state.log.clone(), context);
     let mut events = Box::pin(events);
     assert_eq!(
         events.next().await,
@@ -207,9 +203,8 @@ async fn cancellation_records_unknown_usage_before_and_during_stream_polling() {
             "openai",
             "m",
         );
-        let mut events = Box::pin(canonical_events_with_retry(
+        let mut events = Box::pin(state.dispatcher.events(
             response(attempt, &[json!({"text":"partial"})]),
-            state.client.clone(),
             upstream,
             state.log.clone(),
             context,
@@ -249,9 +244,8 @@ async fn successful_finish_without_usage_remains_null_and_partial_usage_survives
             "openai",
             "m",
         );
-        let mut events = Box::pin(canonical_events_with_retry(
+        let mut events = Box::pin(state.dispatcher.events(
             response(attempt, &[payload]),
-            state.client.clone(),
             upstream,
             state.log.clone(),
             context,
@@ -366,14 +360,8 @@ async fn upstream_fixture() -> (
     });
     let mut state = compact_test_state();
     let inner = Arc::get_mut(&mut state).unwrap();
-    inner.client = crate::raycast::client::RaycastClient::new(
-        reqwest::Client::builder().no_proxy().build().unwrap(),
-        inner.settings.clone(),
-        inner.accounts.clone(),
-        inner.log.clone(),
-        inner.statistics.clone(),
-    );
-    inner.client.chat_url = Some(format!("http://{address}/"));
+    inner.dispatcher.client.http = reqwest::Client::builder().no_proxy().build().unwrap();
+    inner.dispatcher.client.chat_url = Some(format!("http://{address}/"));
     inner
         .accounts
         .upsert(
