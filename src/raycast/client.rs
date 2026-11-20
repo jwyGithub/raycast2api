@@ -58,11 +58,7 @@ impl RaycastClient {
     /// UA variant, attaches the DeviceId, and — on signed requests — the
     /// timestamp/signature pair plus the `autoModels` experimental flag. GETs
     /// in the real client carry *no* DeviceId and no signature pair.
-    fn base_headers(
-        &self,
-        bearer: &str,
-        signed: Option<(&str, &str)>,
-    ) -> HeaderMap {
+    fn base_headers(&self, bearer: &str, signed: Option<(&str, &str)>) -> HeaderMap {
         let mut headers = HeaderMap::new();
         let bearer = format!("Bearer {bearer}");
         // These values come from config/HMAC output and are always valid header text.
@@ -93,7 +89,10 @@ impl RaycastClient {
                 "X-Raycast-Signature-v2",
                 HeaderValue::from_str(signature).expect("valid signature"),
             );
-            headers.insert("X-Raycast-Experimental", HeaderValue::from_static("autoModels"));
+            headers.insert(
+                "X-Raycast-Experimental",
+                HeaderValue::from_static("autoModels"),
+            );
         }
         headers
     }
