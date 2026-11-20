@@ -11,7 +11,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 
 use crate::config::{
     RAYCAST_AI_CREDITS_DETAILS_URL, RAYCAST_AI_CREDITS_URL, RAYCAST_API_URL, RAYCAST_ME_URL,
-    RAYCAST_MODELS_URL, RAYCAST_TRIAL_STATUS_URL, Settings, USER_AGENT,
+    RAYCAST_MODELS_URL, RAYCAST_TRIAL_STATUS_URL, Settings, USER_AGENT, USER_AGENT_POST,
 };
 use crate::error::GatewayError;
 use crate::signature::calculate_signature_v2;
@@ -53,13 +53,15 @@ impl RaycastClient {
         }
     }
 
-    /// Common headers shared by every request. When `signature` is `Some`, the
-    /// timestamp/signature pair (present only for signed POSTs) is included.
+    /// Common headers shared by every request. `signed` selects the POST
+    /// header set the real client sends: it swaps in the "x-Windows Version"
+    /// UA variant, attaches the DeviceId, and — on signed requests — the
+    /// timestamp/signature pair plus the `autoModels` experimental flag. GETs
+    /// in the real client carry *no* DeviceId and no signature pair.
     fn base_headers(
         &self,
         bearer: &str,
-        timestamp: Option<&str>,
-        signature: Option<&str>,
+        signed: Option<(&str, &str)>,
     ) -> HeaderMap {
         let mut headers = HeaderMap::new();
         let bearer = format!("Bearer {bearer}");
@@ -69,19 +71,29 @@ impl RaycastClient {
             HeaderValue::from_str(&bearer).expect("valid bearer header"),
         );
         headers.insert(
-            "X-Raycast-DeviceId",
-            HeaderValue::from_str(&self.settings.raycast_device_id).expect("valid device id"),
+            "User-Agent",
+            // The real client uses the `x-Windows Version` UA variant on
+            // signed POSTs and `x-Windows-amd64` on GETs (captures 2026-11).
+            HeaderValue::from_static(if signed.is_some() {
+                USER_AGENT_POST
+            } else {
+                USER_AGENT
+            }),
         );
-        headers.insert("User-Agent", HeaderValue::from_static(USER_AGENT));
-        if let (Some(ts), Some(sig)) = (timestamp, signature) {
+        if let Some((timestamp, signature)) = signed {
+            headers.insert(
+                "X-Raycast-DeviceId",
+                HeaderValue::from_str(&self.settings.raycast_device_id).expect("valid device id"),
+            );
             headers.insert(
                 "X-Raycast-Timestamp",
-                HeaderValue::from_str(ts).expect("valid timestamp"),
+                HeaderValue::from_str(timestamp).expect("valid timestamp"),
             );
             headers.insert(
                 "X-Raycast-Signature-v2",
-                HeaderValue::from_str(sig).expect("valid signature"),
+                HeaderValue::from_str(signature).expect("valid signature"),
             );
+            headers.insert("X-Raycast-Experimental", HeaderValue::from_static("autoModels"));
         }
         headers
     }
@@ -105,9 +117,11 @@ impl RaycastClient {
             &self.settings.raycast_signature_secret,
         );
 
-        let mut headers = self.base_headers(token, Some(&timestamp), Some(&signature));
+        let mut headers = self.base_headers(token, Some((&timestamp, &signature)));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-        headers.insert("Accept", HeaderValue::from_static("text/event-stream"));
+        // The real client sends `application/json` even though the response is
+        // SSE (capture 2026-11-20); `text/event-stream` is a fingerprint.
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
 
         #[cfg(test)]
         let url = self.chat_url.as_deref().unwrap_or(RAYCAST_API_URL);
@@ -177,7 +191,7 @@ impl RaycastClient {
         url: &str,
         token: &str,
     ) -> Result<T, GatewayError> {
-        let mut headers = self.base_headers(token, None, None);
+        let mut headers = self.base_headers(token, None);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         let request = self
             .http

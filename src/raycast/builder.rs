@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use crate::core::message::{Message, Role};
 use crate::core::request::CanonicalRequest;
 use crate::core::tools::{ToolChoice, ToolDef};
-use crate::util::{current_date, derive_ulid, derive_uuid, new_ulid, new_uuid};
+use crate::util::{current_timestamp, derive_ulid, derive_uuid, new_ulid, new_uuid};
 
 use super::wire::{RaycastChatRequest, RaycastMessage, RaycastRequestToolCall};
 
@@ -35,9 +35,6 @@ use super::wire::{RaycastChatRequest, RaycastMessage, RaycastRequestToolCall};
 /// always this constant, never the caller's prompt. Matches the reference
 /// implementation (and the previous OpenAI behavior) exactly.
 const DEFAULT_SYSTEM_INSTRUCTIONS: &str = "markdown";
-
-/// Default sampling temperature when the caller didn't set one.
-const DEFAULT_TEMPERATURE: f64 = 0.5;
 
 /// Build the Raycast chat request from a canonical request and the already
 /// resolved upstream `provider` / `model`.
@@ -53,7 +50,10 @@ pub fn build_chat_request(
         // Raycast's base prompt is always `system_instructions`; the caller's
         // system prompt (if any) rides along as `additional_system_instructions`.
         system_instructions: DEFAULT_SYSTEM_INSTRUCTIONS.to_string(),
-        temperature: canonical.temperature.unwrap_or(DEFAULT_TEMPERATURE),
+        // The real client never sends `temperature` on chat requests (confirmed
+        // in the 2026-11-13/20 captures); sending it is a fingerprint, so it is
+        // forwarded only when the caller explicitly set one.
+        temperature: canonical.temperature,
         source: "ai_chat".to_string(),
         locale: "zh-CN".to_string(),
         thread_id: derive_thread_id(&canonical.messages),
@@ -67,9 +67,13 @@ pub fn build_chat_request(
             .as_ref()
             .map(tool_choice_wire)
             .or_else(|| (!canonical.tools.is_empty()).then(|| "auto".to_string())),
-        message_id: Some(derive_message_id(&canonical.messages)),
+        // The real client prefixes the turn uuid with `run-` (captures
+        // 2026-11-13/20: `run-97c33d75-...`).
+        message_id: Some(format!("run-{}", derive_message_id(&canonical.messages))),
         buffer_id: Some(new_uuid()),
-        current_date: Some(current_date()),
+        // Full ISO-8601 UTC timestamp, as the real client sends it since at
+        // least 2.12.0 (`2026-11-13T01:45:10.062Z`), not a bare date.
+        current_date: Some(current_timestamp()),
     }
 }
 

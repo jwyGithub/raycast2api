@@ -111,7 +111,11 @@ pub struct RaycastChatRequest {
     pub provider: String,
     pub messages: Vec<RaycastMessage>,
     pub system_instructions: String,
-    pub temperature: f64,
+    /// Sampling temperature. The real client never sends it on chat requests
+    /// (captures 2026-11-13/20 omit it entirely), so it is `None` unless the
+    /// caller explicitly set one — sending a default is a fingerprint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
     pub source: String,
     pub locale: String,
     pub thread_id: String,

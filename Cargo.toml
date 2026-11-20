@@ -31,6 +31,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 time = { version = "0.3", features = ["formatting"] }
 
+# OS CSPRNG for managed API-key generation and id randomness (already a
+# transitive dep). The hand-rolled /dev/urandom reader fails on Windows.
+getrandom = "0.2"
+
 # Embeds src/page/ (the management console) into the binary: files are baked in
 # for release builds and read from disk in debug builds, so adding a console
 # file needs no Rust change. `mime-guess` supplies Content-Type, `include-exclude`

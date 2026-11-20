@@ -1080,6 +1080,7 @@ dependencies = [
  "axum",
  "diesel",
  "futures-util",
+ "getrandom 0.2.17",
  "hex",
  "hmac",
  "http-body-util",

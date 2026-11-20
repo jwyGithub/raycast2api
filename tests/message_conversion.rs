@@ -49,7 +49,9 @@ fn absent_system_retains_upstream_base_prompt() {
     assert_eq!(canonical.messages[0].role, Role::User);
     let upstream = build_chat_request(&canonical, "p", "m");
     assert_eq!(upstream.system_instructions, "markdown");
-    assert_eq!(upstream.temperature, 1.0);
+    // The real client never sends `temperature`; an unset value must be absent
+    // from the wire, not defaulted (fingerprint defense, 2026-11-20).
+    assert_eq!(upstream.temperature, None);
 }
 
 #[test]

@@ -1,6 +1,5 @@
 //! Small shared helpers.
 
-use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current Unix time in whole seconds (0 if the clock is before the epoch).
@@ -85,8 +84,22 @@ fn fnv1a_128(seed: &[u8]) -> u128 {
 /// the same bytes always map to the same 26-char id. Enables session affinity
 /// for a stateless gateway — one conversation's `thread_id` can be re-derived
 /// on every turn instead of minting a fresh random one.
+///
+/// The real Raycast client's `thread_id` is a genuine time-ordered ULID:
+/// leading character always `0` (today's 48-bit ms timestamps sit just above
+/// `2^40`, leaving the top three bits zero) and a timestamp plausibly inside
+/// the current year. A raw 128-bit hash scatters bits everywhere and yields
+/// impossible ids — a strong fingerprint. So the seed hash fills the 80-bit
+/// randomness portion, and the timestamp portion is a stable hash-derived
+/// offset within calendar year 2026 — pure function of the seed, hence stable
+/// across turns, yet indistinguishable from a real client's id shape.
 pub fn derive_ulid(seed: &[u8]) -> String {
-    encode_ulid(fnv1a_128(seed))
+    const YEAR_2026_MS: u128 = 1_767_225_600_000; // 2026-01-01T00:00:00Z
+    const YEAR_SPAN_MS: u128 = 31_536_000_000; // 365 days
+    let hash = fnv1a_128(seed);
+    let timestamp = YEAR_2026_MS + hash % YEAR_SPAN_MS; // < 2^41 -> leading '0'
+    let randomness = hash & ((1u128 << 80) - 1);
+    encode_ulid((timestamp << 80) | randomness)
 }
 
 /// Derive a **stable, deterministic** UUID-shaped id from an arbitrary seed:
@@ -119,8 +132,30 @@ pub fn current_date() -> String {
     time::OffsetDateTime::now_utc().date().to_string()
 }
 
+/// Current UTC time as full ISO-8601 with millisecond precision and `Z`
+/// suffix (`2026-11-20T13:04:03.092Z`) — the `current_date` shape the real
+/// Raycast client has sent since at least 2.12.0 (captures 2026-11-13/20).
+/// Hand-assembled because `Rfc3339` omits the fractional part when the
+/// millisecond is exactly zero, while the client always carries 3 digits.
+pub fn current_timestamp() -> String {
+    let now = time::OffsetDateTime::now_utc();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        now.year(),
+        u8::from(now.month()) as u32,
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second(),
+        now.millisecond(),
+    )
+}
+
 pub(crate) fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
-    std::fs::File::open("/dev/urandom")?.read_exact(buf)
+    // OS CSPRNG via getrandom (BCryptGenRandom on Windows, getrandom(2) on
+    // Linux): the previous /dev/urandom file read silently never worked on
+    // Windows, making every random-mode managed key generation fail.
+    getrandom::getrandom(buf).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 /// Mask an API key for display and storage: `****` between the first and last

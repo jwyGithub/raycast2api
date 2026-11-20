@@ -34,11 +34,15 @@ pub const OAUTH_TOKEN_URL: &str = "https://backend.raycast.com/oauth/token";
 /// 与 scripts/ 下的注册/刷新脚本硬编码值一致 —— 上游变更时同改)。
 pub const OAUTH_CLIENT_ID: &str = "FRsHICIAlyPB_v2m4tfVqHtVUS40Ieco_da0Y6zBwgA";
 
-/// User-Agent string sent with every upstream request (matches the captured
-/// client). 必须是近期真实客户端版本:上游按客户端版本判定 Better AI 资格,
-/// 过老的 UA(如 1.94.2)会让所有 Advanced AI 档模型被降级(见
-/// doc/model-degradation.md 的隔离测试)。
-pub const USER_AGENT: &str = "Raycast/2.11.0.0 (x-Windows-amd64 10.0.26100.9711)";
+/// User-Agent sent with GET requests — the `x-Windows-amd64` variant the real
+/// client uses for them (captures 2026-11-13/20). 必须是近期真实客户端版本:
+/// 上游按客户端版本判定 Better AI 资格,过老的 UA(如 1.94.2)会让所有
+/// Advanced AI 档模型被降级(见 doc/model-degradation.md 的隔离测试)。
+pub const USER_AGENT: &str = "Raycast/2.13.1.0 (x-Windows-amd64 10.0.26100.9974)";
+
+/// User-Agent sent with signed POSTs (chat_completions) — the real client
+/// swaps in the `x-Windows Version` variant there (captures 2026-11-13/20).
+pub const USER_AGENT_POST: &str = "Raycast/2.13.1.0 (x-Windows Version 10.0.26100.9974)";
 
 /// 上游连接池空闲回收时间。reqwest 默认 90s,偏长:边缘/NAT 常在更早时
 /// 悄悄关掉空闲连接,复用到死连接会报 "connection closed before message

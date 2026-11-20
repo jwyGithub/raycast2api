@@ -27,8 +27,12 @@ impl InboundAdapter for ChatCompletionsInbound {
         let model = require_model(request.model)?;
         let mut canonical = CanonicalRequest::new(Protocol::ChatCompletions, model);
         canonical.stream = request.stream;
-        // Match the Chat API default without changing the other protocols.
-        canonical.temperature = Some(request.temperature.unwrap_or(1.0));
+        // Forwarded verbatim; no default. The real Raycast client never sends
+        // `temperature` upstream (captures 2026-11-13/20), so injecting the
+        // Chat-API default of 1.0 here would put a field on the wire the
+        // official client never carries — a fingerprint. The upstream default
+        // applies whenever the caller omitted it, exactly as it does for them.
+        canonical.temperature = request.temperature;
         // Values the upstream has no slot for (e.g. "minimal") are not forwarded.
         canonical.reasoning_effort = match request.reasoning_effort.as_deref() {
             Some("low") => Some(ReasoningEffort::Low),
