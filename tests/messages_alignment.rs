@@ -77,7 +77,7 @@ fn client_system_prompt_rides_as_additional_instructions() {
         "messages": [ { "role": "user", "content": "hi" } ]
     }));
 
-    let raycast = build_chat_request(&canonical, "anthropic", "claude");
+    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
     // Base prompt stays "markdown"; the client's system becomes the addendum.
     assert_eq!(raycast.system_instructions, "markdown");
     assert_eq!(
@@ -93,7 +93,7 @@ fn absent_system_leaves_additional_unset() {
         "messages": [ { "role": "user", "content": "hi" } ]
     }));
 
-    let raycast = build_chat_request(&canonical, "anthropic", "claude");
+    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
     assert_eq!(raycast.system_instructions, "markdown");
     // No client system → the addendum is omitted entirely (serde skips None).
     assert!(raycast.additional_system_instructions.is_none());
@@ -116,7 +116,7 @@ fn adaptive_thinking_enables_reasoning() {
         Some(ReasoningEffort::High)
     ));
 
-    let raycast = build_chat_request(&canonical, "anthropic", "claude");
+    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
     assert_eq!(raycast.reasoning_effort.as_deref(), Some("high"));
 }
 
@@ -162,7 +162,7 @@ fn tool_result_is_labelled_with_its_tool_name() {
     assert_eq!(tool.tool_name.as_deref(), Some("Read"));
 
     // And it survives to the Raycast wire as `name`.
-    let raycast = build_chat_request(&canonical, "anthropic", "claude");
+    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
     let wire_tool = raycast
         .messages
         .iter()
@@ -186,7 +186,7 @@ fn tool_choice_defaults_to_auto_when_tools_present() {
     assert!(canonical.tool_choice.is_none());
 
     // ...but the builder defaults it to "auto" because tools are offered.
-    let raycast = build_chat_request(&canonical, "anthropic", "claude");
+    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
     assert_eq!(raycast.tool_choice.as_deref(), Some("auto"));
 }
 
@@ -196,7 +196,7 @@ fn tool_choice_stays_unset_without_tools() {
         "model": "claude-x",
         "messages": [ { "role": "user", "content": "hi" } ]
     }));
-    let raycast = build_chat_request(&canonical, "anthropic", "claude");
+    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
     assert!(raycast.tool_choice.is_none());
 }
 

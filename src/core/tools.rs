@@ -2,7 +2,10 @@
 //!
 //! Inbound adapters (②) normalize each protocol's tool schema into these types;
 //! the Raycast builder (④) renders them into Raycast's `tools[]` shape
-//! (`local_tool` with a JSON Schema, or `remote_tool` by name).
+//! (`local_tool` with a JSON Schema, or `remote_tool` by name). The builder
+//! may also *synthesize* a `remote_tool` entry the client never sent — the
+//! `image_generation` remote tool, injected when the model advertises the
+//! ability — so canonical tools are not the complete wire tool set.
 
 use serde_json::Value;
 
@@ -28,6 +31,17 @@ pub enum ToolDef {
     },
     /// A backend-provided tool referenced by name only (e.g. `web_search`).
     Remote { name: String },
+}
+
+impl ToolDef {
+    /// The tool's name, across all three kinds.
+    pub fn name(&self) -> &str {
+        match self {
+            ToolDef::Local { name, .. }
+            | ToolDef::Custom { name, .. }
+            | ToolDef::Remote { name } => name,
+        }
+    }
 }
 
 /// How the model should decide whether to call a tool.

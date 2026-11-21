@@ -30,8 +30,8 @@ fn thread_id_is_stable_across_turns() {
         Message::text(Role::User, "what's the weather?"),
     ]);
 
-    let a = build_chat_request(&turn1, "anthropic", "claude");
-    let b = build_chat_request(&turn2, "anthropic", "claude");
+    let a = build_chat_request(&turn1, "anthropic", "claude", false);
+    let b = build_chat_request(&turn2, "anthropic", "claude", false);
     assert_eq!(
         a.thread_id, b.thread_id,
         "same conversation must map to the same thread_id"
@@ -44,11 +44,13 @@ fn thread_id_differs_across_conversations() {
         &req_with(vec![Message::text(Role::User, "topic A")]),
         "anthropic",
         "claude",
+        false,
     );
     let b = build_chat_request(
         &req_with(vec![Message::text(Role::User, "topic B")]),
         "anthropic",
         "claude",
+        false,
     );
     assert_ne!(a.thread_id, b.thread_id);
 }
@@ -60,6 +62,7 @@ fn thread_id_falls_back_when_no_user_message() {
         &req_with(vec![Message::text(Role::System, "be nice")]),
         "anthropic",
         "claude",
+        false,
     );
     assert_eq!(out.thread_id.len(), 26);
 }
@@ -67,8 +70,8 @@ fn thread_id_falls_back_when_no_user_message() {
 #[test]
 fn buffer_id_is_fresh_per_request() {
     let req = req_with(vec![Message::text(Role::User, "hello there")]);
-    let a = build_chat_request(&req, "anthropic", "claude");
-    let b = build_chat_request(&req, "anthropic", "claude");
+    let a = build_chat_request(&req, "anthropic", "claude", false);
+    let b = build_chat_request(&req, "anthropic", "claude", false);
     assert!(a.buffer_id.is_some());
     assert_ne!(a.buffer_id, b.buffer_id, "buffer_id is minted per request");
 }
@@ -84,14 +87,14 @@ fn message_id_is_stable_within_a_user_turn() {
         Message::text(Role::Assistant, "calling..."),
         Message::text(Role::Tool, "tool result"),
     ]);
-    let a = build_chat_request(&start, "anthropic", "claude");
-    let b = build_chat_request(&mid, "anthropic", "claude");
+    let a = build_chat_request(&start, "anthropic", "claude", false);
+    let b = build_chat_request(&mid, "anthropic", "claude", false);
     assert_eq!(
         a.message_id, b.message_id,
         "message_id must be stable across tool round-trips of one user turn"
     );
     // It is also deterministic: rebuilding the same input reproduces it.
-    let a2 = build_chat_request(&start, "anthropic", "claude");
+    let a2 = build_chat_request(&start, "anthropic", "claude", false);
     assert_eq!(a.message_id, a2.message_id);
 }
 
@@ -103,8 +106,8 @@ fn message_id_rotates_on_new_user_turn() {
         Message::text(Role::Assistant, "done"),
         Message::text(Role::User, "now do something else"),
     ]);
-    let a = build_chat_request(&turn2, "anthropic", "claude");
-    let b = build_chat_request(&turn3, "anthropic", "claude");
+    let a = build_chat_request(&turn2, "anthropic", "claude", false);
+    let b = build_chat_request(&turn3, "anthropic", "claude", false);
     assert_ne!(
         a.message_id, b.message_id,
         "a new user message must start a new message_id"
@@ -138,7 +141,7 @@ fn historical_thinking_is_not_replayed() {
         think_msg(Role::Assistant, "a1", "old private thought"),
         Message::text(Role::User, "q2"),
     ]);
-    let out = build_chat_request(&req, "anthropic", "claude");
+    let out = build_chat_request(&req, "anthropic", "claude", false);
     let bodies: Vec<&str> = out
         .messages
         .iter()
@@ -168,7 +171,7 @@ fn no_thinking_is_replayed_anywhere() {
         assistant,
         Message::text(Role::Tool, "result"),
     ]);
-    let out = build_chat_request(&req, "anthropic", "claude");
+    let out = build_chat_request(&req, "anthropic", "claude", false);
     // Wire layout: user, assistant (empty text + tool call), tool. No <think>.
     assert_eq!(out.messages.len(), 3);
     assert_eq!(out.messages[0].content.text, "use the tool");
@@ -203,7 +206,7 @@ fn historical_signature_is_dropped_with_its_thinking() {
         current,
         Message::text(Role::Tool, "result"),
     ]);
-    let out = build_chat_request(&req, "anthropic", "claude");
+    let out = build_chat_request(&req, "anthropic", "claude", false);
     // Wire layout: q1, a1, q2, ""+tool call, result — no <think> anywhere.
     let historical = &out.messages[1]; // the "a1" assistant turn
     assert!(historical.extra_content.is_none(), "old signature dropped");
@@ -239,7 +242,7 @@ fn user_text_adjacent_to_tool_results_does_not_reset_signature() {
         Message::text(Role::User, "Tool loaded."),
         Message::text(Role::Tool, "result"),
     ]);
-    let out = build_chat_request(&req, "anthropic", "claude");
+    let out = build_chat_request(&req, "anthropic", "claude", false);
     assert!(
         !out.messages
             .iter()

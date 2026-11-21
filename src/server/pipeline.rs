@@ -21,7 +21,7 @@ use crate::core::request::CanonicalRequest;
 use crate::core::response::CanonicalResponse;
 use crate::error::GatewayError;
 use crate::protocol::OutboundAdapter;
-use crate::raycast::builder::build_chat_request;
+use crate::raycast::builder::{build_chat_request, model_supports_image_generation};
 use crate::raycast::wire::RaycastRawModel;
 use crate::statistics::{Attempt, CallContext, REQUEST_CONTEXT};
 
@@ -240,7 +240,11 @@ pub(crate) async fn events(
         effort = ?request.reasoning_effort.map(|e| e.as_str()),
         "inference request"
     );
-    let raycast_request = build_chat_request(request, provider, model);
+    // Image-generation tool injection is an inference-time mirror of the
+    // client preset; the compaction/summarize call is a deliberately plain
+    // completion and must not carry the remote tool.
+    let image_gen = (call_type == "inference") && model_supports_image_generation(target);
+    let raycast_request = build_chat_request(request, provider, model, image_gen);
     let mut call = CallContext::new(request, provider, model, call_type);
     call.accounting = accounting;
     let usage_key = UsageKey::new(request);

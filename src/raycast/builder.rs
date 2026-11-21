@@ -4,8 +4,10 @@
 //! [`RaycastChatRequest`] the backend expects, applying every Raycast-specific
 //! rule in one place: wrapping message bodies in `{text}`, emitting thinking as
 //! a standalone `<think>...</think>` assistant turn, nesting tool calls in the
-//! OpenAI request shape, rendering tool/`tool_choice` definitions, and carrying
-//! `reasoning_effort` for think models.
+//! OpenAI request shape, rendering tool/`tool_choice` definitions, injecting
+//! the `image_generation` remote tool for image-capable models (mirroring the
+//! real client's preset behavior), and carrying `reasoning_effort` for think
+//! models.
 //!
 //! Per the backend contract (`doc/raycast-backend-protocol.md`) every request
 //! carries a `thread_id`, a `message_id`, a `buffer_id`, and a UTC
@@ -36,13 +38,61 @@ use super::wire::{PendingUpload, RaycastChatRequest, RaycastMessage, RaycastRequ
 /// implementation (and the previous OpenAI behavior) exactly.
 const DEFAULT_SYSTEM_INSTRUCTIONS: &str = "markdown";
 
+/// Whether the model advertises server-side image generation
+/// (`abilities.image_generation` in the raw model extra from `GET /ai/models`).
+/// Drives [`build_chat_request`]'s remote-tool injection; kept here so the
+/// ability shapes and their consumption sit in the same file.
+pub fn model_supports_image_generation(model: &crate::raycast::wire::RaycastRawModel) -> bool {
+    model
+        .extra
+        .get("abilities")
+        .and_then(|a| a.get("image_generation"))
+        .map(|flag| {
+            // Shapes seen in the wild: `true`, `{supported: true}`, `{enabled: true}`.
+            flag.as_bool().unwrap_or_else(|| {
+                ["supported", "enabled"]
+                    .iter()
+                    .any(|k| flag.get(k).and_then(|v| v.as_bool()) == Some(true))
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Build the Raycast chat request from a canonical request and the already
-/// resolved upstream `provider` / `model`.
+/// resolved upstream `provider` / `model`. `model_supports_image_generation`
+/// mirrors the real client's preset behavior: when the preset sets
+/// `image_generation: true`, the client injects an `image_generation` remote
+/// tool (frontend `CNt` registers it as `{id:'dalle', name:...}` in its
+/// *internal* tool list; the wire mapper `M$t` emits remote tools as
+/// `{type:'remote_tool', name}` — no `id` on the wire).
+///
+/// Proxy caveat: the client keys injection on the *preset* boolean; the
+/// gateway has no preset concept and keys on the model catalog's
+/// `abilities.image_generation` instead ([`model_supports_image_generation`]).
+/// The two can diverge in both directions — this is the closest available
+/// signal, not an exact replica.
+///
+/// Side effect to know when passing `true` on a tool-less request: the flag
+/// also defaults `tool_choice` to `"auto"` (the client sends it whenever its
+/// tools array is non-empty), so a flag-less text-only request and a
+/// flag-true one differ in two wire fields, not one. Pass `false` on any
+/// non-inference call path (compaction/summarize) — the client never carries
+/// this tool on a plain completion.
 pub fn build_chat_request(
     canonical: &CanonicalRequest,
     provider: &str,
     model: &str,
+    model_supports_image_generation: bool,
 ) -> RaycastChatRequest {
+    let mut tools = build_tools(&canonical.tools);
+    if model_supports_image_generation
+        && canonical.tools.iter().all(|t| t.name() != IMAGE_GENERATION_TOOL)
+    {
+        tools.push(json!({
+            "type": "remote_tool",
+            "name": IMAGE_GENERATION_TOOL,
+        }));
+    }
     RaycastChatRequest {
         model: model.to_string(),
         provider: provider.to_string(),
@@ -57,7 +107,7 @@ pub fn build_chat_request(
         source: "ai_chat".to_string(),
         locale: "zh-CN".to_string(),
         thread_id: derive_thread_id(&canonical.messages),
-        tools: build_tools(&canonical.tools),
+        tools,
         additional_system_instructions: canonical.system.clone(),
         reasoning_effort: canonical.reasoning_effort.map(|e| e.as_str().to_string()),
         // Mirror the real client: when tools are offered but the caller didn't
@@ -66,7 +116,10 @@ pub fn build_chat_request(
             .tool_choice
             .as_ref()
             .map(tool_choice_wire)
-            .or_else(|| (!canonical.tools.is_empty()).then(|| "auto".to_string())),
+            .or_else(|| {
+                (!canonical.tools.is_empty() || model_supports_image_generation)
+                    .then(|| "auto".to_string())
+            }),
         // The real client prefixes the turn uuid with `run-` (captures
         // 2026-11-13/20: `run-97c33d75-...`).
         message_id: Some(format!("run-{}", derive_message_id(&canonical.messages))),
@@ -276,6 +329,13 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
 /// `lOt(messages, 20)`); older ones are replaced with omission placeholders.
 const IMAGE_REPLAY_LIMIT: usize = 20;
 
+/// The upstream remote tool that executes image generation server-side.
+/// The real client injects it when the active preset sets
+/// `image_generation: true` (frontend `CNt`); the gateway injects it when the
+/// resolved model advertises the ability, so image-capable models can
+/// actually produce images for harness clients that never heard of the tool.
+const IMAGE_GENERATION_TOOL: &str = "image_generation";
+
 /// Render canonical tool definitions into Raycast's `tools[]` JSON.
 fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
     tools
@@ -367,7 +427,7 @@ mod image_tests {
         let mut canonical =
             crate::core::request::CanonicalRequest::new(crate::core::protocol::Protocol::ChatCompletions, "m");
         canonical.messages = messages;
-        build_chat_request(&canonical, "openai", "test")
+        build_chat_request(&canonical, "openai", "test", false)
     }
 
     /// 指纹回归:无图请求的 wire 字节必须与加图功能之前完全一致。
@@ -381,7 +441,7 @@ mod image_tests {
             Message::text(Role::User, "hello"),
         ];
         canonical.system = Some("Be brief".into());
-        let request = build_chat_request(&canonical, "openai", "test");
+        let request = build_chat_request(&canonical, "openai", "test", false);
         let json = serde_json::to_value(&request).unwrap();
         let messages = json["messages"].as_array().unwrap();
         // 每条消息只有 role/content,content 只有 text — 没有 attachments 字段。
@@ -446,5 +506,54 @@ mod image_tests {
         let with_image =
             request_with(vec![Message::with_attachments(Role::User, "hi", vec![sample_png()])]);
         assert_eq!(plain.thread_id, with_image.thread_id);
+    }
+
+    /// 带生图能力的模型:自动注入 image_generation remote tool(官方 preset
+    /// 行为);不带能力的不注入,已有同名 local tool 也不注入。注入后
+    /// tool_choice 默认 auto(与客户端 tools 非空时的行为一致)。
+    #[test]
+    fn image_generation_remote_tool_injection_follows_model_ability() {
+        let canonical = || {
+            let mut c = crate::core::request::CanonicalRequest::new(
+                crate::core::protocol::Protocol::ChatCompletions,
+                "m",
+            );
+            c.messages = vec![Message::text(Role::User, "draw a cat")];
+            c
+        };
+        let without = build_chat_request(&canonical(), "openai", "test", false);
+        assert!(
+            !serde_json::to_string(&without.tools).unwrap().contains("image_generation"),
+            "no ability → no remote tool"
+        );
+        let with = build_chat_request(&canonical(), "openai", "test", true);
+        assert_eq!(
+            serde_json::to_value(&with.tools).unwrap(),
+            serde_json::json!([{"type": "remote_tool", "name": "image_generation"}])
+        );
+        assert_eq!(with.tool_choice.as_deref(), Some("auto"));
+
+        // 客户端自己带来了同名工具 → 不重复注入。
+        let mut explicit = canonical();
+        explicit.tools = vec![crate::core::tools::ToolDef::Remote {
+            name: "image_generation".into(),
+        }];
+        let request = build_chat_request(&explicit, "openai", "test", true);
+        assert_eq!(request.tools.len(), 1);
+
+        // 同名的 Local 工具(客户端自定义实现)同样抑制注入 —— 去重按
+        // 名字,不分种类,避免上游同时看到 local 和 remote 两个同名工具。
+        let mut local = canonical();
+        local.tools = vec![crate::core::tools::ToolDef::Local {
+            name: "image_generation".into(),
+            description: None,
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+        }];
+        let request = build_chat_request(&local, "openai", "test", true);
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(
+            request.tools[0]["type"], "local_tool",
+            "client-owned tool wins over injection"
+        );
     }
 }
