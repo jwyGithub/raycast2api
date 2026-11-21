@@ -366,7 +366,7 @@ async fn upstream_fixture() -> (
         .accounts
         .upsert(
             &serde_json::from_value(
-                json!({"user":{"email":"actual@example.com"},"access_token":"fixture-token"}),
+                json!({"user":{"email":"actual@example.com"},"device_id":"1111111111111111111111111111111111111111111111111111111111111111","access_token":"fixture-token"}),
             )
             .unwrap(),
         )

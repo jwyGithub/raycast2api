@@ -227,7 +227,7 @@ mod tests {
             crate::storage::db::Db::open(":memory:").unwrap(),
         ));
         let record = serde_json::from_value(
-            serde_json::json!({"user":{"email":"trial@test"},"access_token":"rca_trial"}),
+            serde_json::json!({"user":{"email":"trial@test"},"device_id":"1111111111111111111111111111111111111111111111111111111111111111","access_token":"rca_trial"}),
         )
         .unwrap();
         store.upsert(&record).unwrap();
@@ -246,7 +246,7 @@ mod tests {
         let store = AccountStore::new(crate::storage::db::Db::open(":memory:").unwrap());
         let record = serde_json::from_value(serde_json::json!({
             "user": { "email": "refresh@x" },
-            "access_token": "test-token"
+            "device_id": "1111111111111111111111111111111111111111111111111111111111111111", "access_token": "test-token"
         }))
         .unwrap();
         store.upsert(&record).unwrap();

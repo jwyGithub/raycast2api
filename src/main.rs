@@ -24,7 +24,7 @@ async fn run() -> Result<(), String> {
         .map(Arc::new)
         .map_err(|err| {
             format!(
-                "configuration error: {err}\nCreate a config.json file with api_key, raycast_device_id and raycast_signature_secret (see config.example.json)."
+                "configuration error: {err}\nCreate a config.json file with api_key and raycast_signature_secret (see config.example.json)."
             )
         })?;
 

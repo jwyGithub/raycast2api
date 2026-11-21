@@ -22,7 +22,6 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
     ));
     let log_store = Arc::new(RequestLogStore::new(db.clone()));
     let settings = Arc::new(Settings {
-        raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
         api_key: "test-key".into(),
         dashboard_password: None,

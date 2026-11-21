@@ -55,10 +55,11 @@ impl RaycastClient {
 
     /// Common headers shared by every request. `signed` selects the POST
     /// header set the real client sends: it swaps in the "x-Windows Version"
-    /// UA variant, attaches the DeviceId, and — on signed requests — the
-    /// timestamp/signature pair plus the `autoModels` experimental flag. GETs
-    /// in the real client carry *no* DeviceId and no signature pair.
-    fn base_headers(&self, bearer: &str, signed: Option<(&str, &str)>) -> HeaderMap {
+    /// UA variant, attaches the per-account DeviceId, and — on signed
+    /// requests — the timestamp/signature pair plus the `autoModels`
+    /// experimental flag. GETs in the real client carry *no* DeviceId and no
+    /// signature pair, so `device_id` is `None` there.
+    fn base_headers(&self, bearer: &str, device_id: Option<&str>, signed: Option<(&str, &str)>) -> HeaderMap {
         let mut headers = HeaderMap::new();
         let bearer = format!("Bearer {bearer}");
         // These values come from config/HMAC output and are always valid header text.
@@ -77,9 +78,13 @@ impl RaycastClient {
             }),
         );
         if let Some((timestamp, signature)) = signed {
+            let device_id = device_id.expect("signed requests always carry a device id");
             headers.insert(
                 "X-Raycast-DeviceId",
-                HeaderValue::from_str(&self.settings.raycast_device_id).expect("valid device id"),
+                // Per-account device id (registration generates one and uses
+                // it for activation; chat must reuse it or the server sees a
+                // "device change").
+                HeaderValue::from_str(device_id).expect("valid device id"),
             );
             headers.insert(
                 "X-Raycast-Timestamp",
@@ -100,10 +105,16 @@ impl RaycastClient {
     /// One signed chat POST with an explicit account (`email` is only used to
     /// label statistics). Status is validated; account rotation, token renewal
     /// and in-stream error handling live in [`crate::account::dispatcher`].
+    ///
+    /// `device_id` is the account's own device id (registration generated it
+    /// and used it for pro-trial activation); the signature and
+    /// `X-Raycast-DeviceId` must reuse it. Callers without a stored per-
+    /// account id pass the global fallback from settings.
     pub(crate) async fn chat(
         &self,
         email: &str,
         token: &str,
+        device_id: &str,
         body: &str,
         call: &CallContext,
         reserved: Option<Attempt>,
@@ -111,12 +122,13 @@ impl RaycastClient {
         let timestamp = unix_secs().to_string();
         let signature = calculate_signature_v2(
             &timestamp,
-            &self.settings.raycast_device_id,
+            device_id,
             body,
             &self.settings.raycast_signature_secret,
         );
 
-        let mut headers = self.base_headers(token, Some((&timestamp, &signature)));
+        let mut headers =
+            self.base_headers(token, Some(device_id), Some((&timestamp, &signature)));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         // The real client sends `application/json` even though the response is
         // SSE (capture 2026-11-20); `text/event-stream` is a fingerprint.
@@ -190,7 +202,7 @@ impl RaycastClient {
         url: &str,
         token: &str,
     ) -> Result<T, GatewayError> {
-        let mut headers = self.base_headers(token, None);
+        let mut headers = self.base_headers(token, None, None);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         let request = self
             .http

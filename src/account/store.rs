@@ -28,6 +28,8 @@ pub enum UpsertOutcome {
 pub struct AccountRow {
     pub email: String,
     pub tag: Option<String>,
+    /// 账号专属 device_id(注册时生成并落库);`None` 回落全局配置。
+    pub device_id: Option<String>,
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub obtained_at: Option<String>,
@@ -59,6 +61,7 @@ struct StoredAccount {
     id: i64,
     email: String,
     tag: Option<String>,
+    device_id: Option<String>,
     access_token: String,
     refresh_token: Option<String>,
     obtained_at: Option<String>,
@@ -85,6 +88,7 @@ impl From<StoredAccount> for AccountRow {
         Self {
             email: row.email,
             tag: row.tag,
+            device_id: row.device_id,
             access_token: row.access_token,
             refresh_token: row.refresh_token,
             obtained_at: row.obtained_at,
@@ -113,6 +117,7 @@ impl From<StoredAccount> for AccountRow {
 struct NewAccount<'a> {
     email: &'a str,
     tag: Option<&'a str>,
+    device_id: Option<&'a str>,
     access_token: &'a str,
     refresh_token: Option<&'a str>,
     obtained_at: Option<&'a str>,
@@ -126,6 +131,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     email               TEXT NOT NULL UNIQUE,
     tag                 TEXT,
+    device_id           TEXT,
     access_token        TEXT NOT NULL,
     refresh_token       TEXT,
     obtained_at         TEXT,
@@ -163,6 +169,10 @@ fn migrate(conn: &mut diesel::sqlite::SqliteConnection) {
         (
             "trial_requests_per_hour",
             "ALTER TABLE accounts ADD COLUMN trial_requests_per_hour REAL;",
+        ),
+        (
+            "device_id",
+            "ALTER TABLE accounts ADD COLUMN device_id TEXT;",
         ),
     ] {
         #[derive(diesel::QueryableByName)]
@@ -224,6 +234,8 @@ impl AccountStore {
 
     /// 按 email upsert;三态语义见 [`UpsertOutcome`]。
     pub fn upsert(&self, record: &AccountRecord) -> Result<UpsertOutcome, GatewayError> {
+        // 双保险:HTTP handler 已校验,store 内部调用(如导入/恢复)也过一遍。
+        record.validate_device_id()?;
         crate::storage::db::blocking(|| {
             let email = record.email().ok_or_else(|| {
                 GatewayError::BadRequest("account entry has no user.email".into())
@@ -244,6 +256,7 @@ impl AccountStore {
                         .values(&NewAccount {
                             email: &email,
                             tag: record.tag.as_deref(),
+                            device_id: record.device_id.as_deref(),
                             access_token: &record.access_token,
                             refresh_token: record.refresh_token.as_deref(),
                             obtained_at: record.obtained_at.as_deref(),
@@ -262,6 +275,7 @@ impl AccountStore {
                     diesel::update(accounts::table.filter(accounts::email.eq(&email)))
                         .set((
                             accounts::tag.eq(record.tag.as_deref()),
+                            accounts::device_id.eq(record.device_id.as_deref()),
                             accounts::access_token.eq(&record.access_token),
                             accounts::refresh_token.eq(record.refresh_token.as_deref()),
                             accounts::obtained_at.eq(record.obtained_at.as_deref()),
@@ -399,12 +413,14 @@ impl AccountStore {
                 .select((
                     accounts::user_json,
                     accounts::tag,
+                    accounts::device_id,
                     accounts::access_token,
                     accounts::refresh_token,
                     accounts::obtained_at,
                 ))
                 .order(accounts::id.asc())
                 .load::<(
+                    Option<String>,
                     Option<String>,
                     Option<String>,
                     String,
@@ -414,7 +430,7 @@ impl AccountStore {
                 .map_err(sql_err)?
                 .into_iter()
                 .map(
-                    |(user_json, tag, access_token, refresh_token, obtained_at)| {
+                    |(user_json, tag, device_id, access_token, refresh_token, obtained_at)| {
                         let user = serde_json::from_str(user_json.as_deref().unwrap_or("{}"))
                             .map_err(|e| {
                                 GatewayError::Internal(format!(
@@ -427,6 +443,7 @@ impl AccountStore {
                             access_token,
                             refresh_token,
                             obtained_at,
+                            device_id,
                         })
                     },
                 )
@@ -676,10 +693,14 @@ mod tests {
     use crate::account::wire::AccountRecord;
     use crate::storage::db::Db;
 
+    /// 测试用的合法 device_id(64 位小写 hex)。
+    const TEST_DEVICE_ID: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
     fn rec(email: &str, token: &str) -> AccountRecord {
         serde_json::from_value(serde_json::json!({
             "tag": "t",
             "user": { "email": email },
+            "device_id": TEST_DEVICE_ID,
             "access_token": token,
             "refresh_token": "r1"
         }))
@@ -699,7 +720,7 @@ mod tests {
         let store = std::sync::Arc::new(AccountStore::new(Db::open(":memory:").unwrap()));
         for email in ["a@test", "b@test"] {
             let record = serde_json::from_value(
-                serde_json::json!({"user":{"email":email},"access_token":"rca_test"}),
+                serde_json::json!({"user":{"email":email},"device_id":"1111111111111111111111111111111111111111111111111111111111111111","access_token":"rca_test"}),
             )
             .unwrap();
             store.upsert(&record).unwrap();

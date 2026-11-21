@@ -3,6 +3,7 @@ diesel::table! {
         id -> BigInt,
         email -> Text,
         tag -> Nullable<Text>,
+        device_id -> Nullable<Text>,
         access_token -> Text,
         refresh_token -> Nullable<Text>,
         obtained_at -> Nullable<Text>,

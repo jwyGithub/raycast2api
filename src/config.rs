@@ -66,7 +66,6 @@ pub struct ConfigFile {
     pub api_key: Option<String>,
     pub dashboard_password: Option<String>,
     pub dashboard_session_secret: Option<String>,
-    pub raycast_device_id: Option<String>,
     pub raycast_signature_secret: Option<String>,
     /// SQLite 存储库路径,默认 `store/store.db`。
     pub accounts_db: Option<String>,
@@ -83,8 +82,6 @@ pub struct ConfigFile {
 /// Runtime configuration, loaded once at startup via [`Settings::from_path`].
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// Raycast device id (`X-Raycast-DeviceId`, also folded into the signature).
-    pub raycast_device_id: String,
     /// Signing secret for `X-Raycast-Signature-v2` (required, no built-in default).
     pub raycast_signature_secret: String,
     /// Required global gateway API key.
@@ -130,8 +127,6 @@ impl Settings {
 
     /// Create Settings from a parsed ConfigFile.
     fn from_config_file(config: ConfigFile) -> Result<Self, String> {
-        let raycast_device_id = non_empty(config.raycast_device_id)
-            .ok_or_else(|| "missing raycast_device_id in config.json".to_string())?;
         let raycast_signature_secret = non_empty(config.raycast_signature_secret)
             .ok_or_else(|| "missing raycast_signature_secret in config.json".to_string())?;
         let api_key = non_empty(config.api_key)
@@ -182,7 +177,6 @@ impl Settings {
         }
 
         Ok(Self {
-            raycast_device_id,
             raycast_signature_secret,
             api_key,
             dashboard_password,
@@ -218,7 +212,6 @@ mod proxy_tests {
         ] {
             let valid = secret.as_ref().is_some_and(|s: &String| s.len() >= 32);
             let result = Settings::from_config_file(ConfigFile {
-                raycast_device_id: Some("device".into()),
                 raycast_signature_secret: Some("secret".into()),
                 api_key: Some("test-key".into()),
                 dashboard_password: Some("password".into()),
@@ -237,7 +230,6 @@ mod proxy_tests {
             (Some(" 控制台 password "), Some(" 控制台 password ")),
         ] {
             let settings = Settings::from_config_file(ConfigFile {
-                raycast_device_id: Some("device".into()),
                 raycast_signature_secret: Some("secret".into()),
                 api_key: Some("test-key".into()),
                 dashboard_password: password.map(str::to_owned),
@@ -253,11 +245,11 @@ mod proxy_tests {
     fn upstream_timeout_defaults_and_accepts_positive_seconds_only() {
         for (json, expected) in [
             (
-                r#"{"raycast_device_id":"test","raycast_signature_secret":"s","api_key":"test-key"}"#,
+                r#"{"raycast_signature_secret":"s","api_key":"test-key"}"#,
                 20,
             ),
             (
-                r#"{"raycast_device_id":"test","raycast_signature_secret":"s","api_key":"test-key","upstream_timeout_secs":45}"#,
+                r#"{"raycast_signature_secret":"s","api_key":"test-key","upstream_timeout_secs":45}"#,
                 45,
             ),
         ] {
@@ -284,7 +276,7 @@ mod proxy_tests {
     fn leftover_model_overrides_key_is_ignored() {
         // 模型映射已改为控制台维护;旧 config.json 里没删的键不应让启动失败。
         let config = serde_json::from_str(
-            r#"{"raycast_device_id":"d","raycast_signature_secret":"s","api_key":"test-key","model_overrides":{"a":"b"},"modelOverrides":{"a":"b"}}"#,
+            r#"{"raycast_signature_secret":"s","api_key":"test-key","model_overrides":{"a":"b"},"modelOverrides":{"a":"b"}}"#,
         )
         .unwrap();
         assert!(Settings::from_config_file(config).is_ok());
@@ -324,7 +316,6 @@ mod proxy_tests {
         ] {
             let result = Settings::from_config_file(ConfigFile {
                 api_key: api_key.map(str::to_owned),
-                raycast_device_id: Some("device".into()),
                 raycast_signature_secret: Some("secret".into()),
                 ..Default::default()
             });
@@ -337,15 +328,14 @@ mod proxy_tests {
     }
 
     #[test]
-    fn device_id_and_signature_secret_are_required() {
+    fn signature_secret_is_required() {
         for (json, missing) in [
             (
-                r#"{"raycast_signature_secret":"s","api_key":"test-key"}"#,
-                "raycast_device_id",
+                r#"{"api_key":"test-key"}"#,
+                "raycast_signature_secret",
             ),
-            (r#"{"raycast_device_id":"d"}"#, "raycast_signature_secret"),
             (
-                r#"{"raycast_device_id":"d","raycast_signature_secret":""}"#,
+                r#"{"raycast_signature_secret":""}"#,
                 "raycast_signature_secret",
             ),
         ] {
@@ -360,7 +350,7 @@ mod proxy_tests {
         let parse = |extra: &str| {
             Settings::from_config_file(
                 serde_json::from_str(&format!(
-                    r#"{{"raycast_device_id":"d","raycast_signature_secret":"s","api_key":"test-key"{extra}}}"#
+                    r#"{{"raycast_signature_secret":"s","api_key":"test-key"{extra}}}"#
                 ))
                 .unwrap(),
             )

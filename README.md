@@ -35,9 +35,9 @@ cd raycast2api
 cp config.example.json config.json
 ```
 
-编辑 `config.json`，填写必需的 `raycast_device_id`、`raycast_signature_secret` 和全局 `api_key`。需要网页登录时，设置 `dashboard_password` 和至少 32 字节的随机 `dashboard_session_secret`，并准备可连接的 Redis。字段和默认值见[配置说明](#配置说明)。
+编辑 `config.json`，填写必需的 `raycast_signature_secret` 和全局 `api_key`。需要网页登录时，设置 `dashboard_password` 和至少 32 字节的随机 `dashboard_session_secret`，并准备可连接的 Redis。字段和默认值见[配置说明](#配置说明)。
 
-设备 ID 可使用仓库脚本获取：Windows 执行 `pwsh ./deploy/get_device_id.ps1`；macOS 执行 `./deploy/get_device_id.sh`，输出请与本机客户端使用的设备 ID 核对。
+Device ID 不再走全局配置：每个账号通过 `POST /v1/accounts/create` 导入时必须携带自己的 `device_id`（64 位小写 hex），注册脚本会自动生成并在激活/聊天全程使用同一值。
 
 ### Docker Compose（推荐）
 
@@ -133,7 +133,6 @@ curl http://localhost:8787/v1/responses \
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `raycast_device_id` | 无 | 必填，Raycast 设备 ID。 |
 | `raycast_signature_secret` | 无 | 必填，Raycast 请求签名密钥。 |
 | `api_key` | 必填 | 全局 Key，允许管理和推理。使用不含空白的可见 ASCII 字符，不能与已有托管 Key 相同。 |
 | `dashboard_password` | 无 | 控制台登录密码。未配置时无法登录控制台。 |

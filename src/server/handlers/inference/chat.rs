@@ -84,7 +84,7 @@ mod tests {
                 .accounts
                 .upsert(
                     &serde_json::from_value(
-                        json!({"user":{"email":"test@example.com"},"access_token":"fixture-token"}),
+                        json!({"user":{"email":"test@example.com"},"device_id":"1111111111111111111111111111111111111111111111111111111111111111","access_token":"fixture-token"}),
                     )
                     .unwrap(),
                 )

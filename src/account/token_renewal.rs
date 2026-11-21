@@ -179,7 +179,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_stale_snapshots_reuse_rotated_credentials() {
         let state = crate::server::state::compact_test_state();
-        let record: crate::account::wire::AccountRecord = serde_json::from_value(serde_json::json!({"user":{"email":"renew@test"},"access_token":"rca_old","refresh_token":"old"})).unwrap();
+        let record: crate::account::wire::AccountRecord = serde_json::from_value(serde_json::json!({"user":{"email":"renew@test"},"device_id":"1111111111111111111111111111111111111111111111111111111111111111","access_token":"rca_old","refresh_token":"old"})).unwrap();
         state.accounts.upsert(&record).unwrap();
         let old = state.accounts.get("renew@test").unwrap().unwrap();
         let lock = state.accounts.renewal_lock("renew@test");

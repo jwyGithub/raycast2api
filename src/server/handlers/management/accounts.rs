@@ -69,6 +69,11 @@ fn account_view(row: AccountRow) -> AccountView {
     AccountView {
         email: row.email,
         tag: row.tag,
+        // 只露前 8 位:够核对注册/网关是否一致,不泄露全值。
+        device_id: row
+            .device_id
+            .as_deref()
+            .map(|id| id.chars().take(8).collect::<String>() + "…"),
         access_token: mask_token(&row.access_token),
         available: row.available,
         unavailable_reason: row.unavailable_reason,
@@ -114,14 +119,20 @@ pub async fn create(
     Json(request): Json<UpsertRequest>,
 ) -> Result<Json<UpsertResponse>, GatewayError> {
     match request {
-        UpsertRequest::One(record) => Ok(Json(UpsertResponse::One {
-            result: upsert_result(&state.accounts, &record)?,
-        })),
+        UpsertRequest::One(record) => {
+            record.validate_device_id()?;
+            Ok(Json(UpsertResponse::One {
+                result: upsert_result(&state.accounts, &record)?,
+            }))
+        }
         UpsertRequest::Many(records) => {
             if records.iter().any(|record| record.email().is_none()) {
                 return Err(GatewayError::BadRequest(
                     "every account entry must contain user.email".into(),
                 ));
+            }
+            for record in &records {
+                record.validate_device_id()?;
             }
             let results = records
                 .iter()

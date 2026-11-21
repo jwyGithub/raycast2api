@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::error::GatewayError;
 use crate::raycast::wire::{RaycastCredits, RaycastMe};
 
 /// `POST /v1/accounts/create` 的账号请求体。
@@ -19,12 +20,34 @@ pub struct AccountRecord {
     pub refresh_token: Option<String>,
     #[serde(default)]
     pub obtained_at: Option<String>,
+    /// 该账号专属的 `X-Raycast-DeviceId`(64 位小写 hex)。注册脚本在激活
+    /// pro_trial 时生成并全程使用同一值;网关聊天必须沿用,否则服务端看到
+    /// "换设备"。必填:导入时校验存在性与形态。
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 impl AccountRecord {
     /// 唯一标识:`user.email`。
     pub fn email(&self) -> Option<String> {
         self.user.get("email")?.as_str().map(str::to_string)
+    }
+
+    /// 校验 device_id:必填、64 位小写 hex(与真客户端机器哈希同形态)。
+    /// 每个账号必须有自己的 device_id —— 没有就没有可用的签名身份。
+    pub fn validate_device_id(&self) -> Result<(), GatewayError> {
+        let id = self.device_id.as_deref().unwrap_or("");
+        let ok = id.len() == 64
+            && id.bytes().all(|b| b.is_ascii_hexdigit())
+            && !id.bytes().any(|b| b.is_ascii_uppercase());
+        if ok {
+            Ok(())
+        } else {
+            Err(GatewayError::BadRequest(format!(
+                "account entry must carry a device_id: 64-char lowercase hex (got {} chars)",
+                id.len()
+            )))
+        }
     }
 }
 
@@ -68,6 +91,8 @@ impl From<(RaycastMe, RaycastCredits)> for AccountInfo {
 pub struct AccountView {
     pub email: String,
     pub tag: Option<String>,
+    /// 掩码输出:只暴露前 8 位,够比对注册/网关是否一致,不泄露全值。
+    pub device_id: Option<String>,
     pub access_token: String,
     pub available: bool,
     pub unavailable_reason: Option<String>,

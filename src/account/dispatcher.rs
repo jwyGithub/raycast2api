@@ -156,11 +156,25 @@ impl AccountDispatcher {
                 }
             };
             tracing::info!(account = %account.email, tag = ?account.tag, "→ using account");
+            // device_id 是账号必填字段(导入时校验),这里直接取;None 只
+            // 可能来自配置文件遗留的旧行,标记摘除而不是静默回落。
+            let Some(device_id) = account.device_id.clone() else {
+                self.accounts.mark_unavailable(
+                    &account.email,
+                    "missing device_id (pre-migration row) — re-import the account",
+                );
+                last_error = Some(GatewayError::BadRequest(format!(
+                    "account {} has no device_id; re-import it with one",
+                    account.email
+                )));
+                continue;
+            };
             let mut result = self
                 .client
                 .chat(
                     &account.email,
                     &account.access_token,
+                    &device_id,
                     &body,
                     call,
                     reserved.take(),
@@ -173,6 +187,7 @@ impl AccountDispatcher {
                             .chat(
                                 &account.email,
                                 &account.access_token,
+                                &device_id,
                                 &body,
                                 call,
                                 reserved.take(),
@@ -346,6 +361,10 @@ mod tests {
     use futures_util::StreamExt;
     use serde_json::json;
 
+    /// 测试用的合法 device_id(64 位小写 hex)。
+    const TEST_DEVICE_ID: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+
     fn sse(value: serde_json::Value) -> RaycastSseError {
         serde_json::from_value(value).unwrap()
     }
@@ -429,7 +448,7 @@ mod tests {
                     .accounts
                     .upsert(
                         &serde_json::from_value(
-                            json!({"user":{"email":email},"access_token":token}),
+                            json!({"user":{"email":email},"device_id":TEST_DEVICE_ID,"access_token":token}),
                         )
                         .unwrap(),
                     )
@@ -504,8 +523,10 @@ mod tests {
             state
                 .accounts
                 .upsert(
-                    &serde_json::from_value(json!({"user":{"email":email},"access_token":token}))
-                        .unwrap(),
+                    &serde_json::from_value(
+                        json!({"user":{"email":email},"device_id":TEST_DEVICE_ID,"access_token":token}),
+                    )
+                    .unwrap(),
                 )
                 .unwrap();
         }

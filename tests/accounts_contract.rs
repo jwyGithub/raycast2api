@@ -23,7 +23,6 @@ fn app_with_api_key(api_key: &str) -> (axum::Router, Arc<AccountStore>) {
         db.clone(),
     ));
     let settings = Arc::new(Settings {
-        raycast_device_id: "device".into(),
         raycast_signature_secret: "secret".into(),
         api_key: api_key.into(),
         dashboard_password: None,
@@ -84,6 +83,7 @@ fn account_body(email: &str, token: &str) -> Value {
     serde_json::json!({
         "tag": "t",
         "user": { "email": email },
+        "device_id": "1111111111111111111111111111111111111111111111111111111111111111",
         "access_token": token
     })
 }
@@ -390,6 +390,7 @@ async fn export_can_be_posted_directly_to_upsert() {
             &serde_json::from_value(serde_json::json!({
                 "tag": "second",
                 "user": { "email": "b@x", "id": "user-2" },
+                "device_id": "2222222222222222222222222222222222222222222222222222222222222222",
                 "access_token": "rca_second",
                 "refresh_token": "refresh-2",
                 "obtained_at": "2026-11-04T00:00:00Z"
