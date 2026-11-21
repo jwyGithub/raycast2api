@@ -313,7 +313,7 @@ impl RaycastSseData {
 // --- Models -------------------------------------------------------------
 
 /// A raw model entry from `GET /models`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RaycastRawModel {
     pub id: String,
     pub model: String,
@@ -569,6 +569,22 @@ mod credits_tests {
                 .is_content_policy_blocked()
         );
         assert!(!mk(None, None, Some("confirm your email")).is_content_policy_blocked());
+    }
+
+    /// 模型列表以 JSON 形式存进 Redis:往返必须保留 `extra`(含大数/浮点/null)。
+    #[test]
+    fn raw_model_round_trips_through_json() {
+        let raw = r#"{"id":"a","model":"b","provider":"openai","availability":null,
+            "context":128000,"pricing":{"in":0.0000025,"big":12345678901234567890},"n":null}"#;
+        let model: RaycastRawModel = serde_json::from_str(raw).unwrap();
+        let bytes = serde_json::to_vec(&[&model]).unwrap();
+        let back: Vec<RaycastRawModel> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back[0].extra, model.extra);
+        assert_eq!(back[0].availability, None);
+        assert_eq!(
+            back[0].extra["pricing"]["big"].to_string(),
+            "12345678901234567890"
+        );
     }
 
     #[test]

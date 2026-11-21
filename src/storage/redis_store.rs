@@ -45,6 +45,17 @@ impl RedisKv {
         }
     }
 
+    /// Best-effort `GET`; `None` on miss, timeout or error.
+    pub async fn get(&self, key: String) -> Option<Vec<u8>> {
+        let mut conn = self.conn();
+        let mut cmd = redis::cmd("GET");
+        cmd.arg(key);
+        tokio::time::timeout(CACHE_TIMEOUT, cmd.query_async(&mut conn))
+            .await
+            .ok()?
+            .ok()?
+    }
+
     /// Best-effort `SET key value EX ttl`; returns whether it succeeded.
     pub async fn set_ex(&self, key: String, value: impl redis::ToRedisArgs, ttl: Duration) -> bool {
         let mut conn = self.conn();

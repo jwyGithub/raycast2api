@@ -1,6 +1,7 @@
 //! Shared application state passed to every handler.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, RwLock};
@@ -18,8 +19,10 @@ use crate::storage::redis_store::RedisKv;
 use super::compact::CompactCache;
 use super::health::BackendHealth;
 
-/// How long a fetched model list stays fresh before it is re-fetched.
+/// In-process (L1) freshness of the model list; bounds Redis round-trips.
 const MODELS_CACHE_TTL: Duration = Duration::from_secs(300);
+/// Shared Redis (L2) lifetime of the model list. Delete the key to force a refresh.
+const MODELS_REDIS_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Reference-counted handle to the shared state (axum `State`).
 pub type SharedState = Arc<AppState>;
@@ -48,6 +51,9 @@ pub struct AppState {
     models_cache: RwLock<Option<ModelsCache>>,
     models_refresh: Mutex<()>,
     models_failed_at: Mutex<Option<Instant>>,
+    /// The last Redis write of the model list failed, so the Redis copy may be
+    /// older than L1 and must not overwrite it.
+    models_redis_stale: AtomicBool,
 }
 
 struct ModelsCache {
@@ -98,6 +104,7 @@ impl AppState {
             models_cache: RwLock::new(None),
             models_refresh: Mutex::new(()),
             models_failed_at: Mutex::new(None),
+            models_redis_stale: AtomicBool::new(false),
         })
     }
 
@@ -107,8 +114,51 @@ impl AppState {
         self
     }
 
-    /// Return the model list, serving a cached copy while it is fresh and
-    /// otherwise fetching from upstream, with stale-on-error and failure backoff.
+    fn models_redis_key(&self) -> Option<(&RedisKv, String)> {
+        self.redis.as_ref().map(|r| (r, r.key("models", "v1")))
+    }
+
+    /// Shared (L2) copy. Empty, undecodable, or possibly outdated copies count
+    /// as a miss so a bad list can never be pinned for a day.
+    async fn redis_models(&self) -> Option<Vec<RaycastRawModel>> {
+        if self.models_redis_stale.load(Ordering::Relaxed) {
+            return None;
+        }
+        let (redis, key) = self.models_redis_key()?;
+        let bytes = redis.get(key).await?;
+        match serde_json::from_slice::<Vec<RaycastRawModel>>(&bytes) {
+            Ok(models) if !models.is_empty() => Some(models),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(%error, "ignoring undecodable model list in Redis");
+                None
+            }
+        }
+    }
+
+    async fn store_redis_models(&self, models: &[RaycastRawModel]) {
+        let Some((redis, key)) = self.models_redis_key() else {
+            return;
+        };
+        if models.is_empty() {
+            return;
+        }
+        let stored = match serde_json::to_vec(models) {
+            Ok(bytes) => redis.set_ex(key, bytes, MODELS_REDIS_TTL).await,
+            Err(error) => {
+                tracing::warn!(%error, "failed to serialize model list for Redis");
+                false
+            }
+        };
+        self.models_redis_stale.store(!stored, Ordering::Relaxed);
+        if !stored {
+            tracing::warn!("failed to cache model list in Redis");
+        }
+    }
+
+    /// Return the model list: the in-process copy while fresh, else the shared
+    /// Redis copy (1 day), else upstream. Upstream failures fall back to the
+    /// last known list and back off for 30s; backoff skips Redis entirely.
     pub async fn models(&self) -> Result<Vec<RaycastRawModel>, GatewayError> {
         if let Some(cache) = self.models_cache.read().await.as_ref()
             && cache.fetched_at.elapsed() < MODELS_CACHE_TTL
@@ -136,6 +186,13 @@ impl AppState {
                 message: "model registry refresh temporarily unavailable".into(),
             });
         }
+        if let Some(models) = self.redis_models().await {
+            *self.models_cache.write().await = Some(ModelsCache {
+                fetched_at: Instant::now(),
+                models: models.clone(),
+            });
+            return Ok(models);
+        }
         match self.dispatcher.fetch_models().await {
             Ok(models) => {
                 *self.models_failed_at.lock().await = None;
@@ -143,6 +200,7 @@ impl AppState {
                     fetched_at: Instant::now(),
                     models: models.clone(),
                 });
+                self.store_redis_models(&models).await;
                 Ok(models)
             }
             Err(err) => {
@@ -153,6 +211,14 @@ impl AppState {
                 }
                 Err(err)
             }
+        }
+    }
+
+    /// 仅测试:让进程内模型缓存过期,迫使下一次读取走 Redis / 上游。
+    #[cfg(test)]
+    pub(crate) fn expire_models_l1(&mut self) {
+        if let Some(cache) = self.models_cache.get_mut() {
+            cache.fetched_at = Instant::now() - MODELS_CACHE_TTL;
         }
     }
 
@@ -251,8 +317,7 @@ mod tests {
     async fn failed_model_refresh_keeps_known_model_instead_of_default() {
         let mut state = compact_test_state();
         let inner = Arc::get_mut(&mut state).unwrap();
-        inner.models_cache.get_mut().as_mut().unwrap().fetched_at =
-            Instant::now() - MODELS_CACHE_TTL;
+        inner.expire_models_l1();
         let model = state.resolve_model("test-model").await.unwrap();
         assert_eq!(
             (model.provider.as_str(), model.model.as_str()),

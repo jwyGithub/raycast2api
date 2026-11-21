@@ -300,9 +300,13 @@ async fn responses_holds_one_slot_through_compaction_and_settles_only_formal_usa
     let limited = send(small.clone()).await;
     assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(limited.headers()["retry-after"], "1");
-    assert_eq!(
-        json_body(limited).await["error"]["code"],
-        "api_key_concurrency_limit"
+    let body = json_body(limited).await;
+    assert_eq!(body["error"]["code"], "api_key_concurrency_limit");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("1 in-flight")
     );
     let denied = send(json!({"model":"missing","input":"hi","stream":true})).await;
     assert_eq!(denied.status(), StatusCode::NOT_FOUND);

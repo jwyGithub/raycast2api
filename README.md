@@ -155,7 +155,7 @@ curl http://localhost:8787/v1/responses \
 | `REDIS_DB` | `0` | Redis 数据库编号。 |
 | `REDIS_KEY_PREFIX` | `raycast2api` | Redis 键的命名空间。 |
 
-控制台的会话保存在 Redis，固定有效 24 小时。管理接口可用有效会话或网关 API Key 调用；推理和模型接口使用独立的 API Key 规则。仅运行 API 时，可省略 `dashboard_password` 和 `REDIS_HOST`；Compose 默认设置了后者，需一并移除或留空。
+控制台的会话保存在 Redis，固定有效 24 小时。管理接口可用有效会话或网关 API Key 调用；推理和模型接口使用独立的 API Key 规则。仅运行 API 时，可省略 `dashboard_password` 和 `REDIS_HOST`；Compose 默认设置了后者，需一并移除或留空。配置 Redis 后，模型列表也会在 Redis 中共享缓存 24 小时（键 `<prefix>:models:v1`）；上游模型变化最长约一天后才可见，可用 `redis-cli DEL` 删除该键强制刷新，详见 [Redis 会话与缓存](./doc/redis.md)。
 
 请勿提交 `config.json`、`.env` 或 `store/`。SQLite 文件包含账号凭据和请求内容，应限制访问。
 
@@ -175,7 +175,7 @@ flowchart LR
     Raycast --> Service["Raycast AI"]
     Raycast -.-> SQLite[("SQLite：账号、日志、统计")]
     Management --> SQLite
-    Management --> Redis[("Redis：会话、压缩缓存")]
+    Management --> Redis[("Redis：会话、压缩缓存、模型列表")]
     Pipeline -.-> Redis
 ```
 

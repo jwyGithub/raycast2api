@@ -391,3 +391,90 @@ async fn redis_caches_share_prefixes_expire_and_degrade() {
         summary("offline summary")
     );
 }
+
+// --- 模型列表 L2 缓存 -------------------------------------------------------
+
+fn models_state(connection: &redis::aio::ConnectionManager) -> SharedState {
+    let mut state = compact_test_state();
+    let inner = Arc::get_mut(&mut state).unwrap();
+    inner.redis = Some(RedisKv::new(connection.clone(), "raycast2api"));
+    inner.expire_models_l1();
+    state
+}
+
+async fn mock_models(body: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let app = axum::Router::new().route("/", axum::routing::get(move || async move { body }));
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{address}/")
+}
+
+fn model_ids(models: &[crate::raycast::wire::RaycastRawModel]) -> Vec<&str> {
+    models.iter().map(|m| m.id.as_str()).collect()
+}
+
+#[tokio::test]
+#[ignore = "requires redis-server on PATH; starts a private Unix-socket instance"]
+async fn model_list_is_shared_through_redis_for_a_day() {
+    let (server, mut connection) = start_redis().await;
+    let key = "raycast2api:models:v1";
+
+    // Hit: with no accounts upstream would fail, so the list must come from Redis.
+    let _: () = connection
+        .set(
+            key,
+            r#"[{"id":"from-redis","model":"m","provider":"openai"}]"#,
+        )
+        .await
+        .unwrap();
+    let state = models_state(&connection);
+    assert_eq!(model_ids(&state.models().await.unwrap()), ["from-redis"]);
+
+    // Empty or corrupt copies are misses: the known L1 list survives.
+    for bad in ["[]", "not json"] {
+        let _: () = connection.set(key, bad).await.unwrap();
+        let state = models_state(&connection);
+        assert_eq!(model_ids(&state.models().await.unwrap()), ["test-model"]);
+    }
+    let _: () = connection.del(key).await.unwrap();
+
+    // Upstream success is written with a one-day TTL and shared with a fresh process.
+    let mut writer = models_state(&connection);
+    {
+        let inner = Arc::get_mut(&mut writer).unwrap();
+        inner
+            .accounts
+            .upsert(
+                &serde_json::from_value(serde_json::json!({
+                    "user": {"email": "a@example.com"},
+                    "device_id": "1".repeat(64),
+                    "access_token": "tok"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        inner.dispatcher.client.http = reqwest::Client::builder().no_proxy().build().unwrap();
+        inner.dispatcher.client.models_url =
+            Some(mock_models(r#"{"models":[{"id":"m","model":"m","provider":"openai"}]}"#).await);
+    }
+    assert_eq!(model_ids(&writer.models().await.unwrap()), ["m"]);
+    let ttl: i64 = connection.ttl(key).await.unwrap();
+    assert!((86_390..=86_400).contains(&ttl), "{ttl}");
+    let reader = models_state(&connection);
+    assert_eq!(model_ids(&reader.models().await.unwrap()), ["m"]);
+
+    // An empty upstream list is never pinned in Redis.
+    let _: () = connection.del(key).await.unwrap();
+    {
+        let inner = Arc::get_mut(&mut writer).unwrap();
+        inner.expire_models_l1();
+        inner.dispatcher.client.models_url = Some(mock_models(r#"{"models":[]}"#).await);
+    }
+    let _ = writer.models().await;
+    let exists: bool = connection.exists(key).await.unwrap();
+    assert!(!exists);
+    drop(server);
+}

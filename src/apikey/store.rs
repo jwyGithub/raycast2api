@@ -223,7 +223,11 @@ impl ApiKeyStore {
             .map_err(|_| GatewayError::Admission {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 code: "api_key_concurrency_limit",
-                message: "API key concurrency limit reached.".into(),
+                message: format!(
+                    "API key concurrency limit reached ({} in-flight allowed); \
+                     retry after a running request finishes.",
+                    entry.row.concurrency_limit
+                ),
             })?;
         Ok((
             Permit(entry.in_flight.clone()),
