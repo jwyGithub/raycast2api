@@ -33,16 +33,25 @@ fn premature_error() -> CanonicalEvent {
 
 /// Retry unexpected SSE truncation once only if no output has been delivered;
 /// `resend` re-issues the identical upstream request.
+/// Drive one upstream chat SSE to canonical events, retrying an identical
+/// request at most once when the stream truncates before any output.
+///
+/// `response` is the chat SSE body; `fetch_clients` are the proxy-ordered
+/// clients for downloading generated images (inline data-URL conversion) —
+/// kept separate from `response` because the image CDN is a different host
+/// and must respect the same proxy policy as the chat request.
+/// `resend` re-issues the identical upstream request on retry.
 pub(crate) fn canonical_events_with_retry(
     response: reqwest::Response,
     log: Arc<RequestLogStore>,
     timeout: std::time::Duration,
+    fetch_clients: Vec<reqwest::Client>,
     resend: impl FnOnce() -> BoxFuture<'static, Result<reqwest::Response, GatewayError>>
     + Send
     + 'static,
 ) -> impl Stream<Item = CanonicalEvent> + Send + 'static {
     let id = debug::current_request_id();
-    let first = decode_events(response, log.clone(), timeout);
+    let first = decode_events(response, log.clone(), timeout, fetch_clients.clone());
     stream! {
         let mut output_started = false;
         let mut first = std::pin::pin!(first);
@@ -80,7 +89,7 @@ pub(crate) fn canonical_events_with_retry(
                 return;
             }
         };
-        let retry = debug::REQUEST_ID.scope(id.clone(), async { decode_events(response, log, timeout) }).await;
+        let retry = debug::REQUEST_ID.scope(id.clone(), async { decode_events(response, log, timeout, fetch_clients) }).await;
         let mut retry = std::pin::pin!(retry);
         while let Some(result) = retry.next().await {
             let event = match result {
@@ -107,11 +116,89 @@ pub(crate) fn canonical_events_with_retry(
     }
 }
 
+/// Download a generated image and wrap it as an inline `data:` URL, so clients
+/// that cannot reach `ai-images.raycast.com` (S3/CloudFront, often blocked or
+/// geo-fenced) can still render it. Tries the proxy channels in order — same
+/// policy as the chat request — so Proxy mode never falls back to direct.
+/// Returns a `data:<mime>;base64,...` string; the caller falls back to the
+/// raw upstream URL on `Err`.
+async fn fetch_image_data_url(
+    fetch_clients: &[reqwest::Client],
+    url: &str,
+) -> Result<String, GatewayError> {
+    // 60s / 20 MiB are deliberately independent of the upstream chat timeout:
+    // image CDN latency and chat SSE inter-arrival have different profiles.
+    const IMAGE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+    let mut last_error = GatewayError::Internal("no fetch channel configured".into());
+    let mut response = None;
+    for client in fetch_clients {
+        match client
+            .get(url)
+            .timeout(IMAGE_FETCH_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                response = Some(r);
+                break;
+            }
+            // HTTP-level failure: another channel is worth trying (the chat
+            // path only rotates on transport errors, but a CDN edge reject
+            // is channel-dependent too).
+            Ok(r) => {
+                last_error = GatewayError::Upstream {
+                    status: r.status().as_u16(),
+                    message: "image fetch failed".into(),
+                };
+            }
+            Err(error) => last_error = GatewayError::from(error),
+        }
+    }
+    let response = response.ok_or(last_error)?.error_for_status()?;
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/png")
+        .split(';')
+        .next()
+        .unwrap_or("image/png")
+        .trim()
+        .to_string();
+    // The URL originates from upstream wire data; only inline actual images.
+    if !content_type.starts_with("image/") {
+        return Err(GatewayError::Internal(format!(
+            "generated image fetch returned non-image content type: {content_type}"
+        )));
+    }
+    // Stream the body instead of buffering it whole: the cap must hold even
+    // if a redirect target serves something unexpectedly huge.
+    use base64::Engine;
+    use futures_util::StreamExt;
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if bytes.len() + chunk.len() > MAX_IMAGE_BYTES {
+            return Err(GatewayError::Internal(format!(
+                "generated image exceeds the {MAX_IMAGE_BYTES}-byte inline cap"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(format!(
+        "data:{content_type};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    ))
+}
+
 /// Err(()) marks missing Finish/Error, distinct from an explicit upstream error.
 fn decode_events(
     mut response: reqwest::Response,
     log: Arc<RequestLogStore>,
     timeout: std::time::Duration,
+    fetch_clients: Vec<reqwest::Client>,
 ) -> impl Stream<Item = Result<CanonicalEvent, ()>> + Send + 'static {
     // Grab the correlation id *here*: the task-local REQUEST_ID scope is only
     // valid inside the handler, while the stream below is polled outside it.
@@ -214,6 +301,31 @@ fn decode_events(
                                 "→ image_generation [{id}]: started (size={size:?}, count={count:?})"
                             );
                         }
+                        CanonicalEvent::ImageGenerated { url } => {
+                            text_log.flush(&id);
+                            tracing::info!("→ image generated [{id}]: {url}");
+                            // 客户端常无法直接访问 ai-images.raycast.com(境外
+                            // S3/CloudFront):下载转 data URL 内联进 markdown,
+                            // 客户端无需再发请求。失败时退回原始 URL,图链仍在。
+                            match fetch_image_data_url(&fetch_clients, url).await {
+                                Ok(data_url) => {
+                                    yield Ok(CanonicalEvent::TextDelta(format!(
+                                        "\n\n![generated image]({data_url})\n\n"
+                                    )));
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "→ image fetch failed [{id}], falling back to raw URL: {error}"
+                                    );
+                                    // Angle-bracket link form: survives `)` and
+                                    // spaces in URLs (S3 keys can carry both).
+                                    yield Ok(CanonicalEvent::TextDelta(format!(
+                                        "\n\n![generated image](<{url}>)\n\n"
+                                    )));
+                                }
+                            }
+                            continue;
+                        }
                         CanonicalEvent::Finish { reason, usage } => {
                             text_log.flush(&id);
                             tracing::info!("→ finish [{id}]: reason={:?}, tokens={{input: {}, output: {}, cached: {}}}",
@@ -272,6 +384,7 @@ mod tests {
             response(&[json!({"text":text})]),
             log(),
             std::time::Duration::from_secs(20),
+            vec![reqwest::Client::new()],
             || panic!("oversized output must not be replayed"),
         )
         .collect()
@@ -329,6 +442,7 @@ mod tests {
             first_response,
             state.log.clone(),
             std::time::Duration::from_secs(1),
+            vec![reqwest::Client::new()],
             move || Box::pin(async move { Ok(second_response) }),
         )
         .collect()
@@ -389,6 +503,7 @@ mod tests {
             stalled,
             state.log.clone(),
             std::time::Duration::from_millis(50),
+            vec![reqwest::Client::new()],
             || Box::pin(async { Err(GatewayError::Internal("no retry".into())) }),
         )
         .collect()
@@ -410,6 +525,7 @@ mod tests {
             ]),
             log(),
             std::time::Duration::from_secs(20),
+            vec![reqwest::Client::new()],
             move || {
                 Box::pin(async move {
                     retried.fetch_add(1, Ordering::SeqCst);
@@ -450,6 +566,7 @@ mod tests {
                 response(&payloads),
                 log(),
                 std::time::Duration::from_secs(20),
+                vec![reqwest::Client::new()],
                 || panic!("must not retry explicit terminal events"),
             )
             .collect()
@@ -467,6 +584,7 @@ mod tests {
             response(&[]),
             log(),
             std::time::Duration::from_secs(20),
+            vec![reqwest::Client::new()],
             || Box::pin(async { Ok(response(&[json!({"text":"AB"})])) }),
         )
         .collect()
@@ -503,6 +621,7 @@ mod tests {
                 response(&[payload]),
                 log(),
                 std::time::Duration::from_secs(20),
+                vec![reqwest::Client::new()],
                 || panic!("delivered content must never be replayed"),
             )
             .collect()
@@ -522,6 +641,7 @@ mod tests {
                 response(&[]),
                 log(),
                 std::time::Duration::from_secs(20),
+                vec![reqwest::Client::new()],
                 move || {
                     Box::pin(async move {
                         if connection_error {
@@ -565,6 +685,7 @@ mod tests {
                     first,
                     store.clone(),
                     std::time::Duration::from_secs(20),
+                    vec![reqwest::Client::new()],
                     || panic!("transport errors after output must not replay the request"),
                 )
             })
@@ -601,6 +722,7 @@ mod tests {
                         first,
                         store.clone(),
                         std::time::Duration::from_millis(5),
+                        vec![reqwest::Client::new()],
                         move || {
                             Box::pin(async move {
                                 assert!(!partial, "read timeout after output must not retry");
@@ -638,6 +760,7 @@ mod tests {
             response(&[json!({"text":"A"})]),
             log(),
             std::time::Duration::from_secs(20),
+            vec![reqwest::Client::new()],
             || panic!("cancelled stream must not retry"),
         );
         let mut events = Box::pin(events);
@@ -657,6 +780,7 @@ mod tests {
                 }),
                 log(),
                 std::time::Duration::from_secs(20),
+                vec![reqwest::Client::new()],
                 move || {
                     Box::pin(async move {
                         assert!(!partial, "partial output must not be replayed");

@@ -315,9 +315,11 @@ async fn aggregate(
                 response.thought_signature = Some(signature)
             }
             CanonicalEvent::ToolCall(call) => response.tool_calls.push(call),
-            // The generated image itself arrives as a markdown TextDelta; the
-            // start marker carries nothing to aggregate.
+            // Unreachable: decode_events converts ImageGenerated to a
+            // markdown TextDelta before the adapter sees it. Start marker
+            // carries nothing to aggregate.
             CanonicalEvent::ImageGenerationStarted { .. } => {}
+            CanonicalEvent::ImageGenerated { .. } => {}
             CanonicalEvent::Finish { reason, usage } => {
                 response.finish_reason = reason;
                 response.usage = usage;

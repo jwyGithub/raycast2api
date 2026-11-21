@@ -54,6 +54,21 @@ impl RaycastClient {
         }
     }
 
+    /// Fetch clients in proxy-channel order, for auxiliary upstream downloads
+    /// (generated-image inlining) that must respect the proxy policy the way
+    /// [`chat`](Self::chat) does: Proxy mode never direct, fallback orders
+    /// proxies first.
+    pub(crate) fn fetch_channels(&self) -> Vec<Client> {
+        crate::proxies::channels(
+            self.settings.proxies_mode,
+            &self.http,
+            &self.proxies,
+        )
+        .into_iter()
+        .map(|(_, client)| client.clone())
+        .collect()
+    }
+
     /// Common headers shared by every request. `signed` selects the POST
     /// header set the real client sends: it swaps in the "x-Windows Version"
     /// UA variant, attaches the per-account DeviceId, and — on signed

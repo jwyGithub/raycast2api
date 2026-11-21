@@ -366,9 +366,11 @@ impl StreamEncoder {
                 }
                 frames
             }
-            // The generated image rides as a markdown TextDelta; the start
-            // marker needs no wire frame here.
+            // Unreachable on these arms: decode_events converts
+            // ImageGenerated to a markdown TextDelta before the adapter sees
+            // it; the start marker carries no wire frame.
             CanonicalEvent::ImageGenerationStarted { .. } => Vec::new(),
+            CanonicalEvent::ImageGenerated { .. } => Vec::new(),
             CanonicalEvent::Finish { reason, usage } => {
                 self.finish_reason = reason;
                 // Same mapping as the non-streaming response, so the terminating

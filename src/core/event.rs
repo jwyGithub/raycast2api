@@ -25,6 +25,10 @@ pub enum CanonicalEvent {
     /// The upstream started generating an image (`generating_image`
     /// notification). Carries the requested size/count when present.
     ImageGenerationStarted { size: Option<String>, count: Option<u32> },
+    /// A generated image is ready at `url`. The stream layer resolves this
+    /// into a client-renderable form (markdown with a data URL after fetching
+    /// the bytes) — parser stays synchronous, the fetch lives in the stream.
+    ImageGenerated { url: String },
     /// The terminating event carrying the finish reason and usage.
     Finish { reason: FinishReason, usage: Usage },
     /// An upstream failure delivered *inside* a 200 SSE stream (e.g. a

@@ -66,11 +66,11 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
     }
 
     // Image generation lifecycle. The completion payload (top-level `image`
-    // URL) lands as a markdown image in the text stream so every protocol's
-    // client can render it without protocol-native image shapes. Failure
-    // arrives as a `tool_failed` notification with `image_generation: true`
-    // — that one carries no user-actionable detail beyond the notification
-    // text, which the error path already attaches.
+    // URL) becomes an [`CanonicalEvent::ImageGenerated`]; the stream layer
+    // (decode_events) turns it into a markdown image, inlining the bytes as a
+    // data URL. Failure arrives as a `tool_failed` notification with
+    // `image_generation: true` — that one carries no user-actionable detail
+    // beyond the notification text, which the error path already attaches.
     if data.notification_type.as_deref() == Some("generating_image") {
         return vec![CanonicalEvent::ImageGenerationStarted {
             size: data.image_size,
@@ -120,7 +120,7 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
         && !url.is_empty()
     {
         tracing::info!("→ image generated: {url}");
-        events.push(CanonicalEvent::TextDelta(format!("\n\n![generated image]({url})\n\n")));
+        events.push(CanonicalEvent::ImageGenerated { url: url.to_string() });
     }
 
     if let Some(reasoning) = data.reasoning.as_deref()
@@ -235,7 +235,7 @@ mod tests {
     /// 生图生命周期:`generating_image` 通知 → started 事件;带 `image` URL
     /// 的 chunk → markdown 图文 delta(三个协议客户端都能渲染)。
     #[test]
-    fn image_generation_lifecycle_yields_started_and_markdown_image() {
+    fn image_generation_lifecycle_yields_started_and_image_event() {
         let mut notifications = Vec::new();
         let events = parse_events(
             r#"{"notification_type":"generating_image","image_size":"1024x1024","image_count":2}"#,
@@ -249,15 +249,16 @@ mod tests {
             other => panic!("expected ImageGenerationStarted, got {other:?}"),
         }
 
+        // 生成完成现在发 ImageGenerated,由 stream 层下载转 data URL。
         let events = parse_events(
             r#"{"image":"https://cdn.example.com/gen/abc.png","text":""}"#,
             &mut Vec::new(),
         );
         match &events[0] {
-            CanonicalEvent::TextDelta(text) => {
-                assert!(text.contains("![generated image](https://cdn.example.com/gen/abc.png)"));
+            CanonicalEvent::ImageGenerated { url } => {
+                assert_eq!(url, "https://cdn.example.com/gen/abc.png");
             }
-            other => panic!("expected TextDelta, got {other:?}"),
+            other => panic!("expected ImageGenerated, got {other:?}"),
         }
     }
 

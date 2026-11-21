@@ -458,6 +458,7 @@ impl AccountDispatcher {
     }
 
     /// 把上游响应转成 canonical 事件流;流在输出前被截断时经本调度器重发一次。
+    /// 代理通道列表一并传入,供生成图片的内联下载复用同一代理策略。
     pub(crate) fn events(
         &self,
         response: reqwest::Response,
@@ -467,8 +468,9 @@ impl AccountDispatcher {
     ) -> impl Stream<Item = CanonicalEvent> + Send + 'static {
         let id = debug::current_request_id();
         let timeout = self.client.settings.upstream_timeout();
+        let fetch_channels = self.client.fetch_channels();
         let dispatcher = self.clone();
-        canonical_events_with_retry(response, log, timeout, move || {
+        canonical_events_with_retry(response, log, timeout, fetch_channels, move || {
             Box::pin(async move {
                 debug::REQUEST_ID
                     .scope(id, dispatcher.send_chat(&request, &call, None))
