@@ -347,11 +347,13 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
 const IMAGE_REPLAY_LIMIT: usize = 20;
 
 /// The upstream remote tool that executes image generation server-side.
-/// The real client injects it when the active preset sets
-/// `image_generation: true` (frontend `CNt`); the gateway injects it when the
-/// resolved model advertises the ability, so image-capable models can
-/// actually produce images for harness clients that never heard of the tool.
-const IMAGE_GENERATION_TOOL: &str = "image_generation";
+/// The real client resolves the name from the `ai/remote_tools` catalog
+/// (extension id → tool name); the catalog's current primary image tool is
+/// `gpt_image` (the `dalle` entry is explicitly marked deprecated there).
+/// The preset's `image_generation` string is the *type* of the tool, not its
+/// wire name — injecting that string as a name references a tool the server
+/// does not know and silently drops.
+const IMAGE_GENERATION_TOOL: &str = "gpt_image";
 
 /// Render canonical tool definitions into Raycast's `tools[]` JSON.
 fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
@@ -525,8 +527,9 @@ mod image_tests {
         assert_eq!(plain.thread_id, with_image.thread_id);
     }
 
-    /// 带生图能力的模型:自动注入 image_generation remote tool(官方 preset
-    /// 行为);不带能力的不注入,已有同名 local tool 也不注入。注入后
+    /// 带生图能力的模型:自动注入 gpt_image remote tool(catalog 当前主推的
+    /// 生图工具名;官方 preset 的 "image_generation" 是 type 不是名字);
+    /// 不带能力的不注入,已有同名 local tool 也不注入。注入后
     /// tool_choice 默认 auto(与客户端 tools 非空时的行为一致)。
     #[test]
     fn image_generation_remote_tool_injection_follows_model_ability() {
@@ -540,20 +543,20 @@ mod image_tests {
         };
         let without = build_chat_request(&canonical(), "openai", "test", false);
         assert!(
-            !serde_json::to_string(&without.tools).unwrap().contains("image_generation"),
+            !serde_json::to_string(&without.tools).unwrap().contains("gpt_image"),
             "no ability → no remote tool"
         );
         let with = build_chat_request(&canonical(), "openai", "test", true);
         assert_eq!(
             serde_json::to_value(&with.tools).unwrap(),
-            serde_json::json!([{"type": "remote_tool", "name": "image_generation"}])
+            serde_json::json!([{"type": "remote_tool", "name": "gpt_image"}])
         );
         assert_eq!(with.tool_choice.as_deref(), Some("auto"));
 
         // 客户端自己带来了同名工具 → 不重复注入。
         let mut explicit = canonical();
         explicit.tools = vec![crate::core::tools::ToolDef::Remote {
-            name: "image_generation".into(),
+            name: "gpt_image".into(),
         }];
         let request = build_chat_request(&explicit, "openai", "test", true);
         assert_eq!(request.tools.len(), 1);
@@ -562,7 +565,7 @@ mod image_tests {
         // 名字,不分种类,避免上游同时看到 local 和 remote 两个同名工具。
         let mut local = canonical();
         local.tools = vec![crate::core::tools::ToolDef::Local {
-            name: "image_generation".into(),
+            name: "gpt_image".into(),
             description: None,
             parameters: serde_json::json!({"type":"object","properties":{}}),
         }];
