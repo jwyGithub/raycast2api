@@ -37,8 +37,6 @@ cp config.example.json config.json
 
 编辑 `config.json`，填写必需的 `raycast_signature_secret` 和全局 `api_key`。需要网页登录时，设置 `dashboard_password` 和至少 32 字节的随机 `dashboard_session_secret`，并准备可连接的 Redis。字段和默认值见[配置说明](#配置说明)。
 
-Device ID 不再走全局配置：每个账号通过 `POST /v1/accounts/create` 导入时必须携带自己的 `device_id`（64 位小写 hex），注册脚本会自动生成并在激活/聊天全程使用同一值。
-
 ### Docker Compose（推荐）
 
 [Docker Compose 配置](./docker-compose.yml)默认使用 `ghcr.io/jwygithub/raycast2api:latest`，连接已有的 Redis（`host.docker.internal:6379`）。如果 Redis 地址不同，修改 Compose 中的 `REDIS_HOST` 和 `REDIS_PORT`；需要认证时，在 `.env` 中设置 `REDIS_USERNAME` 和 `REDIS_PASSWORD`。
