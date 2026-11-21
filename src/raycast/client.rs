@@ -59,7 +59,12 @@ impl RaycastClient {
     /// requests — the timestamp/signature pair plus the `autoModels`
     /// experimental flag. GETs in the real client carry *no* DeviceId and no
     /// signature pair, so `device_id` is `None` there.
-    fn base_headers(&self, bearer: &str, device_id: Option<&str>, signed: Option<(&str, &str)>) -> HeaderMap {
+    fn base_headers(
+        &self,
+        bearer: &str,
+        device_id: Option<&str>,
+        signed: Option<(&str, &str)>,
+    ) -> HeaderMap {
         let mut headers = HeaderMap::new();
         let bearer = format!("Bearer {bearer}");
         // These values come from config/HMAC output and are always valid header text.
@@ -108,8 +113,8 @@ impl RaycastClient {
     ///
     /// `device_id` is the account's own device id (registration generated it
     /// and used it for pro-trial activation); the signature and
-    /// `X-Raycast-DeviceId` must reuse it. Callers without a stored per-
-    /// account id pass the global fallback from settings.
+    /// `X-Raycast-DeviceId` must reuse it. There is no global fallback: the
+    /// dispatcher takes accounts without a stored id out of rotation.
     pub(crate) async fn chat(
         &self,
         email: &str,
@@ -127,8 +132,7 @@ impl RaycastClient {
             &self.settings.raycast_signature_secret,
         );
 
-        let mut headers =
-            self.base_headers(token, Some(device_id), Some((&timestamp, &signature)));
+        let mut headers = self.base_headers(token, Some(device_id), Some((&timestamp, &signature)));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         // The real client sends `application/json` even though the response is
         // SSE (capture 2026-11-20); `text/event-stream` is a fingerprint.

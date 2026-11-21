@@ -28,7 +28,8 @@ pub enum UpsertOutcome {
 pub struct AccountRow {
     pub email: String,
     pub tag: Option<String>,
-    /// 账号专属 device_id(注册时生成并落库);`None` 回落全局配置。
+    /// 账号专属 device_id(注册时生成并落库);`None` 仅见于迁移前的旧行,
+    /// 调度时会被摘除并提示重新导入,不再回落全局配置。
     pub device_id: Option<String>,
     pub access_token: String,
     pub refresh_token: Option<String>,

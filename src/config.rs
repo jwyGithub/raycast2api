@@ -330,10 +330,7 @@ mod proxy_tests {
     #[test]
     fn signature_secret_is_required() {
         for (json, missing) in [
-            (
-                r#"{"api_key":"test-key"}"#,
-                "raycast_signature_secret",
-            ),
+            (r#"{"api_key":"test-key"}"#, "raycast_signature_secret"),
             (
                 r#"{"raycast_signature_secret":""}"#,
                 "raycast_signature_secret",

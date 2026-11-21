@@ -362,8 +362,7 @@ mod tests {
     use serde_json::json;
 
     /// 测试用的合法 device_id(64 位小写 hex)。
-    const TEST_DEVICE_ID: &str =
-        "1111111111111111111111111111111111111111111111111111111111111111";
+    const TEST_DEVICE_ID: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
     fn sse(value: serde_json::Value) -> RaycastSseError {
         serde_json::from_value(value).unwrap()

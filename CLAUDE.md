@@ -1,7 +1,5 @@
 # connect-rust — Claude Code Instructions
 
-@CONTRIBUTING.md
-
 ## Pre-Commit Code Review
 
 Before producing a commit, run **both** review agents in parallel (single
