@@ -115,11 +115,23 @@ pub struct AccountDispatcher {
     accounts: Arc<AccountStore>,
     /// 传输层;额度刷新、token 换新等需要显式 token 的调用直接用它。
     pub(crate) client: RaycastClient,
+    /// 请求日志;附件上传完成后回写真实发出的 wire(fileId 已回填)。
+    log: Option<Arc<RequestLogStore>>,
 }
 
 impl AccountDispatcher {
     pub fn new(accounts: Arc<AccountStore>, client: RaycastClient) -> Self {
-        Self { accounts, client }
+        Self {
+            accounts,
+            client,
+            log: None,
+        }
+    }
+
+    /// Attach the request-log store (called at startup, after construction).
+    pub fn with_log(mut self, log: Arc<RequestLogStore>) -> Self {
+        self.log = Some(log);
+        self
     }
 
     /// 用当前账号的 refresh_token 换新并写回 `account.access_token`。
@@ -184,6 +196,16 @@ impl AccountDispatcher {
                     .await;
             }
             let body = serde_json::to_string(&request)?;
+            // 回写真实发出的 wire:附件 fileId 在 send_chat 内才回填,pipeline
+            // 侧预先记录的 upstream_json 是上传前快照,排查附件问题时对不上。
+            if !request.pending_uploads.is_empty()
+                && let Some(log) = &self.log
+            {
+                log.update_upstream(
+                    &debug::current_request_id(),
+                    &serde_json::to_value(&request).unwrap_or_default(),
+                );
+            }
             let mut result = self
                 .client
                 .chat(
@@ -344,6 +366,13 @@ impl AccountDispatcher {
                 .await;
             match result {
                 Ok(id) => {
+                    tracing::info!(
+                        account = %account.email,
+                        file_id = %id,
+                        media_type = %upload.media_type,
+                        bytes = upload.data.len(),
+                        "→ attachment uploaded"
+                    );
                     if let Some(message) = request.messages.get_mut(upload.message_index) {
                         message
                             .content

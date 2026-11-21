@@ -91,7 +91,7 @@ impl AppState {
             statistics,
             settings,
             redis: None,
-            dispatcher: AccountDispatcher::new(accounts.clone(), client),
+            dispatcher: AccountDispatcher::new(accounts.clone(), client).with_log(log.clone()),
             health: BackendHealth::default(),
             inference_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             accounts,

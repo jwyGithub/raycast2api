@@ -79,8 +79,9 @@ pub struct RaycastMessageContent {
 }
 
 /// An uploaded-attachment reference on the wire — exactly the two fields the
-/// real client sends (reverse-engineered: the server resolves everything else
-/// by id).
+/// real client sends (`w$t` maps each local attachment to `{id, type}` and
+/// image attachments carry `type: "file"`, per the upstream zod schema
+/// `OTt`: `{id, type: z('file'), displayName?, contentType?, imageSize?}`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RaycastAttachment {
     pub id: String,
@@ -93,7 +94,7 @@ impl RaycastAttachment {
     pub fn image(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            kind: "image",
+            kind: "file",
         }
     }
 }
