@@ -155,7 +155,12 @@ impl AccountDispatcher {
                     );
                 }
             };
-            tracing::info!(account = %account.email, tag = ?account.tag, "→ using account");
+            tracing::info!(
+                account = %account.email,
+                tag = ?account.tag,
+                device_id = ?account.device_id,
+                "→ using account"
+            );
             // device_id 是账号必填字段(导入时校验),这里直接取;None 只
             // 可能来自配置文件遗留的旧行,标记摘除而不是静默回落。
             let Some(device_id) = account.device_id.clone() else {
