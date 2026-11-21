@@ -42,17 +42,34 @@ const DEFAULT_SYSTEM_INSTRUCTIONS: &str = "markdown";
 /// (`abilities.image_generation` in the raw model extra from `GET /ai/models`).
 /// Drives [`build_chat_request`]'s remote-tool injection; kept here so the
 /// ability shapes and their consumption sit in the same file.
+///
+/// Shape semantics follow the frontend's truthiness tag (`a =>
+/// a.image_generation`): presence with a non-false value means capable.
+/// Shapes seen in the wild: `true`, `{supported: true}`, `{enabled: true}`,
+/// and the catalog's `{model: "gpt-image-1-mini"}` (an object naming the
+/// image backend — capable by virtue of existing). An explicit `false` or
+/// `{supported: false}` disables.
 pub fn model_supports_image_generation(model: &crate::raycast::wire::RaycastRawModel) -> bool {
     model
         .extra
         .get("abilities")
         .and_then(|a| a.get("image_generation"))
         .map(|flag| {
-            // Shapes seen in the wild: `true`, `{supported: true}`, `{enabled: true}`.
-            flag.as_bool().unwrap_or_else(|| {
-                ["supported", "enabled"]
-                    .iter()
-                    .any(|k| flag.get(k).and_then(|v| v.as_bool()) == Some(true))
+            // Bare false / "false"-valued objects disable; anything else
+            // present (true, object with model name / supported / enabled)
+            // counts as capable.
+            if flag == &serde_json::Value::Bool(false) {
+                return false;
+            }
+            if flag.as_bool() == Some(true) {
+                return true;
+            }
+            // Object form: explicit supported/enabled false wins; otherwise
+            // presence of the object (e.g. {"model": ...}) means capable.
+            ["supported", "enabled"].iter().all(|k| {
+                flag.get(k)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true)
             })
         })
         .unwrap_or(false)
@@ -555,5 +572,32 @@ mod image_tests {
             request.tools[0]["type"], "local_tool",
             "client-owned tool wins over injection"
         );
+    }
+
+    /// abilities.image_generation 的四种真实形状:裸 true / {supported:true} /
+    /// catalog 的 {model:"..."}(线上实测 gpt-6.2-sol)/ 显式 false。
+    #[test]
+    fn image_generation_ability_shapes() {
+        let raw = |ability_json: &str| -> bool {
+            let json = format!(
+                r#"{{"id":"a","model":"m","provider":"openai","abilities":{{"image_generation":{ability_json}}}}}"#
+            );
+            let model: crate::raycast::wire::RaycastRawModel =
+                serde_json::from_str(&json).unwrap();
+            model_supports_image_generation(&model)
+        };
+        assert!(raw("true"));
+        assert!(raw(r#"{"supported":true}"#));
+        assert!(raw(r#"{"enabled":true}"#));
+        // 线上 catalog 形状:对象带 model 字段,无 supported/enabled 键。
+        assert!(raw(r#"{"model":"gpt-image-1-mini"}"#));
+        assert!(!raw("false"));
+        assert!(!raw(r#"{"supported":false}"#));
+        // 能力缺失 → false。
+        let model: crate::raycast::wire::RaycastRawModel = serde_json::from_str(
+            r#"{"id":"a","model":"m","provider":"openai"}"#,
+        )
+        .unwrap();
+        assert!(!model_supports_image_generation(&model));
     }
 }
