@@ -123,8 +123,6 @@ fn decode_events(
 
     stream! {
         let mut payloads: Vec<String> = Vec::new();
-        let mut captured_bytes = 0usize;
-        let mut capture_full = false;
         let mut bytes = response.bytes_stream();
         let mut decoder = SseDecoder::new();
         let mut text_log = DeltaLogBuffer::default();
@@ -159,13 +157,7 @@ fn decode_events(
                 break;
             };
             for payload in decoder.push_bytes(&chunk) {
-                if !capture_full && captured_bytes + payload.len() < 2 * 1024 * 1024 {
-                    captured_bytes += payload.len() + 1;
-                    payloads.push(payload.clone());
-                } else if !capture_full {
-                    capture_full = true;
-                    payloads.push("[gateway: response log truncated at 2 MiB]".into());
-                }
+                payloads.push(payload.clone());
                 // ponytail: 打印原始 SSE 数据用于调试
                 tracing::debug!("upstream SSE payload: {}", payload);
                 if let Some(attempt) = &attempt { attempt.observe_payload(&payload); }

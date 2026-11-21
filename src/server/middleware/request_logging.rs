@@ -1,6 +1,5 @@
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::header::CONTENT_LENGTH;
 use axum::middleware::Next;
 use axum::response::Response;
 use futures_util::StreamExt;
@@ -13,16 +12,12 @@ use crate::util;
 use super::super::state::SharedState;
 use super::auth::extract_api_key;
 
-/// Largest request body buffered for request-log capture; larger bodies still pass through.
-const MAX_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
-
 /// Buffer the inbound request body so it can be recorded in the request-log
 /// store, then run the rest of the stack inside a [`REQUEST_ID`] scope so the
 /// upstream and response writes correlate with it.
 ///
-/// Scope is inference-only (see the request-log spec): only the three
-/// Inference bodies above the log limit continue as streams without payload
-/// capture. Log writes run in blocking sections; failures never fail the request.
+/// Scope is inference-only (see the request-log spec). Log writes run in
+/// blocking sections; failures never fail the request.
 pub async fn request_logging(
     State(state): State<SharedState>,
     request: Request,
@@ -77,24 +72,9 @@ fn request_context(request: &Request) -> RequestContext {
 }
 
 async fn capture(state: SharedState, request: Request, next: Next) -> Response {
-    if request
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|length| length > MAX_CAPTURE_BYTES)
-    {
-        let id = util::new_ulid();
-        state
-            .log
-            .insert_request_without_body(&id, request.method().as_str(), request.uri().path());
-        return run_with_request_id(id, request, next).await;
-    }
-
     let (parts, body) = request.into_parts();
     let mut body = Box::pin(body.into_data_stream());
     let mut captured = Vec::new();
-    let mut captured_bytes = 0;
 
     while let Some(chunk) = body.next().await {
         let chunk = match chunk {
@@ -110,21 +90,6 @@ async fn capture(state: SharedState, request: Request, next: Next) -> Response {
                 return run_with_request_id(id, request, next).await;
             }
         };
-        if chunk.len() > MAX_CAPTURE_BYTES - captured_bytes {
-            let id = util::new_ulid();
-            state
-                .log
-                .insert_request_without_body(&id, parts.method.as_str(), parts.uri.path());
-
-            // Replay the prefix and current chunk, then stream the unread body
-            // through unchanged. Logging limits must not become request limits.
-            let prefix = Bytes::from(captured);
-            let replay = futures_util::stream::iter([Ok(prefix), Ok(chunk)]).chain(body);
-            let request = Request::from_parts(parts, Body::from_stream(replay));
-            return run_with_request_id(id, request, next).await;
-        }
-
-        captured_bytes += chunk.len();
         captured.extend_from_slice(&chunk);
     }
 
@@ -257,7 +222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_inference_body_reaches_handler_without_payload_logging() {
+    async fn oversized_inference_body_is_fully_captured_and_reaches_handler() {
         let db = Db::open(":memory:").unwrap();
         let accounts = Arc::new(AccountStore::new(db.clone()));
         let statistics = Arc::new(crate::statistics::store::StatisticsStore::new(db.clone()));
@@ -291,9 +256,10 @@ mod tests {
             .route("/v1/chat/completions", post(echo_size))
             .layer(DefaultBodyLimit::disable())
             .layer(axum::middleware::from_fn_with_state(state, request_logging));
-        let body = format!("{{\"payload\":\"{}\"}}", "x".repeat(MAX_CAPTURE_BYTES));
+        let body_size = 3 * 1024 * 1024;
+        let body = format!("{{\"payload\":\"{}\"}}", "x".repeat(body_size));
         let body = body.into_bytes();
-        let split = MAX_CAPTURE_BYTES / 2;
+        let split = body_size / 2;
         let request = Request::builder()
             .method("POST")
             .uri("/v1/chat/completions")
@@ -311,11 +277,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&response).unwrap()["payload_len"],
-            MAX_CAPTURE_BYTES
+            body_size
         );
 
         let page = log.list((1, 1), None, None).unwrap();
         let detail = log.detail(&page.items[0].request_id).unwrap();
-        assert!(detail.inbound_json.is_none());
+        // 存储走 to_string_pretty 重序列化,字节数与原始 body 不同;验证内容完整即可。
+        let inbound: Value =
+            serde_json::from_str(&detail.inbound_json.expect("large body should be logged"))
+                .unwrap();
+        assert_eq!(inbound["payload"].as_str().unwrap().len(), body_size);
     }
 }
