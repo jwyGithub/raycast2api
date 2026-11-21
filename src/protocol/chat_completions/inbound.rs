@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 use super::wire::{ChatCompletionRequest, Content, InboundToolChoice};
-use crate::core::message::{Message, Role, ToolCall};
+use crate::core::message::{Attachment, Message, Role, ToolCall};
+use crate::core::attachment::from_url_reference;
 use crate::core::protocol::Protocol;
 use crate::core::request::{CanonicalRequest, ReasoningEffort};
 use crate::core::tools::{ToolChoice, ToolDef};
@@ -88,7 +89,8 @@ impl InboundAdapter for ChatCompletionsInbound {
                     )));
                 }
             };
-            let mut converted = Message::text(role, content_text(message.content));
+            let (text, attachments) = content_with_images(message.content);
+            let mut converted = Message::with_attachments(role, text, attachments);
             for call in message.tool_calls.unwrap_or_default() {
                 call_names.insert(call.id.clone(), call.function.name.clone());
                 converted.tool_calls.push(ToolCall {
@@ -123,18 +125,42 @@ impl InboundAdapter for ChatCompletionsInbound {
     }
 }
 
-/// Flatten message content to text. Raycast message bodies are `{text}` only,
-/// so non-text parts (images, audio, ...) have no upstream slot and are skipped.
-fn content_text(content: Option<Content>) -> String {
+/// Flatten message content to text and extract image attachments.
+///
+/// Text parts concatenate directly (the established chat-completions
+/// contract — one message's parts are fragments of one string); `image_url`
+/// parts (data URLs or https references) become canonical attachments. Other
+/// part kinds (audio, unknown) have no upstream slot and are skipped.
+fn content_with_images(content: Option<Content>) -> (String, Vec<Attachment>) {
+    let mut text = String::new();
+    let mut attachments = Vec::new();
     match content {
-        Some(Content::Text(text)) => text,
-        Some(Content::Parts(parts)) => parts
-            .iter()
-            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect(),
-        None => String::new(),
+        Some(Content::Text(body)) => text = body,
+        Some(Content::Parts(parts)) => {
+            for part in parts {
+                match part.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(chunk) = part.get("text").and_then(Value::as_str) {
+                            text.push_str(chunk);
+                        }
+                    }
+                    Some("image_url") => {
+                        let url = part
+                            .pointer("/image_url/url")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        match from_url_reference(url) {
+                            Some(attachment) => attachments.push(attachment),
+                            None => tracing::warn!("unsupported image_url part, dropped"),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None => {}
     }
+    (text, attachments)
 }
 
 fn invalid(message: impl Into<String>) -> GatewayError {

@@ -132,6 +132,7 @@ fn conversation(
                     tool_call_id: None,
                     tool_name: None,
                     tool_error: false,
+                    attachments: Vec::new(),
                 })
             }
             Some("function_call_output") => {
@@ -147,6 +148,7 @@ fn conversation(
                     tool_call_id: item.call_id,
                     tool_name,
                     tool_error: false,
+                    attachments: Vec::new(),
                 })
             }
             // A replayed freeform call: the raw text becomes the JSON-string
@@ -169,6 +171,7 @@ fn conversation(
                     tool_call_id: None,
                     tool_name: None,
                     tool_error: false,
+                    attachments: Vec::new(),
                 })
             }
             Some("custom_tool_call_output") => {
@@ -184,6 +187,7 @@ fn conversation(
                     tool_call_id: item.call_id,
                     tool_name,
                     tool_error: false,
+                    attachments: Vec::new(),
                 })
             }
             // Reasoning items are provider bookkeeping; they don't map to a turn.
@@ -208,14 +212,17 @@ fn conversation(
 /// Route a message item by role: `system` / `developer` fold into the system
 /// prompt; `user` / `assistant` become canonical messages; other roles drop.
 fn push_message(item: InputItem, system_parts: &mut Vec<String>, out: &mut Vec<Message>) {
-    let text = item.content.map(|c| c.as_text()).unwrap_or_default();
+    let (text, attachments) = item
+        .content
+        .map(|c| c.as_text_and_images())
+        .unwrap_or_default();
     match item.role.as_deref() {
         Some("system") | Some("developer") => {
             if !text.is_empty() {
                 system_parts.push(text);
             }
         }
-        Some("user") => out.push(Message::text(Role::User, text)),
+        Some("user") => out.push(Message::with_attachments(Role::User, text, attachments)),
         Some("assistant") => out.push(Message::text(Role::Assistant, text)),
         _ => {}
     }

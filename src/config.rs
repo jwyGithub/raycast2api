@@ -14,6 +14,11 @@ pub const RAYCAST_API_URL: &str = "https://backend.raycast.com/api/v1/ai/chat_co
 /// Endpoint listing the models available to the account.
 pub const RAYCAST_MODELS_URL: &str = "https://backend.raycast.com/api/v1/ai/models";
 
+/// Endpoint that registers an attachment upload and returns a presigned
+/// direct-upload target (Rails ActiveStorage style, reverse-engineered from
+/// the client bundle's `ai/files` module).
+pub const RAYCAST_FILES_URL: &str = "https://backend.raycast.com/api/v1/ai/files";
+
 /// Endpoint returning the authenticated account's profile + subscription.
 pub const RAYCAST_ME_URL: &str = "https://backend.raycast.com/api/v1/me";
 

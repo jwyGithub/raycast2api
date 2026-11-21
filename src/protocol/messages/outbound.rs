@@ -259,8 +259,7 @@ impl StreamEncoder {
                 let mut frames = self.close_current();
                 self.stop_reason = "tool_use";
                 let index = self.next_index;
-                self.next_index += 1;
-                frames.push(SseFrame {
+                self.next_index += 1;                frames.push(SseFrame {
                     event: "content_block_start",
                     data: json!({
                         "type": "content_block_start",
@@ -287,6 +286,9 @@ impl StreamEncoder {
                 });
                 frames
             }
+            // The generated image rides as a markdown TextDelta; the start
+            // marker needs no wire frame here.
+            CanonicalEvent::ImageGenerationStarted { .. } => Vec::new(),
             CanonicalEvent::Finish { reason, usage } => {
                 if reason != FinishReason::Stop {
                     self.stop_reason = stop_reason(reason);

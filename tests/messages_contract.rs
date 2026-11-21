@@ -603,6 +603,7 @@ fn tool_result_is_error_is_kept_and_marked_upstream() {
             tool_call_id: None,
             tool_name: None,
             tool_error: false,
+            attachments: Vec::new(),
         },
     );
     let mut canonical = raycast2api::core::request::CanonicalRequest::new(

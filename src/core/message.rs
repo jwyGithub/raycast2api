@@ -48,6 +48,24 @@ pub struct Thinking {
     pub signature: Option<String>,
 }
 
+/// An image attachment on a user message.
+///
+/// Canonical form holds the **raw bytes**: upstream (Raycast) references
+/// uploaded files by id and never accepts inline base64, so the concrete
+/// transport (upload → fileId) is the Raycast builder's job, not this type's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attachment {
+    /// Inline image: media type + raw bytes (base64 already decoded).
+    Inline {
+        media_type: String,
+        data: Vec<u8>,
+    },
+    /// A remote image URL the client referenced. Resolved (fetched) by the
+    /// handler layer before the request enters the pipeline; failures drop
+    /// the attachment rather than failing the request.
+    Remote { url: String },
+}
+
 /// A single conversation message.
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -66,6 +84,9 @@ pub struct Message {
     /// (Anthropic `tool_result.is_error`). The Raycast wire has no error
     /// flag, so the builder marks it textually (see `error_marker`).
     pub tool_error: bool,
+    /// Image attachments. Only meaningful on `Role::User` messages (the real
+    /// client attaches files to user turns only); empty everywhere else.
+    pub attachments: Vec<Attachment>,
 }
 
 impl Message {
@@ -79,7 +100,19 @@ impl Message {
             tool_call_id: None,
             tool_name: None,
             tool_error: false,
+            attachments: Vec::new(),
         }
+    }
+
+    /// A user message carrying image attachments.
+    pub fn with_attachments(
+        role: Role,
+        text: impl Into<String>,
+        attachments: Vec<Attachment>,
+    ) -> Self {
+        let mut message = Self::text(role, text);
+        message.attachments = attachments;
+        message
     }
 
     /// The textual prefix marking a failed tool result. The upstream wire
@@ -89,3 +122,11 @@ impl Message {
         if is_error { "[tool error] " } else { "" }
     }
 }
+
+/// Placeholder the real client substitutes for dropped image attachments
+/// (model without vision, replay limit exceeded, upload failure). Keeping the
+/// exact string matters: it is what the official client sends upstream, so
+/// reusing it keeps the gateway's requests indistinguishable.
+pub const IMAGE_OMITTED_PLACEHOLDER: &str =
+    "[image omitted: the selected model has no vision support]";
+

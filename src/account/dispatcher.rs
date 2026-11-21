@@ -16,7 +16,9 @@ use crate::log::store::RequestLogStore;
 use crate::raycast::client::RaycastClient;
 use crate::raycast::peek::{peek_first_payload, restore_payload};
 use crate::raycast::stream::canonical_events_with_retry;
-use crate::raycast::wire::{RaycastChatRequest, RaycastRawModel, RaycastSseError};
+use crate::raycast::wire::{
+    RaycastAttachment, RaycastChatRequest, RaycastRawModel, RaycastSseError,
+};
 use crate::statistics::{Attempt, CallContext};
 use crate::util::unix_secs;
 
@@ -140,7 +142,6 @@ impl AccountDispatcher {
         call: &CallContext,
         mut reserved: Option<Attempt>,
     ) -> Result<reqwest::Response, GatewayError> {
-        let body = serde_json::to_string(request)?;
         let attempts = self.accounts.count_available().max(1);
         let mut last_error: Option<GatewayError> = None;
 
@@ -174,6 +175,15 @@ impl AccountDispatcher {
                 )));
                 continue;
             };
+            // 图片附件上传:必须在账号选定之后(附件 ACL 绑定账号),且 body
+            // 序列化之前(fileId 要进 wire)。上传失败按官方客户端行为降级:
+            // 剥附件、文本加占位,请求照发,不让一张图废掉整个推理。
+            let mut request = request.clone();
+            if !request.pending_uploads.is_empty() {
+                self.upload_attachments(&mut request, &account, &device_id, call)
+                    .await;
+            }
+            let body = serde_json::to_string(&request)?;
             let mut result = self
                 .client
                 .chat(
@@ -297,6 +307,85 @@ impl AccountDispatcher {
                 &self.accounts,
             )
         }))
+    }
+
+    /// Upload the request's pending image attachments (bytes ride in
+    /// `request.pending_uploads`, set by the builder) and fill the wire
+    /// `attachments` arrays with the returned file ids.
+    ///
+    /// `chat_id` is the request's `thread_id` — the upstream scopes uploads to
+    /// a chat, and the builder already derives it for session affinity.
+    ///
+    /// Degradation: an attachment that fails to upload is dropped and its
+    /// message text gains the client's omission placeholder, mirroring how the
+    /// official client handles images it cannot attach. Requests still go out
+    /// (text-only) when everything fails.
+    async fn upload_attachments(
+        &self,
+        request: &mut RaycastChatRequest,
+        account: &AccountRow,
+        device_id: &str,
+        call: &CallContext,
+    ) {
+        let pending = std::mem::take(&mut request.pending_uploads);
+        for upload in pending {
+            let result = self
+                .client
+                .upload_file(
+                    &account.email,
+                    &account.access_token,
+                    device_id,
+                    &request.thread_id,
+                    &crate::core::attachment::upload_filename(&upload.media_type, &upload.data),
+                    &upload.media_type,
+                    &upload.data,
+                    call,
+                )
+                .await;
+            match result {
+                Ok(id) => {
+                    if let Some(message) = request.messages.get_mut(upload.message_index) {
+                        message
+                            .content
+                            .attachments
+                            .get_or_insert_with(Vec::new)
+                            .push(RaycastAttachment::image(id));
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        account = %account.email,
+                        media_type = %upload.media_type,
+                        bytes = upload.data.len(),
+                        "attachment upload failed, dropping image: {error}"
+                    );
+                    if let Some(message) = request.messages.get_mut(upload.message_index) {
+                        message.content.text.push(' ');
+                        message
+                            .content
+                            .text
+                            .push_str(crate::core::message::IMAGE_OMITTED_PLACEHOLDER);
+                        if let Some(ids) = &mut message.content.attachments {
+                            if ids.is_empty() {
+                                message.content.attachments = None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Any message still carrying an empty attachments array had all its
+        // uploads fail; strip the field to keep the wire shape honest.
+        for message in &mut request.messages {
+            if message
+                .content
+                .attachments
+                .as_ref()
+                .is_some_and(|ids| ids.is_empty())
+            {
+                message.content.attachments = None;
+            }
+        }
     }
 
     /// 拉模型列表。与 [`Self::send_chat`] 一致地做 401 续期与账号故障切换:

@@ -27,7 +27,7 @@ use crate::core::request::CanonicalRequest;
 use crate::core::tools::{ToolChoice, ToolDef};
 use crate::util::{current_timestamp, derive_ulid, derive_uuid, new_ulid, new_uuid};
 
-use super::wire::{RaycastChatRequest, RaycastMessage, RaycastRequestToolCall};
+use super::wire::{PendingUpload, RaycastChatRequest, RaycastMessage, RaycastRequestToolCall};
 
 /// Raycast's base system prompt. The real client always sends this as
 /// `system_instructions` and forwards any client-supplied system prompt as
@@ -74,7 +74,48 @@ pub fn build_chat_request(
         // Full ISO-8601 UTC timestamp, as the real client sends it since at
         // least 2.12.0 (`2026-11-13T01:45:10.062Z`), not a bare date.
         current_date: Some(current_timestamp()),
+        pending_uploads: pending_uploads(&canonical.messages),
     }
+}
+
+/// Collect the image bytes the dispatcher must upload, in wire-message order.
+/// Wire indices match `build_messages` output positionally (one canonical
+/// message in, one wire message out). Each attachment becomes its own
+/// `PendingUpload`; the dispatcher appends the file id to the message's
+/// `attachments` array as uploads complete.
+///
+/// Shares [`IMAGE_REPLAY_LIMIT`] with `build_messages`: the newest 20
+/// attachments queue for upload, older ones were already degraded to text
+/// placeholders there and are not uploaded. Walks the same newest-first
+/// direction as `build_messages` so both agree on which attachments survive.
+fn pending_uploads(messages: &[Message]) -> Vec<PendingUpload> {
+    let mut uploads = Vec::new();
+    let mut replay_budget = IMAGE_REPLAY_LIMIT;
+    for (index, message) in messages.iter().enumerate().rev() {
+        if message.role != Role::User {
+            continue;
+        }
+        for attachment in &message.attachments {
+            if replay_budget == 0 {
+                continue;
+            }
+            let crate::core::message::Attachment::Inline { media_type, data } = attachment
+            else {
+                // Remote references are resolved by the pipeline before it
+                // reaches here; a leftover one has no bytes to upload.
+                continue;
+            };
+            replay_budget -= 1;
+            uploads.push(PendingUpload {
+                message_index: index,
+                media_type: media_type.clone(),
+                data: data.clone(),
+            });
+        }
+    }
+    // Uploads execute oldest-first (stable file ids per message position).
+    uploads.reverse();
+    uploads
 }
 
 /// Derive a **stable** `thread_id` so every turn of the same conversation maps
@@ -128,6 +169,11 @@ fn derive_message_id(messages: &[Message]) -> String {
 /// keeps the tool round-trip alive; a naive "keep the loop after the last
 /// user message" gate failed because client-adjacent user texts like
 /// "Tool loaded." (emitted alongside tool results) masquerade as a new turn.
+///
+/// Image attachments: the newest [`IMAGE_REPLAY_LIMIT`] attachments ride as
+/// `pending_uploads` (bytes sidecar, see [`pending_uploads`]); the dispatcher
+/// uploads after account selection and fills the ids. Older ones are stripped
+/// here and their text gains the same omission placeholder the client uses.
 fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
     let mut out = Vec::with_capacity(messages.len());
 
@@ -141,7 +187,26 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
         .rposition(|m| m.role == Role::Assistant)
         .unwrap_or(usize::MAX);
 
-    for (index, message) in messages.iter().enumerate() {
+    // Replay limit: only the newest IMAGE_REPLAY_LIMIT attachments survive.
+    // Walk newest-first, counting; older image-bearing messages degrade.
+    let mut replay_budget = IMAGE_REPLAY_LIMIT;
+    let degrade = |text: &mut String, count: usize| {
+        for _ in 0..count {
+            text.push(' ');
+            text.push_str(crate::core::message::IMAGE_OMITTED_PLACEHOLDER);
+        }
+    };
+
+    for (index, message) in messages.iter().enumerate().rev() {
+        let image_count = message.attachments.len();
+        let degrade_count = if message.role == Role::User && image_count > 0 {
+            let kept = image_count.min(replay_budget);
+            replay_budget -= kept;
+            image_count - kept
+        } else {
+            0
+        };
+
         // Assistant thinking is carried as a separate assistant message whose
         // body is the thought wrapped in <think>...</think>. The provider's
         // thought signature is NOT attached here: upstream validates the
@@ -170,6 +235,12 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
             wire.content.text = format!("{}{}", Message::error_marker(true), wire.content.text);
         }
 
+        // Dropped (over-limit) attachments become omission placeholders;
+        // kept ones ride via pending_uploads — no wire field yet.
+        if degrade_count > 0 {
+            degrade(&mut wire.content.text, degrade_count);
+        }
+
         if !message.tool_calls.is_empty() {
             wire.tool_calls = message
                 .tool_calls
@@ -196,8 +267,14 @@ fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
         out.push(wire);
     }
 
+    // The loop walked newest-first; restore wire order.
+    out.reverse();
     out
 }
+
+/// How many image attachments a request replays (the real client's
+/// `lOt(messages, 20)`); older ones are replaced with omission placeholders.
+const IMAGE_REPLAY_LIMIT: usize = 20;
 
 /// Render canonical tool definitions into Raycast's `tools[]` JSON.
 fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
@@ -269,5 +346,105 @@ fn tool_choice_wire(choice: &ToolChoice) -> String {
         ToolChoice::None => "none".to_string(),
         ToolChoice::Required => "required".to_string(),
         ToolChoice::Named(name) => name.clone(),
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use base64::Engine;
+    use crate::core::message::Attachment;
+
+    fn sample_png() -> Attachment {
+        // 1x1 PNG bytes.
+        let data = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+            .unwrap();
+        Attachment::Inline { media_type: "image/png".into(), data }
+    }
+
+    fn request_with(messages: Vec<Message>) -> RaycastChatRequest {
+        let mut canonical =
+            crate::core::request::CanonicalRequest::new(crate::core::protocol::Protocol::ChatCompletions, "m");
+        canonical.messages = messages;
+        build_chat_request(&canonical, "openai", "test")
+    }
+
+    /// 指纹回归:无图请求的 wire 字节必须与加图功能之前完全一致。
+    /// pending_uploads 是 serde(skip) 侧车,不参与序列化。
+    #[test]
+    fn plain_text_request_wire_is_unchanged_by_image_support() {
+        let mut canonical =
+            crate::core::request::CanonicalRequest::new(crate::core::protocol::Protocol::ChatCompletions, "m");
+        canonical.messages = vec![
+            Message::text(Role::System, "Be brief"),
+            Message::text(Role::User, "hello"),
+        ];
+        canonical.system = Some("Be brief".into());
+        let request = build_chat_request(&canonical, "openai", "test");
+        let json = serde_json::to_value(&request).unwrap();
+        let messages = json["messages"].as_array().unwrap();
+        // 每条消息只有 role/content,content 只有 text — 没有 attachments 字段。
+        for message in messages {
+            let obj = message.as_object().unwrap();
+            assert!(obj.keys().all(|k| k == "role" || k == "content"), "{obj:?}");
+            assert!(obj["content"].as_object().unwrap().contains_key("text"));
+            assert!(!obj["content"].as_object().unwrap().contains_key("attachments"));
+        }
+        assert!(request.pending_uploads.is_empty());
+    }
+
+    /// 带图用户消息:pending_uploads 按消息序号排队,序列化时不出现
+    /// (fileId 由 dispatcher 上传后回填才入 wire)。
+    #[test]
+    fn image_messages_queue_pending_uploads_with_message_index() {
+        let request = request_with(vec![
+            Message::text(Role::User, "first"),
+            Message::with_attachments(Role::User, "look", vec![sample_png()]),
+        ]);
+        assert_eq!(request.pending_uploads.len(), 1);
+        assert_eq!(request.pending_uploads[0].message_index, 1);
+        assert_eq!(request.pending_uploads[0].media_type, "image/png");
+        let json = serde_json::to_value(&request).unwrap();
+        let messages = json["messages"].as_array().unwrap();
+        // wire 上暂无 attachments(等 fileId 回填),文本未动。
+        assert!(!messages[1]["content"].as_object().unwrap().contains_key("attachments"));
+        assert_eq!(messages[1]["content"]["text"], "look");
+    }
+
+    /// 回放限制:超过 20 张图的更早附件剥除,文本加占位符;最近的保留。
+    #[test]
+    fn older_images_over_replay_limit_get_omission_placeholder() {
+        let mut messages = Vec::new();
+        for i in 0..25 {
+            messages.push(Message::with_attachments(
+                Role::User,
+                format!("msg{i}"),
+                vec![sample_png()],
+            ));
+        }
+        let request = request_with(messages);
+        // 20 个进 pending_uploads(最新的)。
+        assert_eq!(request.pending_uploads.len(), 20);
+        assert_eq!(request.pending_uploads[0].message_index, 5);
+        let json = serde_json::to_value(&request).unwrap();
+        let wire = json["messages"].as_array().unwrap();
+        // msg0..msg4 被降级:文本带占位符。
+        for (index, wire_message) in wire.iter().enumerate().take(5) {
+            let text = wire_message["content"]["text"].as_str().unwrap();
+            assert!(text.contains(crate::core::message::IMAGE_OMITTED_PLACEHOLDER), "msg{index}: {text}");
+        }
+        // msg5 之后文本原样。
+        assert_eq!(wire[5]["content"]["text"], "msg5");
+    }
+
+    /// thread_id 派生不受附件影响(附件不进 seed)——同一会话发图前后
+    /// thread_id 稳定,与官方客户端的 chat 生命周期一致。
+    #[test]
+    fn thread_id_ignores_attachments() {
+        let plain = request_with(vec![Message::text(Role::User, "hi")]);
+        let with_image =
+            request_with(vec![Message::with_attachments(Role::User, "hi", vec![sample_png()])]);
+        assert_eq!(plain.thread_id, with_image.thread_id);
     }
 }

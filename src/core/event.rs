@@ -22,6 +22,9 @@ pub enum CanonicalEvent {
     TextDelta(String),
     /// A complete tool call (Raycast delivers these whole, not char-by-char).
     ToolCall(ToolCall),
+    /// The upstream started generating an image (`generating_image`
+    /// notification). Carries the requested size/count when present.
+    ImageGenerationStarted { size: Option<String>, count: Option<u32> },
     /// The terminating event carrying the finish reason and usage.
     Finish { reason: FinishReason, usage: Usage },
     /// An upstream failure delivered *inside* a 200 SSE stream (e.g. a

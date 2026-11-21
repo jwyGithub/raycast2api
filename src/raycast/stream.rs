@@ -209,6 +209,11 @@ fn decode_events(
                             text_log.flush(&id);
                             tracing::info!("→ tool_call [{id}]: {} (id: {})", call.name, call.id);
                         }
+                        CanonicalEvent::ImageGenerationStarted { size, count } => {
+                            tracing::info!(
+                                "→ image_generation [{id}]: started (size={size:?}, count={count:?})"
+                            );
+                        }
                         CanonicalEvent::Finish { reason, usage } => {
                             text_log.flush(&id);
                             tracing::info!("→ finish [{id}]: reason={:?}, tokens={{input: {}, output: {}, cached: {}}}",

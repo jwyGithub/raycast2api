@@ -10,8 +10,9 @@ use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 
 use crate::config::{
-    RAYCAST_AI_CREDITS_DETAILS_URL, RAYCAST_AI_CREDITS_URL, RAYCAST_API_URL, RAYCAST_ME_URL,
-    RAYCAST_MODELS_URL, RAYCAST_TRIAL_STATUS_URL, Settings, USER_AGENT, USER_AGENT_POST,
+    RAYCAST_AI_CREDITS_DETAILS_URL, RAYCAST_AI_CREDITS_URL, RAYCAST_API_URL, RAYCAST_FILES_URL,
+    RAYCAST_ME_URL, RAYCAST_MODELS_URL, RAYCAST_TRIAL_STATUS_URL, Settings, USER_AGENT,
+    USER_AGENT_POST,
 };
 use crate::error::GatewayError;
 use crate::signature::calculate_signature_v2;
@@ -20,8 +21,8 @@ use crate::util::unix_secs;
 
 use super::parser::content_policy_hint;
 use super::wire::{
-    RaycastCredits, RaycastCreditsDetails, RaycastMe, RaycastModelsResponse, RaycastRawModel,
-    RaycastSseError, RaycastTrialStatus,
+    FileRegistration, RaycastCredits, RaycastCreditsDetails, RaycastMe, RaycastModelsResponse,
+    RaycastRawModel, RaycastSseError, RaycastTrialStatus,
 };
 
 /// Cheap-to-clone handle to the Raycast backend (wraps a shared `reqwest::Client`).
@@ -165,6 +166,80 @@ impl RaycastClient {
         let url = RAYCAST_MODELS_URL;
         let parsed: RaycastModelsResponse = self.get_json(url, token).await?;
         Ok(parsed.models)
+    }
+
+    /// Register an attachment upload and push the bytes to the presigned
+    /// target, returning the upstream file id the chat request then references
+    /// (`content.attachments:[{id, type:"image"}]`).
+    ///
+    /// Mirrors the real client's `ai/files` flow: a signed POST registers the
+    /// blob (md5-base64 checksum), the response carries a presigned `direct_upload`
+    /// URL + headers, and a raw PUT pushes the bytes there — no signature
+    /// headers on the PUT, exactly as the client does it.
+    ///
+    /// `chat_id` is the conversation's `thread_id` (the client scopes uploads
+    /// to the chat). The signed POST uses the same account's device id as chat.
+    pub(crate) async fn upload_file(
+        &self,
+        email: &str,
+        token: &str,
+        device_id: &str,
+        chat_id: &str,
+        filename: &str,
+        content_type: &str,
+        bytes: &[u8],
+        call: &CallContext,
+    ) -> Result<String, GatewayError> {
+        let checksum = crate::core::attachment::upload_checksum(bytes);
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "blob": {
+                "filename": filename,
+                "byte_size": bytes.len(),
+                "content_type": content_type,
+                "checksum": checksum,
+            }
+        })
+        .to_string();
+
+        let timestamp = unix_secs().to_string();
+        let signature = calculate_signature_v2(
+            &timestamp,
+            device_id,
+            &body,
+            &self.settings.raycast_signature_secret,
+        );
+        let mut headers =
+            self.base_headers(token, Some(device_id), Some((&timestamp, &signature)));
+        headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+        let request = self
+            .http
+            .post(RAYCAST_FILES_URL)
+            .headers(headers)
+            .body(body)
+            .build()?;
+        let response = self.send(request, Some((call, email)), None).await?;
+        let registered: FileRegistration = ensure_success(response).await?.json().await?;
+
+        // Raw PUT to the presigned URL with exactly the headers the server
+        // handed us (they carry the auth). Failure here fails the upload.
+        let mut put = self.http.put(&registered.direct_upload.url);
+        for (key, value) in &registered.direct_upload.headers {
+            let value = value.as_str().unwrap_or_default();
+            put = put.header(key.as_str(), value);
+        }
+        let put_request: reqwest::Request = put
+            .body(bytes.to_vec())
+            .timeout(self.settings.upstream_timeout())
+            .build()?;
+        self.http
+            .execute(put_request)
+            .await?
+            .error_for_status()?;
+
+        Ok(registered.id)
     }
 
     /// Fetch the account profile + subscription for an explicit token.

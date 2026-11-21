@@ -48,18 +48,54 @@ impl RaycastMessage {
     pub fn text(role: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             role: role.into(),
-            content: RaycastMessageContent { text: text.into() },
+            content: RaycastMessageContent {
+                text: text.into(),
+                attachments: None,
+            },
             tool_calls: Vec::new(),
             name: None,
             tool_call_id: None,
             extra_content: None,
         }
     }
+
+    /// Whether this message carries the attachment marker (the builder marks
+    /// image-bearing user messages before the dispatcher uploads file ids).
+    pub fn has_attachments(&self) -> bool {
+        self.content.attachments.is_some()
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RaycastMessageContent {
     pub text: String,
+    /// Image attachment references (`{id, type:"image"}`). The builder sets
+    /// `Some(vec![])` as a marker on image-bearing user messages; the
+    /// dispatcher fills in uploaded file ids before sending, or strips the
+    /// field entirely on upload failure / vision-less models. Absent on
+    /// text-only requests, keeping those byte-identical to the pre-image wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<RaycastAttachment>>,
+}
+
+/// An uploaded-attachment reference on the wire — exactly the two fields the
+/// real client sends (reverse-engineered: the server resolves everything else
+/// by id).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaycastAttachment {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+}
+
+impl RaycastAttachment {
+    /// An image reference.
+    pub fn image(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            kind: "image",
+        }
+    }
 }
 
 /// Assistant tool call as written back into a *request* `messages[].tool_calls`
@@ -141,6 +177,21 @@ pub struct RaycastChatRequest {
     /// `YYYY-MM-DD` the client believes it is. Omitted when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_date: Option<String>,
+    /// Attachment bytes awaiting upload — a serialization-invisible sidecar.
+    /// The builder fills it from the canonical request; the dispatcher
+    /// uploads after account selection (attachment ACLs are per-account) and
+    /// replaces each entry's target message `attachments` with the file ids.
+    #[serde(skip)]
+    pub pending_uploads: Vec<PendingUpload>,
+}
+
+/// One image the builder queued for upload: its target message index in
+/// `messages` plus the resolved media type and raw bytes.
+#[derive(Debug, Clone)]
+pub struct PendingUpload {
+    pub message_index: usize,
+    pub media_type: String,
+    pub data: Vec<u8>,
 }
 
 // --- Response (SSE) -----------------------------------------------------
@@ -178,6 +229,17 @@ pub struct RaycastSseData {
     /// parser surfaces it as [`CanonicalEvent::Error`] instead of dropping it.
     #[serde(default)]
     pub error: Option<RaycastSseError>,
+    /// URL of a generated image, set on the payload that completes an image
+    /// generation (reverse-engineered: the `image` chunk field the client's
+    /// parser reads for `{type:'image-generation-complete'}`).
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Image generation parameters carried by the `generating_image`
+    /// notification (`image_size` like "512x512", `image_count`).
+    #[serde(default)]
+    pub image_size: Option<String>,
+    #[serde(default)]
+    pub image_count: Option<u32>,
 }
 
 /// 一个完整 SSE `data:` payload 的顶层 JSON,供[流探测](super::peek)在换号
@@ -332,6 +394,22 @@ pub struct RaycastRawModel {
 #[derive(Debug, Deserialize)]
 pub struct RaycastModelsResponse {
     pub models: Vec<RaycastRawModel>,
+}
+
+/// `POST /ai/files` response: the registered attachment id plus the presigned
+/// direct-upload target (Rails ActiveStorage shape, from the client bundle).
+#[derive(Debug, Deserialize)]
+pub struct FileRegistration {
+    pub id: String,
+    pub direct_upload: DirectUpload,
+}
+
+/// The presigned PUT target and its required headers (auth/signature cookies).
+#[derive(Debug, Deserialize)]
+pub struct DirectUpload {
+    pub url: String,
+    #[serde(default)]
+    pub headers: Map<String, Value>,
 }
 
 // --- 账号信息查询(/me + /ai/credits) --------------------------------

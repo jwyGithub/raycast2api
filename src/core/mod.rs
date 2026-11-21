@@ -9,6 +9,7 @@
 //! It depends on neither the client protocols nor Raycast, so both sides can
 //! change independently as long as they meet in the middle here.
 
+pub mod attachment;
 pub mod event;
 pub mod message;
 pub mod page;
@@ -19,7 +20,7 @@ pub mod tools;
 pub mod usage;
 
 pub use event::CanonicalEvent;
-pub use message::{Message, Role, Thinking, ToolCall};
+pub use message::{Attachment, Message, Role, Thinking, ToolCall};
 pub use protocol::Protocol;
 pub use request::{CanonicalRequest, ReasoningEffort};
 pub use response::{CanonicalResponse, FinishReason};

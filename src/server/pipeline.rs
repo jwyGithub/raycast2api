@@ -36,6 +36,41 @@ pub(crate) async fn run<O: OutboundAdapter>(
     model: &RaycastRawModel,
     accounting: Option<Accounting>,
 ) -> Result<Response, GatewayError> {
+    // Resolve remote image references before anything else: the adapters are
+    // synchronous (they cannot fetch), and compaction should see the final
+    // message shapes.
+    let mut request = resolve_remote_attachments(&state.dispatcher.client.http, request).await;
+    // Vision gating mirrors the real client: a model without `abilities.vision`
+    // gets every image attachment stripped and an omission placeholder in its
+    // place — no upload is attempted (B1 in doc/multimodal-images-2026-11-21.md).
+    let vision = model_vision_formats(model);
+    for message in &mut request.messages {
+        if message.attachments.is_empty() {
+            continue;
+        }
+        let kept: Vec<_> = message
+            .attachments
+            .iter()
+            .filter(|a| match a {
+                crate::core::message::Attachment::Inline { media_type, .. } => {
+                    vision.contains(&media_type.as_str())
+                }
+                crate::core::message::Attachment::Remote { .. } => !vision.is_empty(),
+            })
+            .cloned()
+            .collect();
+        let dropped = message.attachments.len() - kept.len();
+        message.attachments = kept;
+        if dropped > 0 {
+            for _ in 0..dropped {
+                message.text.push(' ');
+                message
+                    .text
+                    .push_str(crate::core::message::IMAGE_OMITTED_PLACEHOLDER);
+            }
+            tracing::info!(dropped, "image attachments dropped: model lacks vision support");
+        }
+    }
     let events = events(state, &request, model, "inference", accounting, None).await?;
     let client_model = request.model.clone();
 
@@ -91,6 +126,72 @@ pub(crate) fn hold_permit(response: Response, permit: Option<Permit>) -> Respons
         while let Some(chunk) = chunks.next().await { yield chunk; }
     };
     Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
+/// The selected model's accepted image formats (`abilities.vision.formats` in
+/// the raw model extra). Empty when the model has no vision support.
+fn model_vision_formats(model: &RaycastRawModel) -> Vec<&'static str> {
+    const SUPPORTED: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+    let Some(formats) = model.extra.get("abilities").and_then(|a| a.get("vision")) else {
+        return Vec::new();
+    };
+    // Two shapes exist in the wild: `vision: {formats: [...]}` (backend
+    // catalog) and `vision: {supported: true}` (BYOK mapping). Treat a bare
+    // `supported: true` as accepting every format we know.
+    if formats.get("supported").and_then(|s| s.as_bool()) == Some(true) {
+        return SUPPORTED.to_vec();
+    }
+    let list = formats
+        .get("formats")
+        .and_then(|f| f.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|f| f.as_str())
+                .filter_map(|f| SUPPORTED.iter().find(|s| s == &&f).copied())
+                .collect()
+        })
+        .unwrap_or_default();
+    list
+}
+
+/// Fetch every [`Attachment::Remote`] in the request's user messages, replacing
+/// each with an inline attachment on success. A failed fetch **drops** the
+/// attachment (with a warn) instead of failing the request — the real client
+/// degrades missing images the same way. Text is untouched.
+async fn resolve_remote_attachments(
+    client: &reqwest::Client,
+    mut request: CanonicalRequest,
+) -> CanonicalRequest {
+    let remotes: Vec<(usize, usize, String)> = request
+        .messages
+        .iter()
+        .enumerate()
+        .flat_map(|(m, message)| {
+            message
+                .attachments
+                .iter()
+                .enumerate()
+                .filter_map(move |(a, attachment)| match attachment {
+                    crate::core::message::Attachment::Remote { url } => {
+                        Some((m, a, url.clone()))
+                    }
+                    _ => None,
+                })
+        })
+        .collect();
+    for (m, a, url) in remotes {
+        let fetched = crate::core::attachment::fetch_url(client, &url).await;
+        match fetched {
+            Some(inline) => {
+                request.messages[m].attachments[a] = inline;
+            }
+            None => {
+                request.messages[m].attachments.remove(a);
+            }
+        }
+    }
+    request
 }
 
 pub(crate) async fn run_admitted<O: OutboundAdapter>(
@@ -210,6 +311,9 @@ async fn aggregate(
                 response.thought_signature = Some(signature)
             }
             CanonicalEvent::ToolCall(call) => response.tool_calls.push(call),
+            // The generated image itself arrives as a markdown TextDelta; the
+            // start marker carries nothing to aggregate.
+            CanonicalEvent::ImageGenerationStarted { .. } => {}
             CanonicalEvent::Finish { reason, usage } => {
                 response.finish_reason = reason;
                 response.usage = usage;

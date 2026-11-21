@@ -111,14 +111,41 @@ impl ItemContent {
                 .join(""),
         }
     }
+
+    /// Flatten into text plus any image attachments the parts carry. Text
+    /// parts concatenate directly (matches `as_text`'s established join("")).
+    pub fn as_text_and_images(&self) -> (String, Vec<crate::core::message::Attachment>) {
+        match self {
+            ItemContent::Text(text) => (text.clone(), Vec::new()),
+            ItemContent::Parts(parts) => {
+                let mut text = String::new();
+                let mut attachments = Vec::new();
+                for part in parts {
+                    if let Some(url) = &part.image_url {
+                        match crate::core::attachment::from_url_reference(url) {
+                            Some(attachment) => attachments.push(attachment),
+                            None => tracing::warn!("unsupported input_image part, dropped"),
+                        }
+                    }
+                    text.push_str(&part.text);
+                }
+                (text, attachments)
+            }
+        }
+    }
 }
 
 /// A single `input_text` / `output_text` (or other) content part. Parts without
-/// a `text` field default to empty and drop out on flattening.
+/// a `text` field default to empty and drop out on flattening. `input_image`
+/// parts carry an `image_url` (data URL or https reference) and become
+/// canonical attachments.
 #[derive(Debug, Deserialize)]
 pub struct ContentPartIn {
     #[serde(default)]
     pub text: String,
+    /// Set on `input_image` parts; absent on text parts.
+    #[serde(default)]
+    pub image_url: Option<String>,
 }
 
 /// A Responses tool definition. Function tools are flat (`type: "function"`

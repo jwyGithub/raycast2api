@@ -108,14 +108,19 @@ pub enum MessageContent {
 }
 
 /// A typed content block inside a message, discriminated by `type`. Block kinds
-/// the gateway doesn't model (e.g. `image`) deserialize to [`ContentBlock::Other`]
-/// and are dropped by the inbound adapter.
+/// the gateway doesn't model (e.g. `document`) deserialize to
+/// [`ContentBlock::Other`] and are dropped by the inbound adapter.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
         #[serde(default)]
         text: String,
+    },
+    /// An image block: inline base64 or a remote URL reference.
+    Image {
+        #[serde(default)]
+        source: ImageSource,
     },
     Thinking {
         #[serde(default)]
@@ -156,6 +161,21 @@ impl Default for ToolResultContent {
     fn default() -> Self {
         ToolResultContent::Text(String::new())
     }
+}
+
+/// Anthropic `image.source`: inline base64 (`{type:"base64", media_type, data}`)
+/// or a URL reference (`{type:"url", url}`). Unknown source types deserialize
+/// to the default (empty) value and drop out in the adapter.
+#[derive(Debug, Default, Deserialize)]
+pub struct ImageSource {
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub media_type: Option<String>,
+    #[serde(default)]
+    pub data: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 impl ToolResultContent {

@@ -26,7 +26,8 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use crate::core::message::{Message, Role, Thinking, ToolCall};
+use crate::core::attachment::{from_base64, from_url_reference};
+use crate::core::message::{Attachment, Message, Role, Thinking, ToolCall};
 use crate::core::protocol::Protocol;
 use crate::core::request::{CanonicalRequest, ReasoningEffort};
 use crate::core::tools::{ToolChoice, ToolDef};
@@ -35,8 +36,8 @@ use crate::protocol::InboundAdapter;
 use crate::protocol::validate::{require_model, require_non_empty};
 
 use super::wire::{
-    ContentBlock, InboundMessage, InboundTool, InboundToolChoice, MessageContent, MessagesRequest,
-    SystemPrompt, ThinkingConfig,
+    ContentBlock, ImageSource, InboundMessage, InboundTool, InboundToolChoice, MessageContent,
+    MessagesRequest, SystemPrompt, ThinkingConfig,
 };
 
 /// Zero-sized marker selecting the Anthropic Messages inbound mapping.
@@ -216,8 +217,8 @@ fn push_assistant(
                     arguments: arguments_string(input),
                 });
             }
-            // `tool_result` / unknown blocks don't belong on an assistant turn.
-            ContentBlock::ToolResult { .. } | ContentBlock::Other => {}
+            // `tool_result` / image / unknown blocks don't belong on an assistant turn.
+            ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } | ContentBlock::Other => {}
         }
     }
 
@@ -229,6 +230,7 @@ fn push_assistant(
         tool_call_id: None,
         tool_name: None,
         tool_error: false,
+        attachments: Vec::new(),
     });
 }
 
@@ -250,18 +252,29 @@ fn push_user(
     };
 
     let mut text = String::new();
+    let mut attachments: Vec<Attachment> = Vec::new();
 
     for block in blocks {
         match block {
             ContentBlock::Text { text: chunk } => append_text(&mut text, &chunk),
+            ContentBlock::Image { source } => {
+                match resolve_image_source(&source) {
+                    Some(attachment) => attachments.push(attachment),
+                    None => tracing::warn!("unsupported image source in /v1/messages, dropped"),
+                }
+            }
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
             } => {
-                // Flush any user text accumulated before this result.
-                if !text.is_empty() {
-                    out.push(Message::text(Role::User, std::mem::take(&mut text)));
+                // Flush any user text/attachments accumulated before this result.
+                if !text.is_empty() || !attachments.is_empty() {
+                    out.push(Message::with_attachments(
+                        Role::User,
+                        std::mem::take(&mut text),
+                        std::mem::take(&mut attachments),
+                    ));
                 }
                 out.push(Message {
                     role: Role::Tool,
@@ -271,6 +284,7 @@ fn push_user(
                     tool_name: tool_names.get(&tool_use_id).cloned(),
                     tool_call_id: Some(tool_use_id),
                     tool_error: is_error,
+                    attachments: Vec::new(),
                 });
             }
             // `thinking` / `tool_use` / unknown blocks don't belong on a user turn.
@@ -278,8 +292,21 @@ fn push_user(
         }
     }
 
-    if !text.is_empty() {
-        out.push(Message::text(Role::User, text));
+    if !text.is_empty() || !attachments.is_empty() {
+        out.push(Message::with_attachments(Role::User, text, attachments));
+    }
+}
+
+/// Resolve an Anthropic `image.source` into a canonical attachment.
+fn resolve_image_source(source: &ImageSource) -> Option<Attachment> {
+    match source.kind.as_deref() {
+        Some("base64") => {
+            let media_type = source.media_type.as_deref()?;
+            let data = source.data.as_deref()?;
+            from_base64(media_type, data)
+        }
+        Some("url") => from_url_reference(source.url.as_deref()?),
+        _ => None,
     }
 }
 

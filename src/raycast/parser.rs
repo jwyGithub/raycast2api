@@ -51,6 +51,19 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
         notifications.push(notification.to_string());
     }
 
+    // Image generation lifecycle. The completion payload (top-level `image`
+    // URL) lands as a markdown image in the text stream so every protocol's
+    // client can render it without protocol-native image shapes. Failure
+    // arrives as a `tool_failed` notification with `image_generation: true`
+    // — that one carries no user-actionable detail beyond the notification
+    // text, which the error path already attaches.
+    if data.notification_type.as_deref() == Some("generating_image") {
+        return vec![CanonicalEvent::ImageGenerationStarted {
+            size: data.image_size,
+            count: data.image_count,
+        }];
+    }
+
     // An in-stream rejection (200 status, error payload inside the stream).
     // Surfaced as a first-class event so no outbound adapter can silently
     // swallow it — previously this arm returned `Vec::new()` and the client
@@ -87,6 +100,13 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
     // Reasoning end delivers the thought signature (with empty reasoning/text).
     if let Some(signature) = data.thought_signature() {
         events.push(CanonicalEvent::ThoughtSignature(signature));
+    }
+
+    if let Some(url) = data.image.as_deref()
+        && !url.is_empty()
+    {
+        tracing::info!("→ image generated: {url}");
+        events.push(CanonicalEvent::TextDelta(format!("\n\n![generated image]({url})\n\n")));
     }
 
     if let Some(reasoning) = data.reasoning.as_deref()
@@ -185,6 +205,35 @@ mod tests {
                 assert!(!message.contains("[gateway hint]"));
             }
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// 生图生命周期:`generating_image` 通知 → started 事件;带 `image` URL
+    /// 的 chunk → markdown 图文 delta(三个协议客户端都能渲染)。
+    #[test]
+    fn image_generation_lifecycle_yields_started_and_markdown_image() {
+        let mut notifications = Vec::new();
+        let events = parse_events(
+            r#"{"notification_type":"generating_image","image_size":"1024x1024","image_count":2}"#,
+            &mut notifications,
+        );
+        match &events[0] {
+            CanonicalEvent::ImageGenerationStarted { size, count } => {
+                assert_eq!(size.as_deref(), Some("1024x1024"));
+                assert_eq!(*count, Some(2));
+            }
+            other => panic!("expected ImageGenerationStarted, got {other:?}"),
+        }
+
+        let events = parse_events(
+            r#"{"image":"https://cdn.example.com/gen/abc.png","text":""}"#,
+            &mut Vec::new(),
+        );
+        match &events[0] {
+            CanonicalEvent::TextDelta(text) => {
+                assert!(text.contains("![generated image](https://cdn.example.com/gen/abc.png)"));
+            }
+            other => panic!("expected TextDelta, got {other:?}"),
         }
     }
 
