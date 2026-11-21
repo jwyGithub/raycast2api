@@ -230,6 +230,13 @@ pub struct RaycastSseData {
     /// parser surfaces it as [`CanonicalEvent::Error`] instead of dropping it.
     #[serde(default)]
     pub error: Option<RaycastSseError>,
+    /// Stream-complete sentinel (`{"complete":true}`): the upstream's normal
+    /// end-of-stream marker on tool-heavy turns (image generation ends this
+    /// way instead of a finish_reason payload). The parser uses it to emit a
+    /// synthetic Finish so the stream layer doesn't misread a clean end as a
+    /// truncation.
+    #[serde(default)]
+    pub complete: Option<bool>,
     /// URL of a generated image, set on the payload that completes an image
     /// generation (reverse-engineered: the `image` chunk field the client's
     /// parser reads for `{type:'image-generation-complete'}`).

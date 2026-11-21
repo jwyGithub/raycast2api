@@ -32,8 +32,10 @@ pub fn content_policy_hint() -> &'static str {
 /// Parse one decoded `data:` payload into canonical events.
 ///
 /// Returns an empty vec for anything that isn't content: the `[DONE]`
-/// sentinel, `{"complete":true}`, `provider_status` / `ping` notifications, or
-/// a payload that fails to decode.
+/// sentinel, `{"complete":true}` (a normal stream end, recognized by
+/// [`is_complete_sentinel`] so the stream layer treats it as termination),
+/// `provider_status` / `ping` notifications, or a payload that fails to
+/// decode.
 pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<CanonicalEvent> {
     if payload == DONE_SENTINEL {
         return Vec::new();
@@ -42,6 +44,18 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
     let Ok(data) = serde_json::from_str::<RaycastSseData>(payload) else {
         return Vec::new();
     };
+
+    // Remote-executed tool calls (`notification_type:"tool_calls"`): the
+    // server has ALREADY run the tool inside the stream and its results ride
+    // separately (generating_image + image URL for image gen). Forwarding the
+    // call to the client would make harnesses (Codex/Claude Code) answer a
+    // function_call the server already settled — drop it here, log it.
+    if data.notification_type.as_deref() == Some("tool_calls") {
+        for call in &data.tool_calls {
+            tracing::info!("⇈ remote tool executed server-side: {} ({})", call.name, call.id);
+        }
+        return Vec::new();
+    }
 
     // Notifications and pings set `notification_type` and carry no content.
     if data.notification_type.is_some()
@@ -133,6 +147,16 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
         events.push(CanonicalEvent::Finish {
             reason: finish_reason(reason),
             usage: usage(data.usage),
+        });
+    } else if data.complete == Some(true) {
+        // `{"complete":true}` with no finish_reason: the upstream's normal
+        // end-of-stream on tool-heavy turns (image generation ends this way,
+        // usage arriving on the preceding payload). Without a synthetic
+        // Finish here the stream layer would treat the clean end as a
+        // truncation and fail the request after all output was delivered.
+        events.push(CanonicalEvent::Finish {
+            reason: FinishReason::Stop,
+            usage: Usage::default(),
         });
     }
 
@@ -241,7 +265,6 @@ mod tests {
     fn ignores_notifications_pings_and_sentinels() {
         let mut notifications = Vec::new();
         assert!(parse_events(DONE_SENTINEL, &mut notifications).is_empty());
-        assert!(parse_events(r#"{"complete":true}"#, &mut notifications).is_empty());
         assert!(
             parse_events(
                 r#"{"notification_type":"ping","notification":"","text":""}"#,
@@ -250,6 +273,36 @@ mod tests {
             .is_empty()
         );
         assert!(parse_events("not json", &mut notifications).is_empty());
+    }
+
+    /// `{"complete":true}` 是生图流的正常收尾(usage 在前一 payload):
+    /// 必须发 Finish,否则 stream 层把干净收尾误判为断流。
+    #[test]
+    fn complete_sentinel_terminates_the_stream_normally() {
+        let events = parse_events(r#"{"complete":true}"#, &mut Vec::new());
+        assert!(
+            matches!(events.as_slice(), [CanonicalEvent::Finish { reason: FinishReason::Stop, usage } ]
+                if usage.input_tokens == 0 && usage.output_tokens == 0)
+        );
+        // finish_reason 优先:两者同时出现时只发一个 Finish。
+        let events = parse_events(
+            r#"{"complete":true,"finish_reason":"stop","usage":{"input_tokens":5,"output_tokens":2}}"#,
+            &mut Vec::new(),
+        );
+        assert!(matches!(events.as_slice(), [CanonicalEvent::Finish { usage, .. }] if usage.input_tokens == 5));
+    }
+
+    /// 服务端已执行的 remote tool_call(notification_type:"tool_calls"):
+    /// 不下发 ToolCall 事件(harness 会去应答一个上游已结算的调用),
+    /// 只留日志。
+    #[test]
+    fn server_executed_remote_tool_calls_are_dropped_not_forwarded() {
+        let mut notifications = Vec::new();
+        let events = parse_events(
+            r#"{"text":"","notification":"","notification_type":"tool_calls","tool_calls":[{"name":"gpt_image","arguments":"{\"prompt\":\"cat\"}","id":"call_1"}]}"#,
+            &mut notifications,
+        );
+        assert!(events.is_empty(), "remote tool calls must not reach the client");
     }
 
     #[test]
