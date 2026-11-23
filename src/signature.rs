@@ -36,7 +36,12 @@ pub fn rot13_rot5_encode(input: &str) -> String {
 
 /// Compute the `X-Raycast-Signature-v2` value.
 ///
-/// * `timestamp`  - the value sent in `X-Raycast-Timestamp` (ISO-8601).
+/// Algorithm verified against the real client's `X$t` in `backend/index.mjs`
+/// (2026-11-23): SHA-256 of the body (lowercase hex), ROT13(letters)+ROT5
+/// (digits) applied to each component, joined with `.`, HMAC-SHA256 keyed on
+/// the secret's UTF-8 bytes, lowercase hex output.
+///
+/// * `timestamp`  - the value sent in `X-Raycast-Timestamp` (Unix seconds).
 /// * `device_id`  - the value sent in `X-Raycast-DeviceId`.
 /// * `body`       - the exact request body string that will be sent.
 /// * `secret`     - the signing secret (required; there is no built-in default).

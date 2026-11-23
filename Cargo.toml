@@ -19,7 +19,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 # Async client to the Raycast backend. rustls avoids a system OpenSSL dependency;
 # `stream` enables reading the SSE response body incrementally;
 # `socks` adds socks5 proxy support for the fallback proxy chain.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks", "gzip", "brotli", "deflate", "zstd"] }
 futures-util = "0.3"
 redis = { version = "1.8", default-features = false, features = ["tokio-comp", "connection-manager"] }
 # Ergonomic async generators for building the SSE translation stream.

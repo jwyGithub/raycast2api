@@ -26,6 +26,32 @@ use super::wire::{
     RaycastRawModel, RaycastSseError, RaycastTrialStatus,
 };
 
+/// 真实客户端的两条出站 HTTP 管道(逆向 `backend/index.mjs` + 内嵌 Node 实测,
+/// 2026-11-23):两者对 User-Agent 变体和自动头(`accept-encoding` 等)的处理
+/// 不同,请求头必须按管道对齐。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// AI 对话(`POST /ai/chat_completions`):内嵌 Node 的 undici `fetch`。
+    /// UA 用 `x-Windows Version` 变体;undici 自动补 `accept-language: *`、
+    /// `sec-fetch-mode: cors`、`accept-encoding: br, gzip, deflate, zstd`。
+    ChatFetch,
+    /// 其余 API(got 实例,`prefixUrl .../api/v1`):/me、/ai/credits、
+    /// models、`ai/files` 注册等。UA 用 `x-Windows-amd64` 变体;got 自动补
+    /// `accept-encoding: gzip, deflate, br, zstd`(brotli/zstd 能力开关按
+    /// Node 版本),不补 accept-language / sec-fetch-mode。
+    Got,
+}
+
+impl Transport {
+    /// got/undici 自动写入的 `accept-encoding`(实测,顺序即发包顺序)。
+    fn accept_encoding(self) -> &'static str {
+        match self {
+            Self::ChatFetch => "br, gzip, deflate, zstd",
+            Self::Got => "gzip, deflate, br, zstd",
+        }
+    }
+}
+
 /// Cheap-to-clone handle to the Raycast backend (wraps a shared `reqwest::Client`).
 #[derive(Clone)]
 pub struct RaycastClient {
@@ -68,14 +94,23 @@ impl RaycastClient {
             .collect()
     }
 
-    /// Common headers shared by every request. `signed` selects the POST
-    /// header set the real client sends: it swaps in the "x-Windows Version"
-    /// UA variant, attaches the per-account DeviceId, and — on signed
-    /// requests — the timestamp/signature pair plus the `autoModels`
-    /// experimental flag. GETs in the real client carry *no* DeviceId and no
-    /// signature pair, so `device_id` is `None` there.
+    /// Common headers shared by every request, aligned to the real client's
+    /// transport for this endpoint kind. The chat path (`ChatFetch`) selects
+    /// the "x-Windows Version" UA variant, attaches the per-account DeviceId,
+    /// the timestamp/signature pair and the `autoModels` experimental flag,
+    /// plus undici fetch's automatic headers. All other endpoints (`Got`) use
+    /// the `x-Windows-amd64` UA variant and got's automatic headers; GETs in
+    /// the real client carry *no* DeviceId and no signature pair, so
+    /// `device_id` is `None` there.
+    ///
+    /// The `accept-encoding` values are the exact strings got/undici generate
+    /// (measured against the bundled Node's stacks, 2026-11-23). They are set
+    /// explicitly so reqwest sends byte-identical headers; the tower-http
+    /// decompression layer only injects its own value when the header is
+    /// absent, so responses still get transparently decompressed.
     fn base_headers(
         &self,
+        transport: Transport,
         bearer: &str,
         device_id: Option<&str>,
         signed: Option<(&str, &str)>,
@@ -89,14 +124,21 @@ impl RaycastClient {
         );
         headers.insert(
             "User-Agent",
-            // The real client uses the `x-Windows Version` UA variant on
-            // signed POSTs and `x-Windows-amd64` on GETs (captures 2026-11).
-            HeaderValue::from_static(if signed.is_some() {
-                USER_AGENT_POST
-            } else {
-                USER_AGENT
+            HeaderValue::from_static(match transport {
+                Transport::ChatFetch => USER_AGENT_POST,
+                Transport::Got => USER_AGENT,
             }),
         );
+        // Automatic headers the real client's HTTP stack adds on top of the
+        // ones the application code sets (undici fetch / got defaults).
+        headers.insert(
+            "Accept-Encoding",
+            HeaderValue::from_static(transport.accept_encoding()),
+        );
+        if transport == Transport::ChatFetch {
+            headers.insert("Accept-Language", HeaderValue::from_static("*"));
+            headers.insert("Sec-Fetch-Mode", HeaderValue::from_static("cors"));
+        }
         if let Some((timestamp, signature)) = signed {
             let device_id = device_id.expect("signed requests always carry a device id");
             headers.insert(
@@ -147,7 +189,8 @@ impl RaycastClient {
             &self.settings.raycast_signature_secret,
         );
 
-        let mut headers = self.base_headers(token, Some(device_id), Some((&timestamp, &signature)));
+        let mut headers =
+            self.base_headers(Transport::ChatFetch, token, Some(device_id), Some((&timestamp, &signature)));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         // The real client sends `application/json` even though the response is
         // SSE (capture 2026-11-20); `text/event-stream` is a fingerprint.
@@ -227,7 +270,10 @@ impl RaycastClient {
             &body,
             &self.settings.raycast_signature_secret,
         );
-        let mut headers = self.base_headers(token, Some(device_id), Some((&timestamp, &signature)));
+        // The real client registers uploads through the got instance (same
+        // pipeline as /me): amd64 UA variant, no Experimental flag.
+        let mut headers =
+            self.base_headers(Transport::Got, token, Some(device_id), Some((&timestamp, &signature)));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
@@ -246,8 +292,12 @@ impl RaycastClient {
         let registered: FileRegistration = ensure_success(response, None).await?.json().await?;
 
         // Raw PUT to the presigned URL with exactly the headers the server
-        // handed us (they carry the auth). Failure here fails the upload.
+        // handed us (they carry the auth). The real client issues this PUT
+        // through a bare got instance: no default UA/auth headers, but got
+        // still adds its automatic `accept-encoding`. Failure here fails the
+        // upload.
         let mut put = self.http.put(&registered.direct_upload.url);
+        put = put.header("Accept-Encoding", HeaderValue::from_static("gzip, deflate, br, zstd"));
         for (key, value) in &registered.direct_upload.headers {
             let value = value.as_str().unwrap_or_default();
             put = put.header(key.as_str(), value);
@@ -294,13 +344,14 @@ impl RaycastClient {
         self.get_json(RAYCAST_TRIAL_STATUS_URL, token).await
     }
 
-    /// Shared bearer-only GET returning parsed JSON.
+    /// Shared bearer-only GET returning parsed JSON. The real client issues
+    /// these through the got instance (`Transport::Got`).
     async fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
         token: &str,
     ) -> Result<T, GatewayError> {
-        let mut headers = self.base_headers(token, None, None);
+        let mut headers = self.base_headers(Transport::Got, token, None, None);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         let request = self
             .http

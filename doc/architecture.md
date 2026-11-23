@@ -204,6 +204,8 @@ flowchart TB
 2. ✅ **响应**:**始终 SSE**(无 `stream` 开关);事件为 `reasoning`/`text` 增量、`tool_calls` 终结、`finish_reason`+`usage` 收尾、`event: complete` 终止。
 3. ✅ **think vs 非 think**:think 模型名带 `-reasoning` + 有 `reasoning_effort`,响应含 `reasoning` 增量与 `thought_signature`。
 
+4. ✅ **TLS 指纹**:客户端为 .NET 10 壳 + 内嵌 Node 26.13.1(OpenSSL 3.5.9 + undici),对话请求 ClientHello 为 Node 默认栈(JA3 hash `d67b094811e5145139d7cea5f014309f`,JA4 `t13d5212h1_b262b3658495_8e6e362c5eac`);实测快照与复查方法见 [`raycast-tls-fingerprint-2026-11-22.md`](./raycast-tls-fingerprint-2026-11-22.md)。目前无证据表明后端校验 TLS 指纹,网关 rustls 栈保持现状。
+
 仍待补全:
 
 - ⏳ **签名算法** `x-raycast-signature-v2` 的计算方式(预期复用用户 token + deviceid)。
