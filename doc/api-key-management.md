@@ -120,7 +120,7 @@ API Key 继续接受 `Authorization: Bearer <key>` 和 `x-api-key: <key>`；同�
 
 | 操作 | 请求字段 | 结果 |
 | --- | --- | --- |
-| `list` | `page`、`page_size`、`api_key`、`status`、`validity` 均可选；Key 精确匹配，筛选取交集，`validity` 为 `permanent` 或 `period` | 返回 `Page`，按创建时间、ID 倒序；列表项包含名称、完整及脱敏 Key、状态、并发上限、有效期、额度、两种累计值、已配置模型数量和创建时间 |
+| `list` | `page`、`page_size`、`api_key`、`status`、`validity` 均可选；Key 精确匹配，筛选取交集，`validity` 为 `permanent` 或 `period` | 返回 `Page`，按创建时间升序，创建时间相同时按 ID 升序；列表项包含名称、完整及脱敏 Key、状态、并发上限、有效期、额度、两种累计值、已配置模型数量和创建时间 |
 | `create` | `mode` 为 `random` 或 `custom`；自定义传 `api_key`；可传 `name`、`concurrency_limit`、`starts_at`、`ends_at`、`quota_kind`、`quota_limit` | 返回新建条目，名称默认 `null`，并发上限默认 10，默认启用且模型不限制 |
 | `update` | `id`，以及需变更的 `name`、`enabled`、`concurrency_limit`、`starts_at`、`ends_at`、`quota_kind`、`quota_limit` | 返回更新后的条目。省略字段表示保留原值，名称或时间传 `null` 表示清除对应字段 |
 | `model-options` | `id` | 返回全量模型、模型能力（`abilities`，原样透传上游的能力结构，下线模型为 `null`）、全局别名和选中状态，也包含已选但下线的 ID。面板只展示能力标签。用于预览和配置，不分页 |

@@ -282,8 +282,7 @@ impl ApiKeyStore {
                     }
             })
             .collect();
-        entries
-            .sort_unstable_by_key(|entry| std::cmp::Reverse((entry.row.created_at, &entry.row.id)));
+        entries.sort_unstable_by_key(|entry| (entry.row.created_at, &entry.row.id));
         let total = entries.len() as u64;
         let items = entries
             .into_iter()

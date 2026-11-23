@@ -298,6 +298,32 @@ async fn management_crud_model_catalog_and_exact_route_authorization() {
 }
 
 #[test]
+fn list_orders_by_creation_time_before_paginating() {
+    let state = compact_test_state();
+    state
+        .db
+        .lock()
+        .batch_execute(
+            "INSERT INTO api_keys (id, api_key, enabled, concurrency_limit, quota_kind,
+            used_credits, used_cost, created_at, updated_at) VALUES
+            ('a', 'key-a', 1, 10, 'unlimited', 0, 0, 300, 300),
+            ('c', 'key-c', 1, 10, 'unlimited', 0, 0, 200, 200),
+            ('b', 'key-b', 1, 10, 'unlimited', 0, 0, 200, 200),
+            ('d', 'key-d', 1, 10, 'unlimited', 0, 0, 100, 100)",
+        )
+        .unwrap();
+    let store = ApiKeyStore::new(state.db.clone(), GLOBAL).unwrap();
+
+    for (page, expected_ids) in [(1, ["d", "b"]), (2, ["c", "a"])] {
+        let params = serde_json::from_value(json!({"page": page, "page_size": 2})).unwrap();
+        let result = store.list(params).unwrap();
+        assert_eq!(result.total, 4);
+        let ids: Vec<_> = result.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, expected_ids);
+    }
+}
+
+#[test]
 fn legacy_key_keeps_its_concurrency_and_persists_name_changes() {
     let state = compact_test_state();
     let db = &state.db;
