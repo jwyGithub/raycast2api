@@ -192,7 +192,7 @@ impl AccountDispatcher {
             // 剥附件、文本加占位,请求照发,不让一张图废掉整个推理。
             let mut request = request.clone();
             if !request.pending_uploads.is_empty() {
-                self.upload_attachments(&mut request, &account, &device_id, call)
+                self.upload_attachments(&mut request, &account, &device_id)
                     .await;
             }
             let body = serde_json::to_string(&request)?;
@@ -347,21 +347,18 @@ impl AccountDispatcher {
         request: &mut RaycastChatRequest,
         account: &AccountRow,
         device_id: &str,
-        call: &CallContext,
     ) {
         let pending = std::mem::take(&mut request.pending_uploads);
         for upload in pending {
             let result = self
                 .client
                 .upload_file(
-                    &account.email,
                     &account.access_token,
                     device_id,
                     &request.thread_id,
                     &crate::core::attachment::upload_filename(&upload.media_type, &upload.data),
                     &upload.media_type,
                     &upload.data,
-                    call,
                 )
                 .await;
             match result {

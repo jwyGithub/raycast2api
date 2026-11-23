@@ -196,14 +196,12 @@ impl RaycastClient {
     /// to the chat). The signed POST uses the same account's device id as chat.
     pub(crate) async fn upload_file(
         &self,
-        email: &str,
         token: &str,
         device_id: &str,
         chat_id: &str,
         filename: &str,
         content_type: &str,
         bytes: &[u8],
-        call: &CallContext,
     ) -> Result<String, GatewayError> {
         let checksum = crate::core::attachment::upload_checksum(bytes);
         let body = serde_json::json!({
@@ -235,7 +233,12 @@ impl RaycastClient {
             .headers(headers)
             .body(body)
             .build()?;
-        let response = self.send(request, Some((call, email)), None).await?;
+        // No CallContext here: a file upload is not an inference call and must
+        // not create a statistics Attempt — send() only finalizes chat-stream
+        // attempts, so one started here would be dropped un-finished and
+        // recorded as "cancelled / upstream attempt dropped before a terminal
+        // event" on every image attachment.
+        let response = self.send(request, None, None).await?;
         let registered: FileRegistration = ensure_success(response).await?.json().await?;
 
         // Raw PUT to the presigned URL with exactly the headers the server
