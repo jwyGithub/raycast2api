@@ -5,15 +5,23 @@ use crate::{
     storage::{db::Db, schema::request_logs},
     util::unix_secs,
 };
-use diesel::connection::SimpleConnection;
-use diesel::prelude::*;
+use axum::http::HeaderMap;
+use diesel::{
+    connection::SimpleConnection,
+    dsl::sql,
+    prelude::*,
+    sql_types::{Bool, Text},
+};
+
+use super::context::headers_to_text;
 
 pub const RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS request_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, method TEXT, path TEXT, model TEXT, upstream_model TEXT, effort TEXT, inbound_json TEXT, upstream_json TEXT, response_text TEXT); CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs(created_at);";
-/// 旧库补列;新库或已迁移的库会报 duplicate column,忽略即可。
-const ADD_MODEL: &str = "ALTER TABLE request_logs ADD COLUMN model TEXT";
-const ADD_UPSTREAM_MODEL: &str = "ALTER TABLE request_logs ADD COLUMN upstream_model TEXT";
-const ADD_EFFORT: &str = "ALTER TABLE request_logs ADD COLUMN effort TEXT";
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS request_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL,
+    method TEXT, path TEXT, model TEXT, upstream_model TEXT, effort TEXT,
+    inbound_headers TEXT, inbound_json TEXT, upstream_headers TEXT, upstream_json TEXT,
+    response_headers TEXT, response_text TEXT
+); CREATE INDEX IF NOT EXISTS idx_request_logs_created ON request_logs(created_at);";
 
 /// 客户端请求体里的 effort:chat `reasoning_effort` / messages `output_config.effort` / responses `reasoning.effort`。
 fn request_effort(body: &serde_json::Value) -> Option<&str> {
@@ -34,8 +42,11 @@ struct StoredLog {
     model: Option<String>,
     upstream_model: Option<String>,
     effort: Option<String>,
+    inbound_headers: Option<String>,
     inbound_json: Option<String>,
+    upstream_headers: Option<String>,
     upstream_json: Option<String>,
+    response_headers: Option<String>,
     response_text: Option<String>,
 }
 #[derive(Insertable)]
@@ -47,6 +58,7 @@ struct NewLog<'a> {
     path: Option<&'a str>,
     model: Option<&'a str>,
     effort: Option<&'a str>,
+    inbound_headers: Option<&'a str>,
     inbound_json: Option<&'a str>,
 }
 impl StoredLog {
@@ -59,8 +71,11 @@ impl StoredLog {
             model: self.model,
             upstream_model: self.upstream_model,
             effort: self.effort,
+            inbound_headers: self.inbound_headers,
             inbound_json: self.inbound_json,
+            upstream_headers: self.upstream_headers,
             upstream_json: self.upstream_json,
+            response_headers: self.response_headers,
             response_text: self.response_text,
         }
     }
@@ -71,12 +86,35 @@ pub struct RequestLogStore {
 impl RequestLogStore {
     pub fn new(db: Db) -> Self {
         crate::storage::db::blocking(|| {
-            if let Err(e) = db.lock().batch_execute(SCHEMA) {
+            let migration = db.lock().immediate_transaction(|conn| {
+                conn.batch_execute(SCHEMA)?;
+                for column in [
+                    "model",
+                    "upstream_model",
+                    "effort",
+                    "inbound_headers",
+                    "upstream_headers",
+                    "response_headers",
+                ] {
+                    let exists = diesel::select(
+                        sql::<Bool>(
+                            "EXISTS (SELECT 1 FROM pragma_table_info('request_logs') WHERE name = ",
+                        )
+                        .bind::<Text, _>(column)
+                        .sql(")"),
+                    )
+                    .get_result::<bool>(conn)?;
+                    if !exists {
+                        conn.batch_execute(&format!(
+                            "ALTER TABLE request_logs ADD COLUMN {column} TEXT"
+                        ))?;
+                    }
+                }
+                Ok::<_, diesel::result::Error>(())
+            });
+            if let Err(e) = migration {
                 tracing::error!("request log schema: {e}");
             }
-            let _ = db.lock().batch_execute(ADD_MODEL);
-            let _ = db.lock().batch_execute(ADD_UPSTREAM_MODEL);
-            let _ = db.lock().batch_execute(ADD_EFFORT);
             let store = Self { db };
             if store.cleanup_expired() > 0 {
                 store.vacuum();
@@ -95,31 +133,22 @@ impl RequestLogStore {
         })
     }
     pub fn insert_request(&self, id: &str, method: &str, path: &str, body: &serde_json::Value) {
-        crate::storage::db::blocking(|| {
-            let model = body.get("model").and_then(|m| m.as_str());
-            let effort = request_effort(body);
-            let body = serde_json::to_string_pretty(body).unwrap_or_default();
-            let mut c = self.db.lock();
-            if let Err(e) = diesel::insert_into(request_logs::table)
-                .values(NewLog {
-                    request_id: id,
-                    created_at: unix_secs() as i64,
-                    method: Some(method),
-                    path: Some(path),
-                    model,
-                    effort,
-                    inbound_json: Some(&body),
-                })
-                .on_conflict(request_logs::request_id)
-                .do_nothing()
-                .execute(&mut *c)
-            {
-                tracing::warn!("request log insert ({id}): {e}");
-            }
-        })
+        self.insert_inbound(id, method, path, None, Some(body));
     }
     pub fn insert_request_without_body(&self, id: &str, method: &str, path: &str) {
+        self.insert_inbound(id, method, path, None, None);
+    }
+    pub(crate) fn insert_inbound(
+        &self,
+        id: &str,
+        method: &str,
+        path: &str,
+        headers: Option<&HeaderMap>,
+        body: Option<&serde_json::Value>,
+    ) {
         crate::storage::db::blocking(|| {
+            let headers = headers.map(headers_to_text);
+            let json = body.and_then(|body| serde_json::to_string_pretty(body).ok());
             let mut c = self.db.lock();
             if let Err(e) = diesel::insert_into(request_logs::table)
                 .values(NewLog {
@@ -127,9 +156,12 @@ impl RequestLogStore {
                     created_at: unix_secs() as i64,
                     method: Some(method),
                     path: Some(path),
-                    model: None,
-                    effort: None,
-                    inbound_json: None,
+                    model: body
+                        .and_then(|body| body.get("model"))
+                        .and_then(|m| m.as_str()),
+                    effort: body.and_then(request_effort),
+                    inbound_headers: headers.as_deref(),
+                    inbound_json: json.as_deref(),
                 })
                 .on_conflict(request_logs::request_id)
                 .do_nothing()
@@ -140,11 +172,26 @@ impl RequestLogStore {
         })
     }
     pub fn update_upstream(&self, id: &str, body: &serde_json::Value) {
+        self.write_upstream(id, body, None);
+    }
+    pub(crate) fn record_upstream_request(&self, id: &str, request: &reqwest::Request) {
+        let body = request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .unwrap_or_default();
+        self.write_upstream(
+            id,
+            &super::context::body_to_value(body),
+            Some(request.headers()),
+        );
+    }
+    fn write_upstream(&self, id: &str, body: &serde_json::Value, headers: Option<&HeaderMap>) {
         crate::storage::db::blocking(|| {
             // 从最终发送的请求体提取,避免记录成映射前的客户端模型。
             let upstream_model = body.get("model").and_then(|model| model.as_str());
             let upstream_effort = body.get("reasoning_effort").and_then(|e| e.as_str());
             let body = serde_json::to_string_pretty(body).unwrap_or_default();
+            let headers = headers.map(headers_to_text);
             let mut c = self.db.lock();
             // effort 列形如 "请求(上游)";重试会多次调用,所以只取 '(' 之前的请求侧再重拼。
             let stored: Option<String> = request_logs::table
@@ -170,10 +217,26 @@ impl RequestLogStore {
                         request_logs::upstream_json.eq(Some(body)),
                         request_logs::upstream_model.eq(upstream_model),
                         request_logs::effort.eq(effort),
+                        // 新一轮尝试只覆盖请求侧;响应侧保留到新响应真正到达时才被
+                        // 覆盖,这样重试失败时仍能看到上一轮的响应。
+                        headers.map(|headers| request_logs::upstream_headers.eq(Some(headers))),
                     ))
                     .execute(&mut *c)
             {
                 tracing::warn!("request log upstream ({id}): {e}");
+            }
+        })
+    }
+    pub(crate) fn record_response_headers(&self, id: &str, headers: &HeaderMap) {
+        crate::storage::db::blocking(|| {
+            let headers = headers_to_text(headers);
+            let mut conn = self.db.lock();
+            if let Err(e) =
+                diesel::update(request_logs::table.filter(request_logs::request_id.eq(id)))
+                    .set(request_logs::response_headers.eq(Some(headers)))
+                    .execute(&mut *conn)
+            {
+                tracing::warn!("request log response headers ({id}): {e}");
             }
         })
     }
@@ -394,6 +457,52 @@ mod tests {
         }
     }
     #[test]
+    fn new_upstream_request_keeps_previous_response_until_a_new_one_arrives() {
+        let s = store();
+        s.insert_request_without_body("a", "POST", "/v1/responses");
+        let client = reqwest::Client::new();
+        let request = |attempt: &str| {
+            client
+                .post("http://127.0.0.1/")
+                .header("x-test-attempt", attempt)
+                .body(json!({"model": "mapped-model", "attempt": attempt}).to_string())
+                .build()
+                .unwrap()
+        };
+        s.record_upstream_request("a", &request("first"));
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/event-stream".parse().unwrap());
+        s.record_response_headers("a", &headers);
+        s.update_response("a", "upstream error");
+        s.record_upstream_request("a", &request("retry"));
+
+        let detail = s.detail("a").unwrap();
+        assert_eq!(
+            detail.upstream_headers.as_deref(),
+            Some("x-test-attempt: retry")
+        );
+        assert_eq!(detail.upstream_model.as_deref(), Some("mapped-model"));
+        assert!(detail.upstream_json.unwrap().contains("retry"));
+        // 重试尚未收到响应:上一轮的响应仍保留,便于排查重试为何失败。
+        assert_eq!(
+            detail.response_headers.as_deref(),
+            Some("content-type: text/event-stream")
+        );
+        assert_eq!(detail.response_text.as_deref(), Some("upstream error"));
+
+        // 新响应到达后整体覆盖。
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        s.record_response_headers("a", &headers);
+        s.update_response("a", "ok");
+        let detail = s.detail("a").unwrap();
+        assert_eq!(
+            detail.response_headers.as_deref(),
+            Some("content-type: application/json")
+        );
+        assert_eq!(detail.response_text.as_deref(), Some("ok"));
+    }
+    #[test]
     fn legacy_schema_migration_preserves_rows_and_can_run_repeatedly() {
         for has_model in [false, true] {
             let db = Db::open(":memory:").unwrap();
@@ -420,6 +529,9 @@ mod tests {
             }
             let s = RequestLogStore::new(db.clone());
             let legacy = s.detail("legacy").unwrap();
+            assert!(legacy.inbound_headers.is_none());
+            assert!(legacy.upstream_headers.is_none());
+            assert!(legacy.response_headers.is_none());
             assert_eq!(legacy.model.as_deref(), has_model.then_some("client-model"));
             assert!(legacy.upstream_model.is_none());
             assert_eq!(

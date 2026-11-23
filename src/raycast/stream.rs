@@ -133,12 +133,7 @@ async fn fetch_image_data_url(
     let mut last_error = GatewayError::Internal("no fetch channel configured".into());
     let mut response = None;
     for client in fetch_clients {
-        match client
-            .get(url)
-            .timeout(IMAGE_FETCH_TIMEOUT)
-            .send()
-            .await
-        {
+        match client.get(url).timeout(IMAGE_FETCH_TIMEOUT).send().await {
             Ok(r) if r.status().is_success() => {
                 response = Some(r);
                 break;

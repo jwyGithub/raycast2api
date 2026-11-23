@@ -65,7 +65,29 @@ async fn management_crud_model_catalog_and_exact_route_authorization() {
         )
         .await;
     }
-    let random = api(&app, "create", json!({"mode":"random"}), StatusCode::OK).await;
+    let random = api(
+        &app,
+        "create",
+        json!({"mode":"random","name":"  研发组  ","concurrency_limit":3}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(random["name"], "研发组");
+    assert_eq!(random["concurrency_limit"], 3);
+    api(
+        &app,
+        "create",
+        json!({"mode":"random","name":"名".repeat(65)}),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    api(
+        &app,
+        "create",
+        json!({"mode":"random","name":format!(" {} ", "名".repeat(64))}),
+        StatusCode::OK,
+    )
+    .await;
     let key = random["api_key"].as_str().unwrap();
     assert_eq!(key.len(), 67);
     assert!(key.starts_with("sk-") && key[3..].bytes().all(|b| b.is_ascii_hexdigit()));
@@ -78,7 +100,8 @@ async fn management_crud_model_catalog_and_exact_route_authorization() {
     .await;
     let id = row["id"].clone();
     assert_eq!(row["quota_kind"], "unlimited");
-    assert_eq!(row["concurrency_limit"], 1);
+    assert_eq!(row["concurrency_limit"], 10);
+    assert_eq!(row.get("name"), Some(&Value::Null));
     assert!(row["model_count"].is_null() && row["ends_at"].is_null());
     api(
         &app,
@@ -136,7 +159,8 @@ async fn management_crud_model_catalog_and_exact_route_authorization() {
         )
         .await
         .unwrap();
-    assert_eq!(json_body(response).await["data"][0]["id"], "test-model");
+    let catalog = json_body(response).await;
+    assert_eq!(catalog["data"][0]["id"], "test-model");
     api(
         &app,
         "update-models",
@@ -169,6 +193,14 @@ async fn management_crud_model_catalog_and_exact_route_authorization() {
     let options = api(&app, "model-options", json!({"id":id}), StatusCode::OK).await;
     assert_eq!(options["items"][0]["aliases"][0]["alias"], "my-alias");
     assert_eq!(options["items"][0]["selected"], true);
+    let abilities = &options["items"][0]["abilities"];
+    assert_eq!(abilities, &catalog["data"][0]["abilities"]);
+    assert_eq!(abilities["tools"]["supported"], true);
+    assert_eq!(
+        abilities["reasoning_effort"]["options"],
+        json!(["low", "high"])
+    );
+    assert_eq!(abilities["reasoning_effort"]["default"], "high");
     // 目录里没声明订阅等级的模型按 Pro 处理。
     assert_eq!(options["items"][0]["in_better_ai_subscription"], false);
     // Simulate a catalog refresh after this model was configured.
@@ -183,6 +215,7 @@ async fn management_crud_model_catalog_and_exact_route_authorization() {
     let options = api(&app, "model-options", json!({"id":id}), StatusCode::OK).await;
     assert_eq!(options["items"][1]["offline"], true);
     assert!(options["items"][1]["in_better_ai_subscription"].is_null());
+    assert_eq!(options["items"][1].get("abilities"), Some(&Value::Null));
     let response = request(&app, Method::GET, "/v1/models", Some(KEY), json!(null)).await;
     assert_eq!(json_body(response).await["data"], json!([]));
     let response = request(
@@ -217,7 +250,7 @@ async fn management_crud_model_catalog_and_exact_route_authorization() {
     api(
         &app,
         "update",
-        json!({"id":id,"enabled":false,"starts_at":now+30,"ends_at":now+60}),
+        json!({"id":id,"name":"测试组","enabled":false,"starts_at":now+30,"ends_at":now+60}),
         StatusCode::OK,
     )
     .await;
@@ -242,14 +275,16 @@ async fn management_crud_model_catalog_and_exact_route_authorization() {
     )
     .await;
     assert_eq!(filtered["total"], 1);
+    assert_eq!(filtered["items"][0]["name"], "测试组");
     let row = api(
         &app,
         "update",
-        json!({"id":id,"starts_at":null,"ends_at":null}),
+        json!({"id":id,"name":null,"starts_at":null,"ends_at":null}),
         StatusCode::OK,
     )
     .await;
     assert_eq!(row["status"], "active");
+    assert_eq!(row.get("name"), Some(&Value::Null));
     assert!(row["starts_at"].is_null() && row["ends_at"].is_null());
     api(&app, "delete", json!({"id":id}), StatusCode::OK).await;
     let row = api(
@@ -260,6 +295,49 @@ async fn management_crud_model_catalog_and_exact_route_authorization() {
     )
     .await;
     assert_ne!(row["id"], id);
+}
+
+#[test]
+fn legacy_key_keeps_its_concurrency_and_persists_name_changes() {
+    let state = compact_test_state();
+    let db = &state.db;
+    let row = state
+        .api_keys
+        .create(
+            serde_json::from_value(json!({"mode":"custom","api_key":KEY,"concurrency_limit":1}))
+                .unwrap(),
+            GLOBAL,
+        )
+        .unwrap();
+    db.lock()
+        .batch_execute("ALTER TABLE api_keys DROP COLUMN name")
+        .unwrap();
+
+    let load = || ApiKeyStore::new(db.clone(), GLOBAL).unwrap();
+    let list = |store: &ApiKeyStore| {
+        store
+            .list(serde_json::from_value(json!({})).unwrap())
+            .unwrap()
+            .items
+            .remove(0)
+    };
+    let store = load();
+    let migrated = list(&store);
+    assert_eq!(migrated.id, row.id);
+    assert_eq!(migrated.api_key, KEY);
+    assert_eq!(migrated.concurrency_limit, 1);
+    assert_eq!(migrated.name, None);
+
+    let update_name = |store: &ApiKeyStore, name: &str| {
+        store
+            .update(serde_json::from_value(json!({"id":row.id,"name":name})).unwrap())
+            .unwrap()
+    };
+    update_name(&store, "运维组");
+    let reloaded = load();
+    assert_eq!(list(&reloaded).name.as_deref(), Some("运维组"));
+    assert_eq!(update_name(&reloaded, "  ").name, None);
+    assert_eq!(list(&load()).name, None);
 }
 
 #[tokio::test]

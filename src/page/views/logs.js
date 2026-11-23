@@ -2,6 +2,12 @@ import { LitElement, html } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/li
 import { dayjs, formatDate } from '../utils.js';
 import { message } from '../components.js';
 
+const detailTabs = {
+    inbound_json: { label: '入站请求', headers: 'inbound_headers', headerLabel: '请求头', bodyLabel: '请求正文' },
+    upstream_json: { label: '上游请求', headers: 'upstream_headers', headerLabel: '请求头', bodyLabel: '请求正文' },
+    response_text: { label: '上游响应', headers: 'response_headers', headerLabel: '响应头', bodyLabel: '响应正文' }
+};
+
 class LogsPanel extends LitElement {
     static properties = {
         request: { attribute: false },
@@ -44,10 +50,13 @@ class LogsPanel extends LitElement {
     createRenderRoot() {
         return this;
     }
-    updated() {
+    updated(changed) {
         const dialog = this.querySelector('dialog');
         if (this.detailId && !dialog.open) dialog.showModal();
         else if (!this.detailId && dialog.open) dialog.close();
+        if (changed.has('detailTab')) {
+            for (const region of dialog.querySelectorAll('pre')) region.scrollTop = 0;
+        }
     }
     async load() {
         if (this.loading) return;
@@ -119,7 +128,39 @@ class LogsPanel extends LitElement {
     }
     closeDetail() {
         this.detailId = '';
+        this.detail = null;
         this.detailVersion++;
+    }
+    async copyDetail(text) {
+        const version = this.detailVersion;
+        let copied = false;
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(text);
+                copied = true;
+            }
+        } catch {}
+        if (version !== this.detailVersion || !this.isConnected) return;
+        if (!copied) {
+            const dialog = this.querySelector('dialog');
+            if (!dialog?.open) return;
+            const focus = document.activeElement;
+            const input = document.createElement('textarea');
+            input.value = text;
+            input.readOnly = true;
+            input.style.cssText = 'position:fixed;left:-9999px;top:0';
+            dialog.append(input);
+            try {
+                input.select();
+                input.setSelectionRange(0, text.length);
+                copied = document.execCommand('copy');
+            } catch {} finally {
+                input.remove();
+                focus?.focus();
+            }
+        }
+        if (copied) message('已复制到剪贴板', 'success');
+        else message('复制失败，请选中内容后手动复制。');
     }
     formatBody(value) {
         if (value == null) return '暂无记录';
@@ -129,6 +170,51 @@ class LogsPanel extends LitElement {
         } catch {
             return value;
         }
+    }
+    renderDetailSummary() {
+        const fields = [['请求 ID', this.detailId]];
+        if (this.detail) {
+            const { created_at, method, path, model, upstream_model, effort } = this.detail;
+            fields.push(
+                ['创建时间', formatDate(created_at)],
+                ['请求路径', `${method || '—'} ${path || '—'}`],
+                ['模型', model],
+                ['上游模型', upstream_model],
+                ['推理强度', effort]
+            );
+        }
+        return html`<dl class="grid shrink-0 gap-x-4 overflow-x-auto px-5 py-3 text-left text-xs leading-5 ${this.detail
+            ? 'grid-cols-[minmax(9rem,1.35fr)_minmax(9rem,1.1fr)_minmax(8rem,1fr)_minmax(8rem,1fr)_minmax(8rem,1fr)_minmax(6rem,0.65fr)]'
+            : ''}">
+            ${fields.map(([label, value]) => html`<div class="flex min-w-0 items-baseline gap-1.5">
+                <dt class="shrink-0 whitespace-nowrap text-muted">${label}</dt>
+                <dd class="min-w-0 flex-1 font-mono"><ui-tooltip .content=${value || '—'}></ui-tooltip></dd>
+            </div>`)}
+        </dl>`;
+    }
+    renderDetailContent() {
+        const tab = detailTabs[this.detailTab];
+        const headers = this.detail?.[tab.headers];
+        const body = this.detail?.[this.detailTab];
+        const formattedBody = this.formatBody(body);
+        return html`<div class="log-detail-content grid h-[min(40rem,72dvh)] min-h-52 grid-rows-[minmax(0,1fr)_minmax(0,2fr)] gap-4 p-3 sm:px-5">
+            ${this.renderDetailRegion('headers', tab.headerLabel, headers || '暂无记录', headers)}
+            ${this.renderDetailRegion('body', tab.bodyLabel, formattedBody, body ? formattedBody : '')}
+        </div>`;
+    }
+    renderDetailRegion(kind, label, content, copyText) {
+        return html`<section data-kind=${kind} class="log-region relative flex min-h-0 min-w-0 flex-col rounded-lg border">
+            <h3 class="log-region-label absolute left-2 top-0 -translate-y-1/2 rounded-md px-2 text-xs leading-5 font-semibold">${label}</h3>
+            <button type="button" class="log-region-copy absolute right-2 top-1.5 grid size-7 place-items-center rounded-md disabled:opacity-35"
+                aria-label=${'复制' + label} title=${'复制' + label} ?disabled=${!copyText} @click=${() => this.copyDetail(copyText)}>
+                <svg viewBox="0 0 16 16" class="size-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="5.5" y="5.5" width="8" height="8" rx="1.5"></rect>
+                    <path d="M3 10.5H2.5V4A1.5 1.5 0 0 1 4 2.5h6.5V3"></path>
+                </svg>
+            </button>
+            <pre class="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain rounded-lg whitespace-pre-wrap pb-2.5 pl-3 pr-11 pt-3 font-mono text-xs leading-5 [overflow-wrap:anywhere] focus-visible:outline-offset-[-3px]"
+                tabindex="0" aria-label=${label}>${content}</pre>
+        </section>`;
     }
     bytes(value) {
         if (value == null) return '—';
@@ -232,11 +318,11 @@ class LogsPanel extends LitElement {
                 }}
             ></ui-table>
             <dialog
-                class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-5xl overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
+                class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-7xl overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
                 aria-labelledby="log-detail-title"
                 @close=${this.closeDetail}
             >
-                <div class="flex max-h-[calc(100dvh-34px)] flex-col">
+                <div class="flex max-h-[calc(100dvh-34px)] flex-col overflow-y-auto">
                     <div class="flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3">
                         <h2 id="log-detail-title" class="text-sm font-semibold">日志详情</h2>
                         <button
@@ -247,31 +333,10 @@ class LogsPanel extends LitElement {
                             ×
                         </button>
                     </div>
-                    <div class="shrink-0 space-y-1 px-5 py-3 text-xs text-muted">
-                        <p class="break-all font-mono">${this.detailId}</p>
-                        ${this.detail
-                            ? html`<p class="break-all">
-                                      ${formatDate(this.detail.created_at)} · ${this.detail.method || '—'} ·
-                                      ${this.detail.path || '—'}
-                                  </p>
-                                  <p class="break-all">
-                                      模型：<span class="font-mono text-ink">${this.detail.model || '—'}</span>
-                                  </p>
-                                  <p class="break-all">
-                                      上游模型：<span class="font-mono text-ink">${this.detail.upstream_model || '—'}</span>
-                                  </p>
-                                  <p class="break-all">
-                                      推理强度：<span class="font-mono text-ink">${this.detail.effort || '—'}</span>
-                                  </p>`
-                            : ''}
-                    </div>
+                    ${this.renderDetailSummary()}
                     <div class="flex shrink-0 gap-1 border-b border-line px-5 pb-2" aria-label="日志内容">
-                        ${[
-                            ['inbound_json', '入站请求'],
-                            ['upstream_json', '上游请求'],
-                            ['response_text', '上游响应']
-                        ].map(
-                            ([value, label]) =>
+                        ${Object.entries(detailTabs).map(
+                            ([value, { label }]) =>
                                 html`<button
                                     class="rounded-lg px-3 py-1.5 text-xs ${this.detailTab === value
                                         ? 'bg-brand text-white'
@@ -294,13 +359,7 @@ class LogsPanel extends LitElement {
                                     @button-click=${() => this.openDetail(this.detailId)}
                                 ></ui-button>
                             </div>`
-                          : html`<pre
-                                class="min-h-32 min-w-0 overflow-auto whitespace-pre-wrap break-words bg-slate-50 p-5 font-mono text-xs leading-5"
-                                tabindex="0"
-                                aria-label="日志正文"
-                            >
-${this.formatBody(this.detail?.[this.detailTab])}</pre
-                            >`}
+                          : this.renderDetailContent()}
                 </div>
             </dialog>
         </div>`;

@@ -1,16 +1,9 @@
 import { LitElement, html } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 import { message } from '../components.js';
+import { modelCapabilityColumns, modelTag } from '../components/model-tags.js';
 import { tierIcon } from '../components/tier-icon.js';
 import { formatDate } from '../utils.js';
 
-// 能力标签:[展示名, 判定函数(abilities)];推理强度有单独一列,不在此重复。
-const abilityTags = [
-    ['工具', a => a.tools?.supported],
-    ['视觉', a => a.vision],
-    ['思考', a => a.thinking?.supported],
-    ['联网', a => a.web_search],
-    ['生图', a => a.image_generation]
-];
 // 映射预览与模型配置两个弹窗共用:行形如 { alias, model_id, model_name, created_at }。
 const mappingColumns = [
     { label: '映射名称', class: 'max-w-56 truncate font-mono text-ink', title: r => r.alias, render: r => r.alias },
@@ -311,7 +304,6 @@ class ModelsPanel extends LitElement {
         </dialog>`;
     }
     columns() {
-        const tag = (cls, text, title) => html`<span class="rounded px-1.5 py-0.5 ${cls}" title=${title ?? ''}>${text}</span>`;
         return [
             {
                 label: '模型',
@@ -330,36 +322,14 @@ class ModelsPanel extends LitElement {
                 render: item =>
                     html`${item.provider_name || '—'}<span class="ml-1 font-mono text-[11px] text-muted">${item.provider_brand || ''}</span>`
             },
-            {
-                label: '能力',
-                render: item => {
-                    const tags = abilityTags.filter(([, test]) => test(item.abilities || {}));
-                    return html`<div class="flex gap-1">${tags.length ? tags.map(([label]) => tag('bg-slate-100', label)) : '—'}</div>`;
-                }
-            },
-            {
-                label: '推理强度',
-                render: item => {
-                    const { supported, options = [], default: defaultEffort } = item.abilities?.reasoning_effort || {};
-                    const efforts = supported ? options : [];
-                    return html`<div class="flex gap-1">
-                        ${efforts.length
-                            ? efforts.map(option =>
-                                  option === defaultEffort
-                                      ? tag('bg-emerald-50 text-emerald-700', option, '默认')
-                                      : tag('bg-slate-100', option)
-                              )
-                            : '—'}
-                    </div>`;
-                }
-            },
+            ...modelCapabilityColumns,
             {
                 label: '状态',
                 render: item => {
                     const replacement = item.deprecation_replacement_model_id;
                     return html`<div class="flex gap-1">
-                        ${item.status ? tag('bg-amber-50 text-amber-700', item.status) : ''}
-                        ${replacement ? tag('bg-red-50 text-red-700', '即将下线', '替代模型：' + replacement) : ''}
+                        ${item.status ? modelTag('bg-amber-50 text-amber-700', item.status) : ''}
+                        ${replacement ? modelTag('bg-red-50 text-red-700', '即将下线', '替代模型：' + replacement) : ''}
                         ${item.status || replacement ? '' : html`<span class="text-muted">—</span>`}
                     </div>`;
                 }
@@ -368,7 +338,7 @@ class ModelsPanel extends LitElement {
                 label: '别名',
                 render: item => {
                     const count = item.aliases?.length ?? 0;
-                    return tag(
+                    return modelTag(
                         'tabular-nums ' + (count ? 'bg-sky-50 text-sky-700' : 'bg-slate-100 text-muted'),
                         count,
                         count ? `已映射 ${count} 个别名` : '没有别名映射'

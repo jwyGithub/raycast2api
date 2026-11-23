@@ -115,22 +115,16 @@ pub struct AccountDispatcher {
     accounts: Arc<AccountStore>,
     /// 传输层;额度刷新、token 换新等需要显式 token 的调用直接用它。
     pub(crate) client: RaycastClient,
-    /// 请求日志;附件上传完成后回写真实发出的 wire(fileId 已回填)。
-    log: Option<Arc<RequestLogStore>>,
 }
 
 impl AccountDispatcher {
     pub fn new(accounts: Arc<AccountStore>, client: RaycastClient) -> Self {
-        Self {
-            accounts,
-            client,
-            log: None,
-        }
+        Self { accounts, client }
     }
 
     /// Attach the request-log store (called at startup, after construction).
     pub fn with_log(mut self, log: Arc<RequestLogStore>) -> Self {
-        self.log = Some(log);
+        self.client.log = Some(log);
         self
     }
 
@@ -196,16 +190,6 @@ impl AccountDispatcher {
                     .await;
             }
             let body = serde_json::to_string(&request)?;
-            // 回写真实发出的 wire:附件 fileId 在 send_chat 内才回填,pipeline
-            // 侧预先记录的 upstream_json 是上传前快照,排查附件问题时对不上。
-            if !request.pending_uploads.is_empty()
-                && let Some(log) = &self.log
-            {
-                log.update_upstream(
-                    &debug::current_request_id(),
-                    &serde_json::to_value(&request).unwrap_or_default(),
-                );
-            }
             let mut result = self
                 .client
                 .chat(
@@ -242,6 +226,9 @@ impl AccountDispatcher {
                     let Some(err) = peeked else {
                         return Ok(response);
                     };
+                    if let Some(log) = &self.client.log {
+                        log.update_response(&call.request.request_id, &err.raw);
+                    }
                     let message = err.message();
                     if let Some(attempt) = response.extensions().get::<Attempt>() {
                         attempt.observe_payload(&err.raw);
@@ -391,10 +378,13 @@ impl AccountDispatcher {
                             .content
                             .text
                             .push_str(crate::core::message::IMAGE_OMITTED_PLACEHOLDER);
-                        if let Some(ids) = &mut message.content.attachments {
-                            if ids.is_empty() {
-                                message.content.attachments = None;
-                            }
+                        if message
+                            .content
+                            .attachments
+                            .as_ref()
+                            .is_some_and(Vec::is_empty)
+                        {
+                            message.content.attachments = None;
                         }
                     }
                 }

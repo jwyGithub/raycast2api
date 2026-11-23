@@ -1,5 +1,6 @@
 import { LitElement, html, nothing } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 import { message } from '../components.js';
+import { modelAbilityColumn } from '../components/model-tags.js';
 import { tierIcon } from '../components/tier-icon.js';
 
 const statuses = {
@@ -98,7 +99,8 @@ class ApiKeysPanel extends LitElement {
     }
     openForm(row) {
         this.dialog = { type: 'form', row, draft: {
-            mode: 'random', api_key: '', concurrency_limit: row?.concurrency_limit ?? 1,
+            // 默认并发 10 与后端 ApiKeyStore::create 的默认值保持一致。
+            mode: 'random', api_key: '', name: row?.name ?? '', concurrency_limit: row?.concurrency_limit ?? 10,
             validity: row?.ends_at == null ? 'permanent' : 'period', starts_at: toWallClock(row?.starts_at),
             ends_at: toWallClock(row?.ends_at), quota_kind: row?.quota_kind || 'unlimited', quota_limit: row?.quota_limit || ''
         } };
@@ -120,6 +122,7 @@ class ApiKeysPanel extends LitElement {
             return;
         }
         const payload = {
+            name: draft.name || null,
             concurrency_limit: Number(draft.concurrency_limit), starts_at: starts, ends_at: ends,
             quota_kind: draft.quota_kind, quota_limit: draft.quota_kind === 'unlimited' ? null : draft.quota_limit
         };
@@ -202,6 +205,7 @@ class ApiKeysPanel extends LitElement {
         // 永久：没有结束时间；开始时间可选，未设置时与结束日期一样显示“永久”。
         const day = seconds => seconds == null ? '永久' : displayTime(seconds);
         return [
+            { label: '名称', title: row => row.name, render: row => html`<span class="block max-w-40 truncate">${row.name ?? '—'}</span>` },
             { label: 'API Key', render: row => html`<span class="inline-flex items-center gap-2">
                 <code class="rounded bg-slate-100 px-1.5 py-1 font-mono text-ink">${row.api_key_masked}</code>
                 <button type="button" class=${link} aria-label="复制 API Key" title="复制 API Key" @click=${() => this.copy(row)}>
@@ -257,6 +261,8 @@ class ApiKeysPanel extends LitElement {
                         <input class=${field} type="password" autocomplete="off" minlength="16" maxlength="128" required
                             .value=${draft.api_key} @input=${e => this.setDraft('api_key', e.target.value)}>
                         <span>16 至 128 个字符，不含空格；保存后不可修改。</span></label>` : nothing}`}
+                <label class="grid gap-1 text-xs text-muted">名称（可选）
+                    <input class=${field} type="text" maxlength="64" .value=${draft.name} @input=${e => this.setDraft('name', e.target.value)}></label>
                 <div class="grid gap-3 sm:grid-cols-2">
                     <label class="grid gap-1 text-xs text-muted">并发上限<input class=${field} type="number" min="1" max="4294967295" step="1" required
                         .value=${String(draft.concurrency_limit)} @input=${e => this.setDraft('concurrency_limit', e.target.value)}></label>
@@ -293,16 +299,18 @@ class ApiKeysPanel extends LitElement {
                 render: item => html`<input type="checkbox" aria-label=${'选择模型 ' + item.id} .checked=${selected.has(item.id)}
                     ?disabled=${!!busy} @change=${e => this.selectModel(item.id, e.target.checked)}>`
             }] : []),
-            { label: '模型 ID', class: 'font-mono', render: item => html`<span class="inline-flex items-center gap-2">
-                ${item.in_better_ai_subscription == null ? nothing : tierIcon(item.in_better_ai_subscription)}${item.id}</span>` },
-            { label: '名称', render: item => item.name || '—' },
-            { label: '全局别名', render: item => item.aliases.map(alias => alias.alias).join('、') || '—' }
+            { label: '模型 ID', class: 'font-mono', render: item => html`<div class="flex items-center gap-1">
+                ${item.in_better_ai_subscription == null ? nothing : tierIcon(item.in_better_ai_subscription)}
+                <ui-tooltip class="flex-1" .content=${item.id}></ui-tooltip></div>` },
+            { label: '名称', render: item => html`<ui-tooltip .content=${item.name || '—'}></ui-tooltip>` },
+            { ...modelAbilityColumn, class: 'api-key-model-abilities' },
+            { label: '全局别名', render: item => html`<ui-tooltip .content=${item.aliases.map(alias => alias.alias).join('、') || '—'}></ui-tooltip>` }
         ];
         return html`<p class="mb-3 text-xs leading-5 text-muted">${edit
             ? '全选只包含当前目录中的模型。保存白名单后，新上线的模型需要手动添加；恢复不限制后会自动可用。'
             : (unrestricted ? '不限制，当前可用 ' : '白名单，共配置 ') + rows.length + ' 个模型。'}</p>
             ${edit ? html`<p class="mb-2 text-xs text-muted">${unrestricted ? '当前不限制 · ' : ''}已勾选 ${selected.size} 个模型</p>` : nothing}
-            <ui-table class="max-h-[50dvh]" caption="API Key 可用模型" .columns=${columns} .rows=${rows} empty="当前没有模型"></ui-table>`;
+            <ui-table class="api-key-model-table max-h-[50dvh]" caption="API Key 可用模型" .columns=${columns} .rows=${rows} empty="当前没有模型"></ui-table>`;
     }
     renderDialog() {
         const dialog = this.dialog;
@@ -334,7 +342,7 @@ class ApiKeysPanel extends LitElement {
                 .disabled=${busy} @button-click=${() => this.save(revoke ? 'delete' : 'reset-usage', { id: dialog.row.id }, revoke ? 'API Key 已删除' : '用量已重置')}></ui-button>`;
         }
         return html`<dialog aria-labelledby="api-keys-dialog-title"
-            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] ${dialog?.type === 'models' ? 'max-w-4xl' : 'max-w-lg'} overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
+            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] ${dialog?.type === 'models' ? 'max-w-5xl' : 'max-w-lg'} overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
             @cancel=${event => { event.preventDefault(); this.closeDialog(); }}>
             ${dialog ? html`<div class="flex max-h-[calc(100dvh-34px)] flex-col">
                 <div class="flex shrink-0 items-start justify-between gap-3 border-b border-line px-5 py-3">

@@ -56,10 +56,7 @@ pub struct Thinking {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attachment {
     /// Inline image: media type + raw bytes (base64 already decoded).
-    Inline {
-        media_type: String,
-        data: Vec<u8>,
-    },
+    Inline { media_type: String, data: Vec<u8> },
     /// A remote image URL the client referenced. Resolved (fetched) by the
     /// handler layer before the request enters the pipeline; failures drop
     /// the attachment rather than failing the request.
@@ -129,4 +126,3 @@ impl Message {
 /// reusing it keeps the gateway's requests indistinguishable.
 pub const IMAGE_OMITTED_PLACEHOLDER: &str =
     "[image omitted: the selected model has no vision support]";
-

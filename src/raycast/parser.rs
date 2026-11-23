@@ -52,7 +52,11 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
     // function_call the server already settled — drop it here, log it.
     if data.notification_type.as_deref() == Some("tool_calls") {
         for call in &data.tool_calls {
-            tracing::info!("⇈ remote tool executed server-side: {} ({})", call.name, call.id);
+            tracing::info!(
+                "⇈ remote tool executed server-side: {} ({})",
+                call.name,
+                call.id
+            );
         }
         return Vec::new();
     }
@@ -120,7 +124,9 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
         && !url.is_empty()
     {
         tracing::info!("→ image generated: {url}");
-        events.push(CanonicalEvent::ImageGenerated { url: url.to_string() });
+        events.push(CanonicalEvent::ImageGenerated {
+            url: url.to_string(),
+        });
     }
 
     if let Some(reasoning) = data.reasoning.as_deref()
@@ -290,7 +296,9 @@ mod tests {
             r#"{"complete":true,"finish_reason":"stop","usage":{"input_tokens":5,"output_tokens":2}}"#,
             &mut Vec::new(),
         );
-        assert!(matches!(events.as_slice(), [CanonicalEvent::Finish { usage, .. }] if usage.input_tokens == 5));
+        assert!(
+            matches!(events.as_slice(), [CanonicalEvent::Finish { usage, .. }] if usage.input_tokens == 5)
+        );
     }
 
     /// 服务端已执行的 remote tool_call(notification_type:"tool_calls"):
@@ -303,7 +311,10 @@ mod tests {
             r#"{"text":"","notification":"","notification_type":"tool_calls","tool_calls":[{"name":"gpt_image","arguments":"{\"prompt\":\"cat\"}","id":"call_1"}]}"#,
             &mut notifications,
         );
-        assert!(events.is_empty(), "remote tool calls must not reach the client");
+        assert!(
+            events.is_empty(),
+            "remote tool calls must not reach the client"
+        );
     }
 
     #[test]

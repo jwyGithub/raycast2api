@@ -66,11 +66,9 @@ pub fn model_supports_image_generation(model: &crate::raycast::wire::RaycastRawM
             }
             // Object form: explicit supported/enabled false wins; otherwise
             // presence of the object (e.g. {"model": ...}) means capable.
-            ["supported", "enabled"].iter().all(|k| {
-                flag.get(k)
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true)
-            })
+            ["supported", "enabled"]
+                .iter()
+                .all(|k| flag.get(k).and_then(|v| v.as_bool()).unwrap_or(true))
         })
         .unwrap_or(false)
 }
@@ -103,7 +101,10 @@ pub fn build_chat_request(
 ) -> RaycastChatRequest {
     let mut tools = build_tools(&canonical.tools);
     if model_supports_image_generation
-        && canonical.tools.iter().all(|t| t.name() != IMAGE_GENERATION_TOOL)
+        && canonical
+            .tools
+            .iter()
+            .all(|t| t.name() != IMAGE_GENERATION_TOOL)
     {
         tools.push(json!({
             "type": "remote_tool",
@@ -169,8 +170,7 @@ fn pending_uploads(messages: &[Message]) -> Vec<PendingUpload> {
             if replay_budget == 0 {
                 continue;
             }
-            let crate::core::message::Attachment::Inline { media_type, data } = attachment
-            else {
+            let crate::core::message::Attachment::Inline { media_type, data } = attachment else {
                 // Remote references are resolved by the pipeline before it
                 // reaches here; a leftover one has no bytes to upload.
                 continue;
@@ -431,20 +431,25 @@ fn tool_choice_wire(choice: &ToolChoice) -> String {
 #[cfg(test)]
 mod image_tests {
     use super::*;
-    use base64::Engine;
     use crate::core::message::Attachment;
+    use base64::Engine;
 
     fn sample_png() -> Attachment {
         // 1x1 PNG bytes.
         let data = base64::engine::general_purpose::STANDARD
             .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
             .unwrap();
-        Attachment::Inline { media_type: "image/png".into(), data }
+        Attachment::Inline {
+            media_type: "image/png".into(),
+            data,
+        }
     }
 
     fn request_with(messages: Vec<Message>) -> RaycastChatRequest {
-        let mut canonical =
-            crate::core::request::CanonicalRequest::new(crate::core::protocol::Protocol::ChatCompletions, "m");
+        let mut canonical = crate::core::request::CanonicalRequest::new(
+            crate::core::protocol::Protocol::ChatCompletions,
+            "m",
+        );
         canonical.messages = messages;
         build_chat_request(&canonical, "openai", "test", false)
     }
@@ -453,8 +458,10 @@ mod image_tests {
     /// pending_uploads 是 serde(skip) 侧车,不参与序列化。
     #[test]
     fn plain_text_request_wire_is_unchanged_by_image_support() {
-        let mut canonical =
-            crate::core::request::CanonicalRequest::new(crate::core::protocol::Protocol::ChatCompletions, "m");
+        let mut canonical = crate::core::request::CanonicalRequest::new(
+            crate::core::protocol::Protocol::ChatCompletions,
+            "m",
+        );
         canonical.messages = vec![
             Message::text(Role::System, "Be brief"),
             Message::text(Role::User, "hello"),
@@ -468,7 +475,12 @@ mod image_tests {
             let obj = message.as_object().unwrap();
             assert!(obj.keys().all(|k| k == "role" || k == "content"), "{obj:?}");
             assert!(obj["content"].as_object().unwrap().contains_key("text"));
-            assert!(!obj["content"].as_object().unwrap().contains_key("attachments"));
+            assert!(
+                !obj["content"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("attachments")
+            );
         }
         assert!(request.pending_uploads.is_empty());
     }
@@ -487,7 +499,12 @@ mod image_tests {
         let json = serde_json::to_value(&request).unwrap();
         let messages = json["messages"].as_array().unwrap();
         // wire 上暂无 attachments(等 fileId 回填),文本未动。
-        assert!(!messages[1]["content"].as_object().unwrap().contains_key("attachments"));
+        assert!(
+            !messages[1]["content"]
+                .as_object()
+                .unwrap()
+                .contains_key("attachments")
+        );
         assert_eq!(messages[1]["content"]["text"], "look");
     }
 
@@ -511,7 +528,10 @@ mod image_tests {
         // msg0..msg4 被降级:文本带占位符。
         for (index, wire_message) in wire.iter().enumerate().take(5) {
             let text = wire_message["content"]["text"].as_str().unwrap();
-            assert!(text.contains(crate::core::message::IMAGE_OMITTED_PLACEHOLDER), "msg{index}: {text}");
+            assert!(
+                text.contains(crate::core::message::IMAGE_OMITTED_PLACEHOLDER),
+                "msg{index}: {text}"
+            );
         }
         // msg5 之后文本原样。
         assert_eq!(wire[5]["content"]["text"], "msg5");
@@ -522,8 +542,11 @@ mod image_tests {
     #[test]
     fn thread_id_ignores_attachments() {
         let plain = request_with(vec![Message::text(Role::User, "hi")]);
-        let with_image =
-            request_with(vec![Message::with_attachments(Role::User, "hi", vec![sample_png()])]);
+        let with_image = request_with(vec![Message::with_attachments(
+            Role::User,
+            "hi",
+            vec![sample_png()],
+        )]);
         assert_eq!(plain.thread_id, with_image.thread_id);
     }
 
@@ -543,7 +566,9 @@ mod image_tests {
         };
         let without = build_chat_request(&canonical(), "openai", "test", false);
         assert!(
-            !serde_json::to_string(&without.tools).unwrap().contains("gpt_image"),
+            !serde_json::to_string(&without.tools)
+                .unwrap()
+                .contains("gpt_image"),
             "no ability → no remote tool"
         );
         let with = build_chat_request(&canonical(), "openai", "test", true);
@@ -585,8 +610,7 @@ mod image_tests {
             let json = format!(
                 r#"{{"id":"a","model":"m","provider":"openai","abilities":{{"image_generation":{ability_json}}}}}"#
             );
-            let model: crate::raycast::wire::RaycastRawModel =
-                serde_json::from_str(&json).unwrap();
+            let model: crate::raycast::wire::RaycastRawModel = serde_json::from_str(&json).unwrap();
             model_supports_image_generation(&model)
         };
         assert!(raw("true"));
@@ -597,10 +621,8 @@ mod image_tests {
         assert!(!raw("false"));
         assert!(!raw(r#"{"supported":false}"#));
         // 能力缺失 → false。
-        let model: crate::raycast::wire::RaycastRawModel = serde_json::from_str(
-            r#"{"id":"a","model":"m","provider":"openai"}"#,
-        )
-        .unwrap();
+        let model: crate::raycast::wire::RaycastRawModel =
+            serde_json::from_str(r#"{"id":"a","model":"m","provider":"openai"}"#).unwrap();
         assert!(!model_supports_image_generation(&model));
     }
 }

@@ -1,5 +1,6 @@
 use axum::{Json, extract::State};
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::{
     apikey::wire::{Create, Id, Item, ListParams, Update, UpdateModels},
@@ -44,6 +45,7 @@ struct ModelOption {
     name: Option<String>,
     /// 仅 Pro Plus 可用;已不在目录中的下线模型无此信息,为 null。
     in_better_ai_subscription: Option<bool>,
+    abilities: Option<Value>,
     aliases: Vec<crate::model::store::AliasEntry>,
     selected: bool,
     offline: bool,
@@ -61,7 +63,7 @@ pub(super) async fn model_options(
     let mut aliases = state.aliases.by_model();
     let mut items: Vec<_> = models
         .into_iter()
-        .map(|model| {
+        .map(|mut model| {
             let selected = unrestricted || unavailable.remove(&model.id);
             ModelOption {
                 aliases: aliases.remove(&model.id).unwrap_or_default(),
@@ -70,8 +72,9 @@ pub(super) async fn model_options(
                 name: model
                     .extra
                     .get("name")
-                    .and_then(serde_json::Value::as_str)
+                    .and_then(Value::as_str)
                     .map(str::to_owned),
+                abilities: model.extra.remove("abilities"),
                 selected,
                 offline: false,
             }
@@ -82,6 +85,7 @@ pub(super) async fn model_options(
         id,
         name: None,
         in_better_ai_subscription: None,
+        abilities: None,
         selected: true,
         offline: true,
     }));
@@ -127,7 +131,7 @@ pub(super) async fn reset_usage(
 pub(super) async fn delete(
     State(state): State<SharedState>,
     Json(params): Json<Id>,
-) -> Result<Json<serde_json::Value>, GatewayError> {
+) -> Result<Json<Value>, GatewayError> {
     state.api_keys.delete(&params.id)?;
     Ok(Json(serde_json::json!({ "deleted": true })))
 }

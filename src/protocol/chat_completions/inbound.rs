@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 use super::wire::{ChatCompletionRequest, Content, InboundToolChoice};
-use crate::core::message::{Attachment, Message, Role, ToolCall};
 use crate::core::attachment::from_url_reference;
+use crate::core::message::{Attachment, Message, Role, ToolCall};
 use crate::core::protocol::Protocol;
 use crate::core::request::{CanonicalRequest, ReasoningEffort};
 use crate::core::tools::{ToolChoice, ToolDef};

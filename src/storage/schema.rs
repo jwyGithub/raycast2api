@@ -45,8 +45,11 @@ diesel::table! {
         model -> Nullable<Text>,
         upstream_model -> Nullable<Text>,
         effort -> Nullable<Text>,
+        inbound_headers -> Nullable<Text>,
         inbound_json -> Nullable<Text>,
+        upstream_headers -> Nullable<Text>,
         upstream_json -> Nullable<Text>,
+        response_headers -> Nullable<Text>,
         response_text -> Nullable<Text>,
     }
 }
@@ -82,6 +85,7 @@ diesel::table! {
     api_keys (id) {
         id -> Text,
         api_key -> Text,
+        name -> Nullable<Text>,
         enabled -> Bool,
         concurrency_limit -> BigInt,
         starts_at -> Nullable<BigInt>,

@@ -17,6 +17,12 @@ impl RaycastClient {
             .and_then(|body| body.as_bytes())
             .map(<[u8]>::len);
         let account = context.map(|(_, email)| email);
+        let log = context.and_then(|(call, _)| {
+            self.log
+                .as_deref()
+                .map(|log| (log, call.request.request_id.as_str()))
+        });
+        let mut request_logged = false;
         for (channel, client) in channels {
             let replay = request
                 .try_clone()
@@ -37,6 +43,10 @@ impl RaycastClient {
             } else {
                 None
             };
+            if !request_logged && let Some((log, id)) = log {
+                log.record_upstream_request(id, &replay);
+                request_logged = true;
+            }
             // 失败日志带耗时:瞬间失败(复用到死连接)与等几秒才失败(上游收下
             // 请求后主动断开)是两种不同成因,排查 "connection closed before
             // message completed" 时靠它区分。
@@ -45,6 +55,9 @@ impl RaycastClient {
                 .await
             {
                 Ok(Ok(mut response)) => {
+                    if let Some((log, id)) = log {
+                        log.record_response_headers(id, response.headers());
+                    }
                     if let Some(attempt) = attempt {
                         attempt.set_http_status(response.status().as_u16());
                         response.extensions_mut().insert(attempt);

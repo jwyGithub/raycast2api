@@ -24,7 +24,10 @@ pub enum CanonicalEvent {
     ToolCall(ToolCall),
     /// The upstream started generating an image (`generating_image`
     /// notification). Carries the requested size/count when present.
-    ImageGenerationStarted { size: Option<String>, count: Option<u32> },
+    ImageGenerationStarted {
+        size: Option<String>,
+        count: Option<u32>,
+    },
     /// A generated image is ready at `url`. The stream layer resolves this
     /// into a client-renderable form (markdown with a data URL after fetching
     /// the bytes) — parser stays synchronous, the fetch lives in the stream.

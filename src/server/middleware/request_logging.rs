@@ -81,9 +81,13 @@ async fn capture(state: SharedState, request: Request, next: Next) -> Response {
             Ok(chunk) => chunk,
             Err(error) => {
                 let id = util::new_ulid();
-                state
-                    .log
-                    .insert_request_without_body(&id, parts.method.as_str(), parts.uri.path());
+                state.log.insert_inbound(
+                    &id,
+                    parts.method.as_str(),
+                    parts.uri.path(),
+                    Some(&parts.headers),
+                    None,
+                );
                 let prefix = Bytes::from(captured);
                 let replay = futures_util::stream::iter([Ok(prefix), Err(error)]).chain(body);
                 let request = Request::from_parts(parts, Body::from_stream(replay));
@@ -94,11 +98,12 @@ async fn capture(state: SharedState, request: Request, next: Next) -> Response {
     }
 
     let id = util::new_ulid();
-    state.log.insert_request(
+    state.log.insert_inbound(
         &id,
         parts.method.as_str(),
         parts.uri.path(),
-        &debug::body_to_value(&captured),
+        Some(&parts.headers),
+        Some(&debug::body_to_value(&captured)),
     );
 
     let request = Request::from_parts(parts, Body::from(captured));

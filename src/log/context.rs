@@ -5,6 +5,7 @@
 //! their log writes to the originating inbound request — without threading an
 //! id through every handler and pipeline signature.
 
+use axum::http::HeaderMap;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -30,6 +31,22 @@ pub fn current_request_id() -> String {
 pub fn body_to_value(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).into_owned()))
+}
+
+pub(super) fn headers_to_text(headers: &HeaderMap) -> String {
+    use std::fmt::Write;
+
+    let mut fields: Vec<_> = headers.iter().collect();
+    fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+    let mut text = String::new();
+    for (name, value) in fields {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        let value = String::from_utf8_lossy(value.as_bytes());
+        let _ = write!(text, "{name}: {value}");
+    }
+    text
 }
 
 /// 上游通道登记:request_id → 最终成功送达上游的通道("direct" 或代理 URL)。

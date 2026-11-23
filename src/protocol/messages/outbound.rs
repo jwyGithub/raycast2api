@@ -259,7 +259,8 @@ impl StreamEncoder {
                 let mut frames = self.close_current();
                 self.stop_reason = "tool_use";
                 let index = self.next_index;
-                self.next_index += 1;                frames.push(SseFrame {
+                self.next_index += 1;
+                frames.push(SseFrame {
                     event: "content_block_start",
                     data: json!({
                         "type": "content_block_start",

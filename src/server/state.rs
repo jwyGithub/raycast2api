@@ -277,7 +277,11 @@ pub(crate) fn compact_test_state() -> SharedState {
         fetched_at: Instant::now(),
         models: vec![
             serde_json::from_value(serde_json::json!({
-                "id": "test-model", "model": "test", "provider": "openai", "context": 32
+                "id": "test-model", "model": "test", "provider": "openai", "context": 32,
+                "abilities": {
+                    "tools": {"supported": true},
+                    "reasoning_effort": {"supported": true, "options": ["low", "high"], "default": "high"}
+                }
             }))
             .unwrap(),
         ],

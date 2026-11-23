@@ -111,6 +111,31 @@ test('editing keeps the UTC+8 wall time and submits exact UTC seconds', () => {
     assert.equal(submitted.data.quota_limit, '0.0091105');
 });
 
+test('new keys default to ten slots and existing names can be changed or cleared', () => {
+    const panel = mount('views/api-keys.js');
+    let submitted;
+    panel.save = (path, data) => { submitted = { path, data }; };
+    const submit = () => panel.submitForm({ preventDefault() {} });
+
+    panel.openForm();
+    assert.equal(panel.dialog.draft.name, '');
+    submit();
+    assert.equal(submitted.path, 'create');
+    assert.equal(submitted.data.name, null);
+    assert.equal(submitted.data.concurrency_limit, 10);
+
+    panel.openForm({ ...key, name: '研发组', concurrency_limit: 1 });
+    assert.equal(panel.dialog.draft.name, '研发组');
+    panel.setDraft('name', '运维组');
+    submit();
+    assert.equal(submitted.path, 'update');
+    assert.equal(submitted.data.name, '运维组');
+    assert.equal(submitted.data.concurrency_limit, 1);
+    panel.setDraft('name', '');
+    submit();
+    assert.equal(submitted.data.name, null);
+});
+
 test('switching a timed key to permanent clears both start and end times', () => {
     const panel = mount('views/api-keys.js');
     const start = Date.parse('2026-03-07T18:30:07Z') / 1000;
@@ -122,6 +147,27 @@ test('switching a timed key to permanent clears both start and end times', () =>
     assert.equal(submitted.path, 'update');
     assert.equal(submitted.data.starts_at, null);
     assert.equal(submitted.data.ends_at, null);
+});
+
+test('model selection and preview show capabilities and pass full aliases to the tooltip', () => {
+    const modelAbilityColumn = { label: '能力', render: () => '视觉' };
+    const panel = mount('views/api-keys.js', { modelAbilityColumn });
+    const aliases = [{ alias: 'very-long-alias-'.repeat(10) }, { alias: 'second-alias' }];
+    const item = { id: 'model', name: 'Model', aliases, selected: true };
+
+    for (const edit of [true, false]) {
+        panel.dialog = { items: [item], selected: new Set([item.id]), edit };
+        const table = panel.renderModels();
+        const columns = table.values.find(Array.isArray);
+        assert.deepEqual(Array.from(columns.slice(edit ? 1 : 0), col => col.label), ['模型 ID', '名称', '能力', '全局别名']);
+        assert.equal(columns.find(col => col.label === '能力').render, modelAbilityColumn.render);
+
+        const aliasColumn = columns.find(col => col.label === '全局别名');
+        const tooltip = aliasColumn.render(item);
+        assert.match(tooltip.parts[0], /<ui-tooltip .content=/);
+        assert.equal(tooltip.values[0], aliases.map(alias => alias.alias).join('、'));
+        assert.equal(aliasColumn.render({ aliases: [] }).values[0], '—');
+    }
 });
 
 test('used quota renders the real credits and cost on one line with two decimals', () => {

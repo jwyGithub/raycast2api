@@ -126,6 +126,9 @@ async fn list_and_detail_round_trip() {
     assert_eq!(arr[0]["upstream_model"], "upstream-m");
     assert!(arr[0].get("inbound_json").is_none());
     assert!(arr[0].get("response_text").is_none());
+    for key in ["inbound_headers", "upstream_headers", "response_headers"] {
+        assert!(arr[0].get(key).is_none());
+    }
     assert!(arr[0]["response_bytes"].as_i64().unwrap() > 0);
 
     // 详情:三体齐全。

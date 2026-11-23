@@ -68,7 +68,10 @@ pub(crate) async fn run<O: OutboundAdapter>(
                     .text
                     .push_str(crate::core::message::IMAGE_OMITTED_PLACEHOLDER);
             }
-            tracing::info!(dropped, "image attachments dropped: model lacks vision support");
+            tracing::info!(
+                dropped,
+                "image attachments dropped: model lacks vision support"
+            );
         }
     }
     let events = events(state, &request, model, "inference", accounting, None).await?;
@@ -141,7 +144,7 @@ fn model_vision_formats(model: &RaycastRawModel) -> Vec<&'static str> {
     if formats.get("supported").and_then(|s| s.as_bool()) == Some(true) {
         return SUPPORTED.to_vec();
     }
-    let list = formats
+    formats
         .get("formats")
         .and_then(|f| f.as_array())
         .map(|array| {
@@ -151,8 +154,7 @@ fn model_vision_formats(model: &RaycastRawModel) -> Vec<&'static str> {
                 .filter_map(|f| SUPPORTED.iter().find(|s| s == &&f).copied())
                 .collect()
         })
-        .unwrap_or_default();
-    list
+        .unwrap_or_default()
 }
 
 /// Fetch every [`Attachment::Remote`] in the request's user messages, replacing
@@ -173,9 +175,7 @@ async fn resolve_remote_attachments(
                 .iter()
                 .enumerate()
                 .filter_map(move |(a, attachment)| match attachment {
-                    crate::core::message::Attachment::Remote { url } => {
-                        Some((m, a, url.clone()))
-                    }
+                    crate::core::message::Attachment::Remote { url } => Some((m, a, url.clone())),
                     _ => None,
                 })
         })
@@ -249,7 +249,8 @@ pub(crate) async fn events(
     call.accounting = accounting;
     let usage_key = UsageKey::new(request);
 
-    // 记录发给上游的请求体(与入站请求按 request id 关联)。
+    // 先记录请求体,覆盖尚未发出网络请求就失败的路径(无可用账号、缺
+    // device_id 等);真正发出时 `RaycastClient::send` 会用最终 wire 与请求头覆盖。
     state.log.update_upstream(
         &crate::log::context::current_request_id(),
         &serde_json::to_value(&raycast_request).unwrap_or_default(),

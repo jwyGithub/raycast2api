@@ -24,7 +24,9 @@ pub fn from_url_reference(url: &str) -> Option<Attachment> {
     }
     let url = url.trim();
     if url.starts_with("https://") {
-        return Some(Attachment::Remote { url: url.to_string() });
+        return Some(Attachment::Remote {
+            url: url.to_string(),
+        });
     }
     None
 }
@@ -79,7 +81,11 @@ pub async fn fetch_url(client: &reqwest::Client, url: &str) -> Option<Attachment
     }
     let started = std::time::Instant::now();
     let result = async {
-        let response = client.get(url).timeout(std::time::Duration::from_secs(30)).send().await?;
+        let response = client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await?;
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -104,14 +110,23 @@ pub async fn fetch_url(client: &reqwest::Client, url: &str) -> Option<Attachment
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "fetched remote image attachment"
             );
-            Some(Attachment::Inline { media_type, data: bytes.to_vec() })
+            Some(Attachment::Inline {
+                media_type,
+                data: bytes.to_vec(),
+            })
         }
         Ok((_, bytes)) => {
-            tracing::warn!(bytes = bytes.len(), "remote image exceeds fetch cap, dropped");
+            tracing::warn!(
+                bytes = bytes.len(),
+                "remote image exceeds fetch cap, dropped"
+            );
             None
         }
         Err(error) => {
-            tracing::warn!("remote image fetch failed, dropped: {}", crate::error::error_chain(&error));
+            tracing::warn!(
+                "remote image fetch failed, dropped: {}",
+                crate::error::error_chain(&error)
+            );
             None
         }
     }
@@ -210,8 +225,14 @@ mod tests {
     fn sniff_recognizes_magic_bytes() {
         let png = BASE64.decode(PNG_B64).unwrap();
         assert_eq!(sniff("", &png).as_deref(), Some("image/png"));
-        assert_eq!(sniff("application/octet-stream", &png).as_deref(), Some("image/png"));
-        assert_eq!(sniff("binary", b"\xFF\xD8\xFFrest").as_deref(), Some("image/jpeg"));
+        assert_eq!(
+            sniff("application/octet-stream", &png).as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            sniff("binary", b"\xFF\xD8\xFFrest").as_deref(),
+            Some("image/jpeg")
+        );
         assert_eq!(sniff("", b"GIF89a..."), Some("image/gif".to_string()));
         assert_eq!(sniff("", b"RIFF1234WEBP"), Some("image/webp".to_string()));
         assert_eq!(sniff("", b"plain text"), None);

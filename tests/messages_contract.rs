@@ -611,8 +611,12 @@ fn tool_result_is_error_is_kept_and_marked_upstream() {
         "claude-x",
     );
     canonical.messages = messages;
-    let built =
-        raycast2api::raycast::builder::build_chat_request(&canonical, "anthropic", "claude-x", false);
+    let built = raycast2api::raycast::builder::build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude-x",
+        false,
+    );
     let err_msg = built
         .messages
         .iter()

@@ -5,7 +5,9 @@ use std::sync::{
 };
 
 use axum::http::StatusCode;
-use diesel::{connection::SimpleConnection, prelude::*, sqlite::SqliteConnection};
+use diesel::{
+    connection::SimpleConnection, dsl::sql, prelude::*, sql_types::Bool, sqlite::SqliteConnection,
+};
 
 use super::{KeyId, Permit, invalid_key, model_not_found, wire::*};
 use crate::{
@@ -21,6 +23,7 @@ use crate::{
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY NOT NULL,
     api_key TEXT NOT NULL UNIQUE,
+    name TEXT,
     enabled INTEGER NOT NULL,
     concurrency_limit INTEGER NOT NULL CHECK(concurrency_limit > 0),
     starts_at INTEGER,
@@ -39,6 +42,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS api_keys (
 struct Row {
     id: String,
     api_key: String,
+    name: Option<String>,
     enabled: bool,
     concurrency_limit: i64,
     starts_at: Option<i64>,
@@ -121,6 +125,7 @@ impl Entry {
             id: r.id.clone(),
             api_key: key.clone(),
             api_key_masked: mask_api_key(key),
+            name: r.name.clone(),
             enabled: r.enabled,
             status: self.status(now),
             concurrency_limit: r.concurrency_limit,
@@ -146,8 +151,17 @@ impl ApiKeyStore {
     pub fn new(db: Db, global: &str) -> Result<Self, String> {
         let rows = blocking(|| {
             let mut conn = db.lock();
-            conn.batch_execute(SCHEMA)?;
-            k::table.select(Row::as_select()).load::<Row>(&mut *conn)
+            conn.immediate_transaction(|conn| {
+                conn.batch_execute(SCHEMA)?;
+                let has_name = diesel::select(sql::<Bool>(
+                    "EXISTS (SELECT 1 FROM pragma_table_info('api_keys') WHERE name = 'name')",
+                ))
+                .get_result::<bool>(conn)?;
+                if !has_name {
+                    conn.batch_execute("ALTER TABLE api_keys ADD COLUMN name TEXT")?;
+                }
+                k::table.select(Row::as_select()).load::<Row>(conn)
+            })
         })
         .map_err(|error| format!("could not load managed API keys: {error}"))?;
         let mut cache = HashMap::new();
@@ -305,8 +319,10 @@ impl ApiKeyStore {
         let mut row = Row {
             id: new_ulid(),
             api_key,
+            name: normalize_name(params.name),
             enabled: true,
-            concurrency_limit: i64::from(params.concurrency_limit.unwrap_or(1)),
+            // 默认并发 10 与控制台新增表单的默认值(page/views/api-keys.js)保持一致。
+            concurrency_limit: i64::from(params.concurrency_limit.unwrap_or(10)),
             starts_at: params.starts_at,
             ends_at: params.ends_at,
             quota_kind: params.quota_kind.unwrap_or_default().as_str().into(),
@@ -353,6 +369,9 @@ impl ApiKeyStore {
     pub fn update(&self, change: Update) -> Result<Item, GatewayError> {
         self.edit(&change.id, |entry| {
             let row = &mut entry.row;
+            if let Some(value) = change.name {
+                row.name = normalize_name(value);
+            }
             if let Some(value) = change.enabled {
                 row.enabled = value;
             }
@@ -487,7 +506,24 @@ impl ApiKeyStore {
     }
 }
 
+fn normalize_name(value: Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+const MAX_NAME_CHARS: usize = 64;
+
 fn validate(row: &mut Row) -> Result<(), GatewayError> {
+    if row
+        .name
+        .as_deref()
+        .is_some_and(|name| name.chars().count() > MAX_NAME_CHARS)
+    {
+        return Err(bad("名称不能超过 64 个字符。"));
+    }
     if row.concurrency_limit == 0 {
         return Err(bad("并发上限必须是正整数。"));
     }

@@ -60,6 +60,7 @@ pub(crate) struct ListParams {
 pub(crate) struct Create {
     pub mode: Mode,
     pub api_key: Option<String>,
+    pub name: Option<String>,
     pub concurrency_limit: Option<u32>,
     pub starts_at: Option<i64>,
     pub ends_at: Option<i64>,
@@ -71,6 +72,8 @@ pub(crate) struct Create {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Update {
     pub id: String,
+    #[serde(default, deserialize_with = "nullable")]
+    pub name: Option<Option<String>>,
     pub enabled: Option<bool>,
     pub concurrency_limit: Option<u32>,
     #[serde(default, deserialize_with = "nullable")]
@@ -107,6 +110,7 @@ pub(crate) struct Item {
     pub id: String,
     pub api_key: String,
     pub api_key_masked: String,
+    pub name: Option<String>,
     pub enabled: bool,
     pub status: Status,
     pub concurrency_limit: i64,

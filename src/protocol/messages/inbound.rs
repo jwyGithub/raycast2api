@@ -257,12 +257,10 @@ fn push_user(
     for block in blocks {
         match block {
             ContentBlock::Text { text: chunk } => append_text(&mut text, &chunk),
-            ContentBlock::Image { source } => {
-                match resolve_image_source(&source) {
-                    Some(attachment) => attachments.push(attachment),
-                    None => tracing::warn!("unsupported image source in /v1/messages, dropped"),
-                }
-            }
+            ContentBlock::Image { source } => match resolve_image_source(&source) {
+                Some(attachment) => attachments.push(attachment),
+                None => tracing::warn!("unsupported image source in /v1/messages, dropped"),
+            },
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,

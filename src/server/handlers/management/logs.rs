@@ -42,7 +42,7 @@ pub async fn list(
     Ok(Json(result).into_response())
 }
 
-/// `POST /v1/logs/detail` — 详情(三体全文);不存在 404。
+/// `POST /v1/logs/detail` — 头部和正文详情;不存在 404。
 pub async fn detail(
     State(state): State<SharedState>,
     Json(params): Json<DetailParams>,

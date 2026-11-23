@@ -350,10 +350,17 @@ async fn upstream_fixture() -> (
             listener,
             axum::Router::new().route(
                 "/",
-                axum::routing::post(|| async {
-                    format!(
-                        "data: {}\n\n",
-                        json!({"text":"summary or answer", "finish_reason":"stop","usage":usage()})
+                axum::routing::post(|headers: axum::http::HeaderMap| async move {
+                    let mut response_headers = axum::http::HeaderMap::new();
+                    response_headers.insert("x-upstream-accept", headers["accept"].clone());
+                    response_headers.append("set-cookie", "a=secret-cookie".parse().unwrap());
+                    response_headers.append("set-cookie", "b=secret-cookie".parse().unwrap());
+                    (
+                        response_headers,
+                        format!(
+                            "data: {}\n\n",
+                            json!({"text":"summary or answer", "finish_reason":"stop","usage":usage()})
+                        ),
                     )
                 }),
             ),
@@ -403,12 +410,15 @@ async fn three_protocols_capture_metadata_for_streaming_and_non_streaming_reques
                 .header("content-type", "application/json")
                 .header("x-api-key", "test-key")
                 .header("x-forwarded-for", "192.0.2.1")
+                .header("x-test-repeat", "first")
+                .header("x-test-repeat", "second")
                 .body(Body::from(body.to_string()))
                 .unwrap();
             request.extensions_mut().insert(ConnectInfo(
                 "198.51.100.8:5678".parse::<SocketAddr>().unwrap(),
             ));
-            let response = build_router(state.clone()).oneshot(request).await.unwrap();
+            let app = build_router(state.clone());
+            let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(
                 response.status(),
                 StatusCode::OK,
@@ -434,7 +444,50 @@ async fn three_protocols_capture_metadata_for_streaming_and_non_streaming_reques
             );
             assert_eq!(row.api_key.as_deref(), Some("test-key"));
             assert_ne!(row.request_id, "-");
-            assert!(state.log.detail(&row.request_id).is_some());
+            let (status, detail) = query(
+                &app,
+                "/v1/logs/detail",
+                json!({"request_id":row.request_id}),
+                true,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let detail = &detail["data"];
+            let inbound = detail["inbound_headers"].as_str().unwrap();
+            assert!(inbound.lines().any(|line| line == "x-api-key: test-key"));
+            assert!(inbound.contains("x-test-repeat: first\nx-test-repeat: second"));
+            let upstream = detail["upstream_headers"].as_str().unwrap();
+            assert!(
+                upstream
+                    .lines()
+                    .any(|line| line == "accept: application/json")
+            );
+            assert!(
+                upstream
+                    .lines()
+                    .any(|line| line == "authorization: Bearer fixture-token")
+            );
+            assert!(
+                upstream
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("x-raycast-signature-v2: "))
+                    .any(|value| !value.is_empty() && value != "[REDACTED]")
+            );
+            let response = detail["response_headers"].as_str().unwrap();
+            assert!(response.contains("x-upstream-accept: application/json"));
+            assert_eq!(
+                response
+                    .lines()
+                    .filter(|line| line.starts_with("set-cookie: "))
+                    .collect::<Vec<_>>(),
+                ["set-cookie: a=secret-cookie", "set-cookie: b=secret-cookie"]
+            );
+            assert!(
+                detail["response_text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("summary or answer")
+            );
             assert_eq!(
                 serde_json::from_str::<Value>(row.usage_json.as_ref().unwrap()).unwrap(),
                 usage()

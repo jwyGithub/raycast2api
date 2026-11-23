@@ -15,6 +15,7 @@ use crate::config::{
     USER_AGENT_POST,
 };
 use crate::error::GatewayError;
+use crate::log::store::RequestLogStore;
 use crate::signature::calculate_signature_v2;
 use crate::statistics::{Attempt, CallContext, store::StatisticsStore};
 use crate::util::unix_secs;
@@ -33,6 +34,7 @@ pub struct RaycastClient {
     pub(super) proxies: Vec<(String, Client)>,
     pub(crate) settings: Arc<Settings>,
     pub(crate) statistics: Arc<StatisticsStore>,
+    pub(crate) log: Option<Arc<RequestLogStore>>,
     #[cfg(test)]
     pub(crate) chat_url: Option<String>,
     #[cfg(test)]
@@ -47,6 +49,7 @@ impl RaycastClient {
             proxies,
             settings,
             statistics,
+            log: None,
             #[cfg(test)]
             chat_url: None,
             #[cfg(test)]
@@ -59,14 +62,10 @@ impl RaycastClient {
     /// [`chat`](Self::chat) does: Proxy mode never direct, fallback orders
     /// proxies first.
     pub(crate) fn fetch_channels(&self) -> Vec<Client> {
-        crate::proxies::channels(
-            self.settings.proxies_mode,
-            &self.http,
-            &self.proxies,
-        )
-        .into_iter()
-        .map(|(_, client)| client.clone())
-        .collect()
+        crate::proxies::channels(self.settings.proxies_mode, &self.http, &self.proxies)
+            .into_iter()
+            .map(|(_, client)| client.clone())
+            .collect()
     }
 
     /// Common headers shared by every request. `signed` selects the POST
@@ -166,7 +165,13 @@ impl RaycastClient {
             .build()?;
         let response = self.send(request, Some((call, email)), reserved).await?;
         let attempt = response.extensions().get::<Attempt>().cloned();
-        let result = ensure_success(response).await;
+        let result = ensure_success(
+            response,
+            self.log
+                .as_deref()
+                .map(|log| (log, call.request.request_id.as_str())),
+        )
+        .await;
         if let (Err(error), Some(attempt)) = (&result, attempt) {
             attempt.fail(error);
         }
@@ -222,8 +227,7 @@ impl RaycastClient {
             &body,
             &self.settings.raycast_signature_secret,
         );
-        let mut headers =
-            self.base_headers(token, Some(device_id), Some((&timestamp, &signature)));
+        let mut headers = self.base_headers(token, Some(device_id), Some((&timestamp, &signature)));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
@@ -239,7 +243,7 @@ impl RaycastClient {
         // recorded as "cancelled / upstream attempt dropped before a terminal
         // event" on every image attachment.
         let response = self.send(request, None, None).await?;
-        let registered: FileRegistration = ensure_success(response).await?.json().await?;
+        let registered: FileRegistration = ensure_success(response, None).await?.json().await?;
 
         // Raw PUT to the presigned URL with exactly the headers the server
         // handed us (they carry the auth). Failure here fails the upload.
@@ -252,10 +256,7 @@ impl RaycastClient {
             .body(bytes.to_vec())
             .timeout(self.settings.upstream_timeout())
             .build()?;
-        self.http
-            .execute(put_request)
-            .await?
-            .error_for_status()?;
+        self.http.execute(put_request).await?.error_for_status()?;
 
         Ok(registered.id)
     }
@@ -308,20 +309,26 @@ impl RaycastClient {
             .timeout(self.settings.upstream_timeout())
             .build()?;
         let response = self.send(request, None, None).await?;
-        let response = ensure_success(response).await?;
+        let response = ensure_success(response, None).await?;
         Ok(response.json().await?)
     }
 }
 
 /// Turn a non-2xx upstream response into a [`GatewayError::Upstream`]
 /// (401 gets the dedicated [`GatewayError::TokenInvalid`] variant).
-async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, GatewayError> {
+async fn ensure_success(
+    response: reqwest::Response,
+    log: Option<(&RequestLogStore, &str)>,
+) -> Result<reqwest::Response, GatewayError> {
     if response.status().is_success() {
         return Ok(response);
     }
     let status = response.status().as_u16();
     let attempt = response.extensions().get::<Attempt>().cloned();
     let mut message = response.text().await.unwrap_or_default();
+    if let Some((log, id)) = log {
+        log.update_response(id, &message);
+    }
     if let Some(attempt) = attempt {
         attempt.observe_payload(&message);
     }
