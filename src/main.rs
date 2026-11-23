@@ -88,14 +88,14 @@ async fn run() -> Result<(), String> {
         .interrupt_unfinished()
         .expect("failed to recover unfinished statistics");
 
-    // 启动立即刷新一遍账号额度,之后每 6 小时一遍;失败只记日志。
+    // 启动后等待一个刷新周期再首次刷新账号额度。
     {
         let accounts = accounts;
         let client = client;
         tokio::spawn(async move {
             loop {
-                raycast2api::account::quota_refresh::refresh_all(&accounts, &client).await;
                 tokio::time::sleep(raycast2api::account::quota_refresh::REFRESH_INTERVAL).await;
+                raycast2api::account::quota_refresh::refresh_all(&accounts, &client).await;
             }
         });
     }

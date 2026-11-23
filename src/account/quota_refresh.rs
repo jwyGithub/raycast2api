@@ -4,8 +4,8 @@
 //! 用词约定:本模块管 **额度刷新**(quota refresh,查额度/决策可用性);
 //! token 换新(renewal,oauth token 轮换)在 [`crate::account::token_renewal`]。
 //!
-//! 由 `main` 装配调用:启动立即一遍,
-//! 之后每 [`REFRESH_INTERVAL`] 一遍;`POST /v1/accounts/refresh` 可手动刷新单个账号。
+//! 由 `main` 定时调用，启动后等待 [`REFRESH_INTERVAL`] 再执行首次刷新。
+//! `POST /v1/accounts/refresh` 可手动刷新单个账号。
 
 use std::sync::Arc;
 use std::time::Duration;
