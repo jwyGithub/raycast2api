@@ -313,7 +313,12 @@ mod tests {
         client.proxies = vec![("dead".into(), dead())];
         assert_eq!(
             client
-                .send(get(&client), crate::raycast::client::Transport::Got, None, None)
+                .send(
+                    get(&client),
+                    crate::raycast::client::Transport::Got,
+                    None,
+                    None
+                )
                 .await
                 .unwrap()
                 .status(),
@@ -323,7 +328,12 @@ mod tests {
         mode(&mut client, ProxyMode::Proxy);
         assert!(
             client
-                .send(get(&client), crate::raycast::client::Transport::Got, None, None)
+                .send(
+                    get(&client),
+                    crate::raycast::client::Transport::Got,
+                    None,
+                    None
+                )
                 .await
                 .is_err()
         );
@@ -331,7 +341,12 @@ mod tests {
         client.proxies = vec![("dead".into(), dead()), ("ok".into(), direct_ok())];
         assert_eq!(
             client
-                .send(get(&client), crate::raycast::client::Transport::Got, None, None)
+                .send(
+                    get(&client),
+                    crate::raycast::client::Transport::Got,
+                    None,
+                    None
+                )
                 .await
                 .unwrap()
                 .status(),
@@ -360,12 +375,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new().route("/", get(|| async { "ok" })),
-            )
-            .await
-            .unwrap();
+            axum::serve(listener, Router::new().route("/", get(|| async { "ok" })))
+                .await
+                .unwrap();
         });
         let state = crate::server::state::compact_test_state();
         let mut client = state.dispatcher.client.clone();

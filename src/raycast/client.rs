@@ -77,10 +77,14 @@ impl RaycastClient {
     /// proxies first. Uses the chat (h2-capable) pool — the real client
     /// downloads these through the same Node process as chat.
     pub(crate) fn fetch_channels(&self) -> Vec<Client> {
-        crate::proxies::channels(self.settings.proxies_mode, &self.chat_http, &self.chat_proxies)
-            .into_iter()
-            .map(|(_, client)| client.clone())
-            .collect()
+        crate::proxies::channels(
+            self.settings.proxies_mode,
+            &self.chat_http,
+            &self.chat_proxies,
+        )
+        .into_iter()
+        .map(|(_, client)| client.clone())
+        .collect()
     }
 
     /// Common headers shared by every request, aligned to the real client's
@@ -178,8 +182,12 @@ impl RaycastClient {
             &self.settings.raycast_signature_secret,
         );
 
-        let mut headers =
-            self.base_headers(Transport::ChatFetch, token, Some(device_id), Some((&timestamp, &signature)));
+        let mut headers = self.base_headers(
+            Transport::ChatFetch,
+            token,
+            Some(device_id),
+            Some((&timestamp, &signature)),
+        );
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         // The real client sends `application/json` even though the response is
         // SSE (capture 2026-11-20); `text/event-stream` is a fingerprint.
@@ -266,8 +274,12 @@ impl RaycastClient {
         );
         // The real client registers uploads through the got instance (same
         // pipeline as /me): amd64 UA variant, no Experimental flag.
-        let mut headers =
-            self.base_headers(Transport::Got, token, Some(device_id), Some((&timestamp, &signature)));
+        let mut headers = self.base_headers(
+            Transport::Got,
+            token,
+            Some(device_id),
+            Some((&timestamp, &signature)),
+        );
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
@@ -291,7 +303,10 @@ impl RaycastClient {
         // still adds its automatic `accept-encoding`. Failure here fails the
         // upload.
         let mut put = self.http.put(&registered.direct_upload.url);
-        put = put.header("Accept-Encoding", HeaderValue::from_static("gzip, deflate, br, zstd"));
+        put = put.header(
+            "Accept-Encoding",
+            HeaderValue::from_static("gzip, deflate, br, zstd"),
+        );
         for (key, value) in &registered.direct_upload.headers {
             let value = value.as_str().unwrap_or_default();
             put = put.header(key.as_str(), value);

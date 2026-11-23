@@ -144,7 +144,10 @@ pub fn build_clients(proxies: &[String], timeout: std::time::Duration) -> Vec<(S
 }
 
 /// [`build_clients`] 的 chat(h2 能力)变体。
-pub fn build_chat_clients(proxies: &[String], timeout: std::time::Duration) -> Vec<(String, Client)> {
+pub fn build_chat_clients(
+    proxies: &[String],
+    timeout: std::time::Duration,
+) -> Vec<(String, Client)> {
     build_clients_for(proxies, timeout, Transport::ChatFetch)
 }
 

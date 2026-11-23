@@ -81,7 +81,8 @@ mod tests {
             // chat() executes on the chat pool — both pools must point at the
             // loopback test server (request *building* also uses chat_http).
             inner.dispatcher.client.http = reqwest::Client::builder().no_proxy().build().unwrap();
-            inner.dispatcher.client.chat_http = reqwest::Client::builder().no_proxy().build().unwrap();
+            inner.dispatcher.client.chat_http =
+                reqwest::Client::builder().no_proxy().build().unwrap();
             inner.dispatcher.client.chat_url = Some(format!("http://{address}/"));
             inner
                 .accounts

@@ -33,7 +33,8 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
         proxies: Vec::new(),
         proxies_mode: raycast2api::proxies::ProxyMode::Direct,
     });
-    let client = raycast2api::raycast::client::RaycastClient::new(settings.clone(), statistics.clone());
+    let client =
+        raycast2api::raycast::client::RaycastClient::new(settings.clone(), statistics.clone());
     let state = Arc::new(
         AppState::new(raycast2api::server::state::AppDeps {
             settings,
