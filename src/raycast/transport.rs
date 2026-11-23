@@ -3,14 +3,21 @@ use super::client::RaycastClient;
 use crate::{error::GatewayError, log::context as debug, proxies::ProxyMode};
 impl RaycastClient {
     /// 所有端点共享通道顺序；仅网络错误换通道，HTTP 业务错误不重放。
+    ///
+    /// `transport` 同时决定用哪组 HTTP 客户端:chat 请求走 h2 能力组
+    /// (对齐真实客户端的 undici fetch),其余端点走 HTTP/1.1 组(对齐 got)。
     pub(super) async fn send(
         &self,
         request: reqwest::Request,
+        transport: super::client::Transport,
         context: Option<(&crate::statistics::CallContext, &str)>,
         mut reserved: Option<crate::statistics::Attempt>,
     ) -> Result<reqwest::Response, GatewayError> {
-        let channels =
-            crate::proxies::channels(self.settings.proxies_mode, &self.http, &self.proxies);
+        let (direct, proxies) = match transport {
+            super::client::Transport::ChatFetch => (&self.chat_http, &self.chat_proxies),
+            super::client::Transport::Got => (&self.http, &self.proxies),
+        };
+        let channels = crate::proxies::channels(self.settings.proxies_mode, direct, proxies);
         let mut last = None;
         let body_bytes = request
             .body()
@@ -121,6 +128,17 @@ impl RaycastClient {
         // OAuth rotation cannot safely replay after an ambiguous transport failure.
         Ok(http.execute(request).await?)
     }
+
+    /// All non-chat endpoints: got pipeline (HTTP/1.1-only clients).
+    pub(super) async fn send_got(
+        &self,
+        request: reqwest::Request,
+        context: Option<(&crate::statistics::CallContext, &str)>,
+        reserved: Option<crate::statistics::Attempt>,
+    ) -> Result<reqwest::Response, GatewayError> {
+        self.send(request, super::client::Transport::Got, context, reserved)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -166,7 +184,12 @@ mod tests {
             .build()
             .unwrap();
         let response = client
-            .send(request, Some((&call, "a@example.com")), None)
+            .send(
+                request,
+                crate::raycast::client::Transport::Got,
+                Some((&call, "a@example.com")),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(state.statistics.list(&Default::default()).unwrap().total, 2);
@@ -181,7 +204,12 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(30),
-                client.send(request, Some((&call, "b@example.com")), None)
+                client.send(
+                    request,
+                    crate::raycast::client::Transport::Got,
+                    Some((&call, "b@example.com")),
+                    None
+                )
             )
             .await
             .is_err()
@@ -234,7 +262,7 @@ mod tests {
             .unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.send(request, None, None),
+            client.send(request, crate::raycast::client::Transport::Got, None, None),
         )
         .await
         .unwrap();
@@ -285,7 +313,7 @@ mod tests {
         client.proxies = vec![("dead".into(), dead())];
         assert_eq!(
             client
-                .send(get(&client), None, None)
+                .send(get(&client), crate::raycast::client::Transport::Got, None, None)
                 .await
                 .unwrap()
                 .status(),
@@ -293,12 +321,17 @@ mod tests {
         );
         // proxy:代理全挂即失败,不回退直连(直连本身是通的)。
         mode(&mut client, ProxyMode::Proxy);
-        assert!(client.send(get(&client), None, None).await.is_err());
+        assert!(
+            client
+                .send(get(&client), crate::raycast::client::Transport::Got, None, None)
+                .await
+                .is_err()
+        );
         // proxy:第二个代理可用则换用成功。
         client.proxies = vec![("dead".into(), dead()), ("ok".into(), direct_ok())];
         assert_eq!(
             client
-                .send(get(&client), None, None)
+                .send(get(&client), crate::raycast::client::Transport::Got, None, None)
                 .await
                 .unwrap()
                 .status(),
@@ -313,7 +346,69 @@ mod tests {
             .get(format!("http://{address}/"))
             .build()
             .unwrap();
-        assert!(client.send(request, None, None).await.is_err());
+        assert!(
+            client
+                .send(request, crate::raycast::client::Transport::Got, None, None)
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_transport_selects_the_chat_pool_not_the_got_pool() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/", get(|| async { "ok" })),
+            )
+            .await
+            .unwrap();
+        });
+        let state = crate::server::state::compact_test_state();
+        let mut client = state.dispatcher.client.clone();
+        // got 池指向死客户端:ChatFetch 若误用 got 池,请求必失败;
+        // 正确选中 chat 池(loopback)则成功。
+        let dead = || {
+            reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+                .build()
+                .unwrap()
+        };
+        let ok = || reqwest::Client::builder().no_proxy().build().unwrap();
+        client.http = dead();
+        client.proxies = vec![];
+        client.chat_http = ok();
+        client.chat_proxies = vec![];
+        let request = client
+            .chat_http
+            .get(format!("http://{address}/"))
+            .build()
+            .unwrap();
+        let response = client
+            .send(
+                request,
+                crate::raycast::client::Transport::ChatFetch,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        // 反向:Got 走死掉的 got 池,必须失败(证明两池确实分离)。
+        let request = client
+            .http
+            .get(format!("http://{address}/"))
+            .build()
+            .unwrap();
+        assert!(
+            client
+                .send(request, crate::raycast::client::Transport::Got, None, None)
+                .await
+                .is_err()
+        );
         server.abort();
     }
 }

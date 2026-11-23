@@ -245,7 +245,7 @@ mod tests {
             proxies_mode: crate::proxies::ProxyMode::Direct,
         });
         let client =
-            RaycastClient::new(reqwest::Client::new(), settings.clone(), statistics.clone());
+            RaycastClient::new(settings.clone(), statistics.clone());
         let state = Arc::new(
             AppState::new(crate::server::state::AppDeps {
                 settings,

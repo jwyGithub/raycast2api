@@ -28,8 +28,6 @@ async fn run() -> Result<(), String> {
             )
         })?;
 
-    let http = raycast2api::proxies::direct_client(settings.upstream_timeout());
-
     let db = raycast2api::storage::db::Db::open(&settings.accounts_db)
         .map_err(|e| format!("accounts db error: {e}"))?;
     let accounts = Arc::new(raycast2api::account::store::AccountStore::new(db.clone()));
@@ -65,7 +63,7 @@ async fn run() -> Result<(), String> {
         });
     }
 
-    let client = RaycastClient::new(http, settings.clone(), statistics.clone());
+    let client = RaycastClient::new(settings.clone(), statistics.clone());
     let redis = raycast2api::storage::redis_store::connect_from_env()
         .await
         .map_err(|error| format!("Redis configuration error: {error}"))?;

@@ -263,7 +263,7 @@ pub(crate) fn compact_test_state() -> SharedState {
         proxies: Vec::new(),
         proxies_mode: crate::proxies::ProxyMode::Direct,
     });
-    let client = RaycastClient::new(reqwest::Client::new(), settings.clone(), statistics.clone());
+    let client = RaycastClient::new(settings.clone(), statistics.clone());
     let mut state = AppState::new(AppDeps {
         settings,
         client,

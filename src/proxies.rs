@@ -70,32 +70,95 @@ pub fn validate(
     Ok((mode, proxies))
 }
 
-/// 上游客户端的共享基础配置:连接/读取超时 + 连接池空闲回收。
-fn base_builder(timeout: std::time::Duration) -> reqwest::ClientBuilder {
-    Client::builder()
-        .connect_timeout(timeout)
-        .read_timeout(timeout)
-        .pool_idle_timeout(crate::config::UPSTREAM_POOL_IDLE_TIMEOUT)
+/// 真实客户端的两条出站 HTTP 管道(逆向 `backend/index.mjs` + 内嵌 Node 实测,
+/// 2026-11-23;详见 doc/raycast-tls-fingerprint-2026-11-22.md §4.2)。
+///
+/// 放在本模块而非 `raycast::client`:两条管道的 **HTTP 版本差异(h2 vs
+/// HTTP/1.1)是传输层/代理构建关注点**,`base_builder` 按它分叉 ALPN 行为;
+/// UA/请求头语义只是管道的派生属性。避免低层 `proxies` 依赖高层 `raycast`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// AI 对话(`POST /ai/chat_completions`):内嵌 Node 的 undici `fetch`。
+    /// UA 用 `x-Windows Version` 变体;undici 自动补 `accept-language: *`、
+    /// `sec-fetch-mode: cors`、`accept-encoding: br, gzip, deflate, zstd`;
+    /// ALPN 全量协商,服务端选 h2 即 h2。
+    ChatFetch,
+    /// 其余 API(got 实例,`prefixUrl .../api/v1`):/me、/ai/credits、
+    /// models、`ai/files` 注册、oauth/token 等。UA 用 `x-Windows-amd64`
+    /// 变体;got 自动补 `accept-encoding: gzip, deflate, br, zstd`,不补
+    /// accept-language / sec-fetch-mode;真实客户端无 ALPN 扩展、纯
+    /// HTTP/1.1,`http1_only()` 锁定。
+    Got,
 }
 
-/// 直连客户端。显式 `no_proxy`:`direct` / 回退直连必须是真直连,
+impl Transport {
+    /// got/undici 自动写入的 `accept-encoding`(实测,顺序即发包顺序)。
+    pub fn accept_encoding(self) -> &'static str {
+        match self {
+            Self::ChatFetch => "br, gzip, deflate, zstd",
+            Self::Got => "gzip, deflate, br, zstd",
+        }
+    }
+}
+
+/// 上游客户端的共享基础配置:连接/读取超时 + 连接池空闲回收。
+///
+/// 注意:代理模式下每个代理会按管道各建一个客户端(连接池 ×2),这是
+/// 双管道对齐的固有成本,不是泄漏。
+fn base_builder(timeout: std::time::Duration, transport: Transport) -> reqwest::ClientBuilder {
+    let builder = Client::builder()
+        .connect_timeout(timeout)
+        .read_timeout(timeout)
+        .pool_idle_timeout(crate::config::UPSTREAM_POOL_IDLE_TIMEOUT);
+    match transport {
+        // chat:与 undici fetch 一致,ALPN 全量协商,服务端选 h2 即 h2。
+        Transport::ChatFetch => builder,
+        // got 系:真实客户端无 ALPN 扩展、纯 HTTP/1.1,锁定 http1。
+        Transport::Got => builder.http1_only(),
+    }
+}
+
+/// got 管道直连客户端(HTTP/1.1-only,ClientHello 无 ALPN 扩展,对齐真实
+/// 客户端的 got 实例)。显式 `no_proxy`:`direct` / 回退直连必须是真直连,
 /// 不能被 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 等环境变量悄悄接管。
 pub fn direct_client(timeout: std::time::Duration) -> Client {
-    base_builder(timeout)
+    base_builder(timeout, Transport::Got)
         .no_proxy()
         .build()
         .expect("failed to build HTTP client")
 }
 
-/// 每个代理一个共享客户端(连接池复用),与 `proxies` 一一对应;
-/// 标签已去掉账号密码,可安全写入日志。构造失败视为配置错误,启动即崩。
+/// chat(undici fetch 管道)直连客户端:h2 能力版。
+pub fn direct_chat_client(timeout: std::time::Duration) -> Client {
+    base_builder(timeout, Transport::ChatFetch)
+        .no_proxy()
+        .build()
+        .expect("failed to build HTTP chat client")
+}
+
+/// got 管道代理客户端(HTTP/1.1-only):每个代理一个共享客户端(连接池复用),
+/// 与 `proxies` 一一对应;标签已去掉账号密码,可安全写入日志。构造失败视为
+/// 配置错误,启动即崩。
 pub fn build_clients(proxies: &[String], timeout: std::time::Duration) -> Vec<(String, Client)> {
+    build_clients_for(proxies, timeout, Transport::Got)
+}
+
+/// [`build_clients`] 的 chat(h2 能力)变体。
+pub fn build_chat_clients(proxies: &[String], timeout: std::time::Duration) -> Vec<(String, Client)> {
+    build_clients_for(proxies, timeout, Transport::ChatFetch)
+}
+
+fn build_clients_for(
+    proxies: &[String],
+    timeout: std::time::Duration,
+    transport: Transport,
+) -> Vec<(String, Client)> {
     proxies
         .iter()
         .map(|url| {
             let proxy = reqwest::Proxy::all(url)
                 .unwrap_or_else(|e| panic!("invalid proxy '{}': {e}", redact(url)));
-            let client = base_builder(timeout)
+            let client = base_builder(timeout, transport)
                 .proxy(proxy)
                 .build()
                 .unwrap_or_else(|e| panic!("failed to build proxy client '{}': {e}", redact(url)));

@@ -567,6 +567,9 @@ mod tests {
             }
             let mut dispatcher = state.dispatcher.clone();
             dispatcher.client.http = reqwest::Client::builder().no_proxy().build().unwrap();
+            // send_chat executes on the chat pool; replace it too or the
+            // original (empty-settings) pool would silently be exercised.
+            dispatcher.client.chat_http = reqwest::Client::builder().no_proxy().build().unwrap();
             dispatcher.client.chat_url = Some(format!("http://{address}/"));
             let request = crate::core::request::CanonicalRequest::new(
                 crate::core::protocol::Protocol::Responses,

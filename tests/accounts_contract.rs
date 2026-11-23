@@ -35,11 +35,7 @@ fn app_with_api_key(api_key: &str) -> (axum::Router, Arc<AccountStore>) {
         proxies_mode: raycast2api::proxies::ProxyMode::Direct,
     });
     let log_store = Arc::new(raycast2api::log::store::RequestLogStore::new(db.clone()));
-    let client = raycast2api::raycast::client::RaycastClient::new(
-        reqwest::Client::new(),
-        settings.clone(),
-        statistics.clone(),
-    );
+    let client = raycast2api::raycast::client::RaycastClient::new(settings.clone(), statistics.clone());
     let state = Arc::new(
         raycast2api::server::state::AppState::new(raycast2api::server::state::AppDeps {
             settings,

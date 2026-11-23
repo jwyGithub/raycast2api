@@ -26,38 +26,22 @@ use super::wire::{
     RaycastRawModel, RaycastSseError, RaycastTrialStatus,
 };
 
-/// 真实客户端的两条出站 HTTP 管道(逆向 `backend/index.mjs` + 内嵌 Node 实测,
-/// 2026-11-23):两者对 User-Agent 变体和自动头(`accept-encoding` 等)的处理
-/// 不同,请求头必须按管道对齐。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Transport {
-    /// AI 对话(`POST /ai/chat_completions`):内嵌 Node 的 undici `fetch`。
-    /// UA 用 `x-Windows Version` 变体;undici 自动补 `accept-language: *`、
-    /// `sec-fetch-mode: cors`、`accept-encoding: br, gzip, deflate, zstd`。
-    ChatFetch,
-    /// 其余 API(got 实例,`prefixUrl .../api/v1`):/me、/ai/credits、
-    /// models、`ai/files` 注册等。UA 用 `x-Windows-amd64` 变体;got 自动补
-    /// `accept-encoding: gzip, deflate, br, zstd`(brotli/zstd 能力开关按
-    /// Node 版本),不补 accept-language / sec-fetch-mode。
-    Got,
-}
+pub use crate::proxies::Transport;
 
-impl Transport {
-    /// got/undici 自动写入的 `accept-encoding`(实测,顺序即发包顺序)。
-    fn accept_encoding(self) -> &'static str {
-        match self {
-            Self::ChatFetch => "br, gzip, deflate, zstd",
-            Self::Got => "gzip, deflate, br, zstd",
-        }
-    }
-}
-
-/// Cheap-to-clone handle to the Raycast backend (wraps a shared `reqwest::Client`).
+/// Cheap-to-clone handle to the Raycast backend. Carries **two** client pools
+/// mirroring the real client's transports (see [`Transport`]): `http` /
+/// `proxies` are HTTP/1.1-only (got pipeline: /me, oauth, file registration),
+/// `chat_http` / `chat_proxies` negotiate h2 (undici fetch pipeline: chat).
+/// All four are built internally from `settings` — callers cannot mix pools.
 #[derive(Clone)]
 pub struct RaycastClient {
     pub(crate) http: Client,
     /// 代理客户端链,与 `settings.proxies` 一一对应;通道顺序由 `proxies_mode` 决定。
-    pub(super) proxies: Vec<(String, Client)>,
+    pub(crate) proxies: Vec<(String, Client)>,
+    /// chat 专用直连客户端(h2 能力,对齐 undici fetch)。
+    pub(crate) chat_http: Client,
+    /// chat 专用代理客户端链(h2 能力)。
+    pub(crate) chat_proxies: Vec<(String, Client)>,
     pub(crate) settings: Arc<Settings>,
     pub(crate) statistics: Arc<StatisticsStore>,
     pub(crate) log: Option<Arc<RequestLogStore>>,
@@ -68,11 +52,15 @@ pub struct RaycastClient {
 }
 
 impl RaycastClient {
-    pub fn new(http: Client, settings: Arc<Settings>, statistics: Arc<StatisticsStore>) -> Self {
-        let proxies = crate::proxies::build_clients(&settings.proxies, settings.upstream_timeout());
+    /// Build all four pools internally: got pipeline (HTTP/1.1-only) and chat
+    /// pipeline (h2-capable), each with its own proxy chain when configured.
+    pub fn new(settings: Arc<Settings>, statistics: Arc<StatisticsStore>) -> Self {
+        let timeout = settings.upstream_timeout();
         Self {
-            http,
-            proxies,
+            http: crate::proxies::direct_client(timeout),
+            proxies: crate::proxies::build_clients(&settings.proxies, timeout),
+            chat_http: crate::proxies::direct_chat_client(timeout),
+            chat_proxies: crate::proxies::build_chat_clients(&settings.proxies, timeout),
             settings,
             statistics,
             log: None,
@@ -86,9 +74,10 @@ impl RaycastClient {
     /// Fetch clients in proxy-channel order, for auxiliary upstream downloads
     /// (generated-image inlining) that must respect the proxy policy the way
     /// [`chat`](Self::chat) does: Proxy mode never direct, fallback orders
-    /// proxies first.
+    /// proxies first. Uses the chat (h2-capable) pool — the real client
+    /// downloads these through the same Node process as chat.
     pub(crate) fn fetch_channels(&self) -> Vec<Client> {
-        crate::proxies::channels(self.settings.proxies_mode, &self.http, &self.proxies)
+        crate::proxies::channels(self.settings.proxies_mode, &self.chat_http, &self.chat_proxies)
             .into_iter()
             .map(|(_, client)| client.clone())
             .collect()
@@ -200,13 +189,18 @@ impl RaycastClient {
         let url = self.chat_url.as_deref().unwrap_or(RAYCAST_API_URL);
         #[cfg(not(test))]
         let url = RAYCAST_API_URL;
+        // Build and execute on the same (chat) pool: RequestBuilder::build()
+        // is pool-independent today, but pairing them keeps any future
+        // pool-level defaults from silently not applying.
         let request = self
-            .http
+            .chat_http
             .post(url)
             .headers(headers)
             .body(body.to_owned())
             .build()?;
-        let response = self.send(request, Some((call, email)), reserved).await?;
+        let response = self
+            .send(request, Transport::ChatFetch, Some((call, email)), reserved)
+            .await?;
         let attempt = response.extensions().get::<Attempt>().cloned();
         let result = ensure_success(
             response,
@@ -288,7 +282,7 @@ impl RaycastClient {
         // attempts, so one started here would be dropped un-finished and
         // recorded as "cancelled / upstream attempt dropped before a terminal
         // event" on every image attachment.
-        let response = self.send(request, None, None).await?;
+        let response = self.send_got(request, None, None).await?;
         let registered: FileRegistration = ensure_success(response, None).await?.json().await?;
 
         // Raw PUT to the presigned URL with exactly the headers the server
@@ -359,7 +353,7 @@ impl RaycastClient {
             .headers(headers)
             .timeout(self.settings.upstream_timeout())
             .build()?;
-        let response = self.send(request, None, None).await?;
+        let response = self.send_got(request, None, None).await?;
         let response = ensure_success(response, None).await?;
         Ok(response.json().await?)
     }
