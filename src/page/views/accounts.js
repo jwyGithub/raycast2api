@@ -34,13 +34,29 @@ class AccountCard extends LitElement {
     render() {
         const a = this.account || {};
         const cooling = a.cooldown_until && dayjs.unix(a.cooldown_until).isAfter(dayjs());
-        const state = !a.available ? '不可用' : cooling ? '冷却中' : '可用';
-        const status = !a.available ? 'unavailable' : cooling ? 'cooldown' : 'available';
+        const enabled = a.enabled !== false;
+        const state = !enabled ? '已停用' : !a.available ? '不可用' : cooling ? '冷却中' : '可用';
+        const status = !enabled ? 'disabled' : !a.available ? 'unavailable' : cooling ? 'cooldown' : 'available';
         const error = a.unavailable_reason || a.error || '';
-        const action = name =>
+        const action = (name, value) =>
             this.dispatchEvent(
-                new CustomEvent('account-action', { detail: { action: name, email: a.email }, bubbles: true, composed: true })
+                new CustomEvent('account-action', {
+                    detail: { action: name, email: a.email, value },
+                    bubbles: true,
+                    composed: true
+                })
             );
+        const commitPriority = e => {
+            // 严格解析:拒绝 "12abc"、"1e3"、小数与超出 i32 的值;非法输入回退为当前值。
+            const raw = e.target.value.trim();
+            const next = /^-?\d+$/.test(raw) ? Number(raw) : NaN;
+            if (Number.isSafeInteger(next) && next >= -2147483648 && next <= 2147483647) {
+                if (next !== (a.priority ?? 0)) action('priority', next);
+            } else {
+                message('优先级必须是 -2147483648 到 2147483647 之间的整数。');
+                e.target.value = String(a.priority ?? 0);
+            }
+        };
         return html`<article
             class="h-full overflow-hidden rounded-xl border border-line bg-white p-0 hover:border-[#c9ced7] flex flex-col"
             aria-label=${(a.email || '未知账号') + '，' + state}
@@ -64,7 +80,7 @@ class AccountCard extends LitElement {
                               >`
                             : ''}
                         <span
-                            class="inline-flex shrink-0 items-center gap-[5px] rounded-md px-[7px] py-[3px] text-xs font-medium before:size-[5px] before:rounded-full before:bg-current data-[state=available]:bg-emerald-50 data-[state=available]:text-emerald-700 data-[state=cooldown]:bg-amber-50 data-[state=cooldown]:text-amber-700 data-[state=unavailable]:bg-red-50 data-[state=unavailable]:text-red-700"
+                            class="inline-flex shrink-0 items-center gap-[5px] rounded-md px-[7px] py-[3px] text-xs font-medium before:size-[5px] before:rounded-full before:bg-current data-[state=available]:bg-emerald-50 data-[state=available]:text-emerald-700 data-[state=cooldown]:bg-amber-50 data-[state=cooldown]:text-amber-700 data-[state=unavailable]:bg-red-50 data-[state=unavailable]:text-red-700 data-[state=disabled]:bg-slate-100 data-[state=disabled]:text-slate-600"
                             data-state=${status}
                             >${state}</span
                         >
@@ -96,17 +112,38 @@ class AccountCard extends LitElement {
                             <dt>额度同步</dt>
                             <dd><ui-tooltip .content=${this.date(a.info_fetched_at)}></ui-tooltip></dd>
                         </div>
+                        <div class="min-w-0">
+                            <dt>优先级</dt>
+                            <dd>
+                                <input
+                                    type="number"
+                                    step="1"
+                                    min="-2147483648"
+                                    max="2147483647"
+                                    data-priority-email=${a.email || ''}
+                                    aria-label=${'优先级，' + (a.email || '')}
+                                    title="数值越大越优先；高优先级有可用账号时不用低优先级账号"
+                                    class="w-20 rounded-md border border-line bg-white px-1.5 py-0.5 text-xs tabular-nums text-ink outline-none focus:border-brand disabled:opacity-50"
+                                    .value=${String(a.priority ?? 0)}
+                                    ?disabled=${this.busy}
+                                    @change=${commitPriority}
+                                    @keydown=${e => e.key === 'Enter' && e.target.blur()}
+                                />
+                            </dd>
+                        </div>
                     </dl>
                 </div>
                 <div
-                    class="mt-2 min-w-0 rounded-lg px-2 py-1.5 text-xs leading-[18px] data-[state=available]:bg-emerald-50 data-[state=available]:text-emerald-700 data-[state=cooldown]:bg-amber-50 data-[state=cooldown]:text-amber-700 data-[state=unavailable]:bg-red-50 data-[state=unavailable]:text-red-700"
+                    class="mt-2 min-w-0 rounded-lg px-2 py-1.5 text-xs leading-[18px] data-[state=available]:bg-emerald-50 data-[state=available]:text-emerald-700 data-[state=cooldown]:bg-amber-50 data-[state=cooldown]:text-amber-700 data-[state=unavailable]:bg-red-50 data-[state=unavailable]:text-red-700 data-[state=disabled]:bg-slate-100 data-[state=disabled]:text-slate-600"
                     data-state=${status}
                 >
                     <ui-tooltip
                         .content=${error ||
-                        (cooling
-                            ? '预计恢复：' + this.date(a.cooldown_until) + '（' + this.cooldownLeft(a.cooldown_until) + '后）'
-                            : '无')}
+                        (!enabled
+                            ? '已停用，不参与调度'
+                            : cooling
+                              ? '预计恢复：' + this.date(a.cooldown_until) + '（' + this.cooldownLeft(a.cooldown_until) + '后）'
+                              : '无')}
                     ></ui-tooltip>
                 </div>
             </div>
@@ -116,14 +153,20 @@ class AccountCard extends LitElement {
                 <ui-button
                     class="inline-flex"
                     label="刷新额度"
-                    .disabled=${this.busy}
+                    .disabled=${this.busy || !enabled || cooling}
                     @button-click=${() => action('refresh')}
                 ></ui-button
                 ><ui-button
                     class="inline-flex"
                     label="恢复"
-                    .disabled=${this.busy || (!cooling && a.available)}
+                    .disabled=${this.busy || !enabled || (!cooling && a.available)}
                     @button-click=${() => action('restore')}
+                ></ui-button>
+                <ui-button
+                    class="inline-flex"
+                    label=${enabled ? '停用' : '启用'}
+                    .disabled=${this.busy}
+                    @button-click=${() => action('toggle', !enabled)}
                 ></ui-button>
                 <ui-button
                     class="inline-flex"
@@ -142,7 +185,8 @@ const filters = [
     ['all', '全部状态'],
     ['available', '可用'],
     ['cooldown', '冷却中'],
-    ['unavailable', '不可用']
+    ['unavailable', '不可用'],
+    ['disabled', '已停用']
 ];
 
 class AccountsPanel extends LitElement {
@@ -160,7 +204,8 @@ class AccountsPanel extends LitElement {
         error: { state: true },
         dialog: { state: true },
         source: { state: true },
-        importing: { state: true }
+        importing: { state: true },
+        dragActive: { state: true }
     };
     constructor() {
         super();
@@ -177,7 +222,8 @@ class AccountsPanel extends LitElement {
             error: '',
             dialog: false,
             source: '',
-            importing: false
+            importing: false,
+            dragActive: false
         });
     }
     createRenderRoot() {
@@ -221,6 +267,27 @@ class AccountsPanel extends LitElement {
         } finally {
             this.loading = false;
         }
+    }
+    // 读取一个或多个 .json 文件,合并为账号数组写入文本框,由用户确认后再导入。
+    async readJsonFiles(fileList) {
+        const files = [...(fileList || [])];
+        if (!files.length) return;
+        if (files.some(file => !/\.json$/i.test(file.name) && file.type !== 'application/json')) {
+            message('只支持 .json 文件。');
+            return;
+        }
+        const records = [];
+        for (const file of files) {
+            try {
+                const parsed = JSON.parse(await file.text());
+                records.push(...(Array.isArray(parsed) ? parsed : [parsed]));
+            } catch {
+                message(file.name + ' 不是有效的 JSON 文件。');
+                return;
+            }
+        }
+        this.source = JSON.stringify(records, null, 2);
+        message('已读取 ' + files.length + ' 个文件，共 ' + records.length + ' 个账号，确认后导入。', 'success');
     }
     async importAccounts() {
         let records;
@@ -277,11 +344,27 @@ class AccountsPanel extends LitElement {
         this.load();
     }
     async accountAction(e) {
-        const { action, email } = e.detail;
-        if (this.workingEmail) return;
+        const { action, email, value } = e.detail;
+        const resetPriority = () => {
+            // Lit 对未变化的绑定值不会重写 DOM,须主动回退未保存的输入。
+            const input = this.querySelector(`input[data-priority-email="${CSS.escape(email)}"]`);
+            if (input) input.value = String(this.accounts.find(x => x.email === email)?.priority ?? 0);
+        };
+        if (this.workingEmail) {
+            if (action === 'priority') resetPriority();
+            message('有操作进行中，请稍后再试。');
+            return;
+        }
         if (action === 'delete' && !confirm('确定删除账号 ' + email + ' 吗？')) return;
         this.workingEmail = email;
         try {
+            if (action === 'toggle' || action === 'priority') {
+                const body = action === 'toggle' ? { email, enabled: value } : { email, priority: value };
+                await this.request('update', body);
+                message(action === 'toggle' ? (value ? '账号已启用' : '账号已停用') : '优先级已更新', 'success');
+                await this.load();
+                return;
+            }
             const account = await this.request(action, { email });
             const failed = action === 'restore' && !account.available;
             message(
@@ -297,7 +380,8 @@ class AccountsPanel extends LitElement {
             await this.load();
         } catch (error) {
             message(error.message || '操作失败');
-            if (action === 'refresh' || action === 'restore') await this.load(true);
+            if (action === 'priority') resetPriority();
+            if (action !== 'delete') await this.load(true);
         } finally {
             this.workingEmail = '';
         }
@@ -361,7 +445,7 @@ class AccountsPanel extends LitElement {
                                             html`<account-card
                                                 class="block min-w-0"
                                                 .account=${account}
-                                                .busy=${this.workingEmail === account.email}
+                                                .busy=${Boolean(this.workingEmail)}
                                             ></account-card>`
                                     )}
                                 </div>
@@ -460,14 +544,43 @@ class AccountsPanel extends LitElement {
                       </div>
                       <div class="p-6 max-[700px]:p-4">
                           <p class="mt-1 text-xs leading-5 text-muted">
-                              粘贴单个账号 JSON 或账号 JSON 数组，按 user.email 更新账号。
+                              粘贴账号 JSON，或选择 / 拖入一个或多个 .json 文件；支持单个对象或数组，按 user.email 更新账号。
                           </p>
-                          <label for="account-json" class="mt-5 block text-xs font-medium">账号 JSON</label
-                          ><textarea
+                          <div class="mt-5 flex items-center justify-between gap-3">
+                              <label for="account-json" class="block text-xs font-medium">账号 JSON</label>
+                              <label
+                                  class="inline-flex cursor-pointer items-center rounded-lg border border-line px-3 py-1.5 text-xs hover:bg-gray-50"
+                              >
+                                  选择 JSON 文件
+                                  <input
+                                      type="file"
+                                      accept=".json,application/json"
+                                      multiple
+                                      class="sr-only"
+                                      @change=${e => {
+                                          this.readJsonFiles(e.target.files);
+                                          e.target.value = '';
+                                      }}
+                                  />
+                              </label>
+                          </div>
+                          <textarea
                               id="account-json"
-                              class="mt-2 h-64 w-full resize-y rounded-lg border border-line bg-slate-50 p-4 font-mono text-xs leading-5 outline-none focus:border-brand focus:bg-white"
+                              class="mt-2 h-64 w-full resize-y rounded-lg border border-dashed bg-slate-50 p-4 font-mono text-xs leading-5 outline-none focus:border-brand focus:bg-white ${this.dragActive
+                                  ? 'border-brand bg-white'
+                                  : 'border-line'}"
                               .value=${this.source}
                               @input=${e => (this.source = e.target.value)}
+                              @dragover=${e => {
+                                  e.preventDefault();
+                                  this.dragActive = true;
+                              }}
+                              @dragleave=${() => (this.dragActive = false)}
+                              @drop=${e => {
+                                  e.preventDefault();
+                                  this.dragActive = false;
+                                  this.readJsonFiles(e.dataTransfer?.files);
+                              }}
                               placeholder='[{"tag":"主账号","user":{"email":"name@example.com"},"access_token":"rca_...","refresh_token":"..."}]'
                           ></textarea>
                       </div>
