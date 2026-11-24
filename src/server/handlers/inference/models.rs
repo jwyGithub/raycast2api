@@ -29,7 +29,7 @@ pub(crate) fn model_entries(models: &[RaycastRawModel]) -> Vec<ModelEntry> {
 
 pub(crate) async fn list_models(
     State(state): State<SharedState>,
-    key: Option<Extension<crate::apikey::KeyId>>,
+    key: Option<Extension<crate::key::KeyId>>,
 ) -> Result<Response, GatewayError> {
     let mut models = state.models().await?;
     if let Some(Extension(key)) = key

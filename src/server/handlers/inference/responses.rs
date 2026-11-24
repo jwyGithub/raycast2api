@@ -11,10 +11,10 @@ use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_util::{StreamExt, future::BoxFuture, stream::BoxStream};
 
-use crate::apikey::Accounting;
 use crate::core::event::CanonicalEvent;
 use crate::core::request::CanonicalRequest;
 use crate::error::GatewayError;
+use crate::key::Accounting;
 use crate::log::context::{self as debug, REQUEST_ID};
 use crate::protocol::InboundAdapter;
 use crate::protocol::responses::outbound::{StreamEncoder, custom_names, to_event};

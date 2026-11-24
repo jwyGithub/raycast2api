@@ -21,10 +21,10 @@
 //! * [`util`]      — small shared helpers.
 
 pub mod account;
-mod apikey;
 pub mod config;
 pub mod core;
 pub mod error;
+mod key;
 pub mod log;
 pub mod model;
 pub mod protocol;

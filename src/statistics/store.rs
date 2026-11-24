@@ -6,8 +6,8 @@ use super::{
     wire::{ListParams, Statistic},
 };
 use crate::{
-    apikey::{Accounting, ApiKeyStore},
     core::page::Page,
+    key::{Accounting, ApiKeyStore},
     storage::{db::Db, schema::statistics as s},
     util::unix_secs,
 };

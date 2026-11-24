@@ -3,9 +3,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    apikey::wire::{Create, Id, Item, ListParams, Update, UpdateModels},
     core::page::Page,
     error::GatewayError,
+    key::wire::{Create, Id, Item, ListParams, Update, UpdateModels},
     server::state::SharedState,
 };
 

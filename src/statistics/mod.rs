@@ -9,8 +9,8 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    apikey::{Accounting, KeyId, wire::usage_units},
     core::request::CanonicalRequest,
+    key::{Accounting, KeyId, wire::usage_units},
     util::{new_ulid, unix_secs},
 };
 use store::StatisticsStore;

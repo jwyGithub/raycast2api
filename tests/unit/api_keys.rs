@@ -1,5 +1,5 @@
 use super::*;
-use crate::apikey::{ApiKeyStore, wire::Create};
+use crate::key::{ApiKeyStore, wire::Create};
 use axum::http::Method;
 use diesel::connection::SimpleConnection;
 

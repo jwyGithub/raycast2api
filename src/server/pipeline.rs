@@ -15,11 +15,11 @@
 use axum::response::Response;
 use futures_util::{Stream, StreamExt};
 
-use crate::apikey::{Accounting, Permit};
 use crate::core::event::CanonicalEvent;
 use crate::core::request::CanonicalRequest;
 use crate::core::response::CanonicalResponse;
 use crate::error::GatewayError;
+use crate::key::{Accounting, Permit};
 use crate::protocol::OutboundAdapter;
 use crate::raycast::builder::{build_chat_request, model_supports_image_generation};
 use crate::raycast::wire::RaycastRawModel;

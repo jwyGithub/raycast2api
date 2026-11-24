@@ -65,7 +65,7 @@ fn request_context(request: &Request) -> RequestContext {
         request_id: String::new(),
         requested_at: util::unix_secs() as i64,
         api_key: key.clone(),
-        managed_key_id: request.extensions().get::<crate::apikey::KeyId>().cloned(),
+        managed_key_id: request.extensions().get::<crate::key::KeyId>().cloned(),
         api_key_masked: key.as_deref().map(util::mask_api_key),
         request_ip: peer.map(|ip| ip.to_string()),
     }

@@ -3,8 +3,8 @@ use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
 
-use crate::apikey::invalid_key;
 use crate::error::GatewayError;
+use crate::key::invalid_key;
 
 use super::super::state::SharedState;
 

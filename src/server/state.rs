@@ -41,7 +41,7 @@ pub struct AppState {
     pub log: Arc<RequestLogStore>,
     /// 模型别名(控制台维护,请求路径读内存缓存)。
     pub aliases: ModelAliasStore,
-    pub(crate) api_keys: Arc<crate::apikey::ApiKeyStore>,
+    pub(crate) api_keys: Arc<crate::key::ApiKeyStore>,
     pub statistics: Arc<crate::statistics::store::StatisticsStore>,
     /// auto-compact 的摘要 / 实测 token 缓存(本地 L1 + 可选 Redis L2)。
     pub compact: CompactCache,
@@ -83,10 +83,7 @@ impl AppState {
             db,
         } = deps;
         let aliases = ModelAliasStore::new(db.clone());
-        let api_keys = Arc::new(crate::apikey::ApiKeyStore::new(
-            db.clone(),
-            &settings.api_key,
-        )?);
+        let api_keys = Arc::new(crate::key::ApiKeyStore::new(db.clone(), &settings.api_key)?);
         Ok(Self {
             statistics,
             settings,
@@ -241,7 +238,7 @@ impl AppState {
             .await?
             .into_iter()
             .find(|model| model.id == requested_id)
-            .ok_or_else(|| crate::apikey::model_not_found(client_id))
+            .ok_or_else(|| crate::key::model_not_found(client_id))
     }
 }
 
