@@ -4,16 +4,33 @@ import { modelCapabilityColumns, modelTag } from '../components/model-tags.js';
 import { tierIcon } from '../components/tier-icon.js';
 import { formatDate } from '../utils.js';
 
+// 模型ID + 复制图标,模型列表与映射弹窗共用。
+const idWithCopy = (id, copy) =>
+    html`<div class="flex items-center gap-1.5">
+        <span class="truncate font-mono text-ink">${id}</span>
+        <button
+            type="button"
+            class="grid size-6 shrink-0 place-items-center rounded-md text-muted hover:bg-slate-100 hover:text-ink"
+            aria-label="复制模型ID"
+            title="复制模型ID"
+            @click=${copy}
+        >
+            <svg class="size-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+                <rect x="5.5" y="5.5" width="8" height="8" rx="1.5"></rect>
+                <path d="M3 10.5H2.5V4A1.5 1.5 0 0 1 4 2.5h6.5V3"></path>
+            </svg>
+        </button>
+    </div>`;
 // 映射预览与模型配置两个弹窗共用:行形如 { alias, model_id, model_name, created_at }。
-const mappingColumns = [
-    { label: '映射名称', class: 'max-w-56 truncate font-mono text-ink', title: r => r.alias, render: r => r.alias },
+const mappingColumns = copy => [
+    { label: '映射ID', class: 'max-w-56 truncate font-mono text-ink', title: r => r.alias, render: r => r.alias },
     {
         label: '模型名称',
         class: 'max-w-40 truncate',
         title: r => r.model_name || r.model_id,
         render: r => r.model_name || r.model_id
     },
-    { label: '模型ID', class: 'max-w-48 truncate font-mono', title: r => r.model_id, render: r => r.model_id },
+    { label: '模型ID', class: 'max-w-64', title: r => r.model_id, render: r => idWithCopy(r.model_id, () => copy(r.model_id)) },
     { label: '创建时间', class: 'tabular-nums text-muted', render: r => formatDate(r.created_at) }
 ];
 const usd = value => (value == null || value === '' ? '—' : '$' + Number(value));
@@ -140,6 +157,29 @@ class ModelsPanel extends LitElement {
     removeAlias(alias) {
         return this.changeAlias('delete', { alias }, '删除映射失败');
     }
+    // 非 HTTPS/localhost 下 clipboard API 不可用,退回 execCommand。
+    async copyId(text) {
+        let copied = false;
+        try {
+            await navigator.clipboard.writeText(text);
+            copied = true;
+        } catch {
+            const input = document.createElement('textarea');
+            input.value = text;
+            input.readOnly = true;
+            input.style.cssText = 'position:fixed;left:-9999px;top:0';
+            // 模态弹窗打开时页面其余部分是 inert,临时输入框必须放进弹窗里才能选中。
+            (this.querySelector('dialog[open]') || this).append(input);
+            input.select();
+            try {
+                copied = document.execCommand('copy');
+            } catch {} finally {
+                input.remove();
+            }
+        }
+        if (copied) message('模型ID已复制', 'success');
+        else message('复制失败，请手动复制。');
+    }
     async load() {
         if (this.loading) return;
         this.loading = true;
@@ -220,12 +260,7 @@ class ModelsPanel extends LitElement {
                         .disabled=${this.loading}
                         @button-click=${this.search}
                     ></ui-button>
-                    <ui-button
-                        class="inline-flex"
-                        label="重置"
-                        .disabled=${this.loading}
-                        @button-click=${this.reset}
-                    ></ui-button>
+                    <ui-button class="inline-flex" label="重置" .disabled=${this.loading} @button-click=${this.reset}></ui-button>
                     <ui-button class="inline-flex" label="映射预览" @button-click=${this.openPreview}></ui-button>
                 </div>
             </div>
@@ -296,7 +331,7 @@ class ModelsPanel extends LitElement {
                 <ui-table
                     class="max-h-[60dvh]"
                     caption="全部模型映射"
-                    .columns=${mappingColumns}
+                    .columns=${mappingColumns(id => this.copyId(id))}
                     .rows=${this.previewItems}
                     .empty=${this.previewLoading ? '正在加载映射…' : '暂无映射'}
                 ></ui-table>
@@ -306,34 +341,31 @@ class ModelsPanel extends LitElement {
     columns() {
         return [
             {
-                label: '模型',
+                label: '模型名称',
                 class: 'max-w-72',
-                title: item => (item.description || '').trim(),
-                render: item => html`<div class="flex items-center gap-2">
-                    ${tierIcon(item.in_better_ai_subscription === true)}
-                    <div class="min-w-0">
-                        <div class="truncate font-medium text-ink">${item.name || item.id}</div>
-                        <div class="truncate font-mono text-[11px] text-muted">${item.id}</div>
-                    </div>
-                </div>`
+                title: item => (item.name || '').trim(),
+                render: item =>
+                    html`<div class="flex items-center gap-2">
+                        ${tierIcon(item.in_better_ai_subscription === true)}
+                        <div class="min-w-0">
+                            <div class="truncate font-medium text-ink">${item.name}</div>
+                        </div>
+                    </div>`
+            },
+            {
+                label: '模型ID',
+                class: 'max-w-72',
+                title: item => (item.id || '').trim(),
+                render: item => idWithCopy(item.id, () => this.copyId(item.id))
             },
             {
                 label: '供应商',
                 render: item =>
-                    html`${item.provider_name || '—'}<span class="ml-1 font-mono text-[11px] text-muted">${item.provider_brand || ''}</span>`
+                    html`${item.provider_name || '—'}<span class="ml-1 font-mono text-[11px] text-muted"
+                            >${item.provider_brand || ''}</span
+                        >`
             },
             ...modelCapabilityColumns,
-            {
-                label: '状态',
-                render: item => {
-                    const replacement = item.deprecation_replacement_model_id;
-                    return html`<div class="flex gap-1">
-                        ${item.status ? modelTag('bg-amber-50 text-amber-700', item.status) : ''}
-                        ${replacement ? modelTag('bg-red-50 text-red-700', '即将下线', '替代模型：' + replacement) : ''}
-                        ${item.status || replacement ? '' : html`<span class="text-muted">—</span>`}
-                    </div>`;
-                }
-            },
             {
                 label: '别名',
                 render: item => {
@@ -347,18 +379,16 @@ class ModelsPanel extends LitElement {
             },
             {
                 label: '操作',
-                render: item => html`<button
-                        class="rounded-md border border-line px-2 py-1 hover:bg-slate-100"
-                        @click=${() => this.openDetail(item)}
-                    >
-                        价格
-                    </button>
-                    <button
-                        class="ml-1 rounded-md border border-line px-2 py-1 hover:bg-slate-100"
-                        @click=${() => this.openConfig(item)}
-                    >
-                        配置
-                    </button>`
+                render: item =>
+                    html`<button class="rounded-md border border-line px-2 py-1 hover:bg-slate-100" @click=${() => this.openDetail(item)}>
+                            价格
+                        </button>
+                        <button
+                            class="ml-1 rounded-md border border-line px-2 py-1 hover:bg-slate-100"
+                            @click=${() => this.openConfig(item)}
+                        >
+                            配置
+                        </button>`
             }
         ];
     }
@@ -374,9 +404,7 @@ class ModelsPanel extends LitElement {
         >
             <div class="flex shrink-0 items-start justify-between gap-3 border-b border-line px-5 py-3">
                 <div class="min-w-0">
-                    <h2 id="model-config-title" class="truncate text-sm font-semibold">
-                        模型映射 · ${model?.name || model?.id}
-                    </h2>
+                    <h2 id="model-config-title" class="truncate text-sm font-semibold">模型映射 · ${model?.name || model?.id}</h2>
                     <p class="truncate font-mono text-[11px] text-muted">${model?.id}</p>
                 </div>
                 <button
@@ -398,10 +426,7 @@ class ModelsPanel extends LitElement {
                     ?disabled=${this.aliasBusy}
                     @input=${e => (this.aliasInput = e.target.value)}
                 />
-                <button
-                    class="h-9 shrink-0 rounded-lg bg-brand px-4 text-xs text-white disabled:opacity-40"
-                    ?disabled=${this.aliasBusy}
-                >
+                <button class="h-9 shrink-0 rounded-lg bg-brand px-4 text-xs text-white disabled:opacity-40" ?disabled=${this.aliasBusy}>
                     添加
                 </button>
             </form>
@@ -410,17 +435,18 @@ class ModelsPanel extends LitElement {
                     class="max-h-[50dvh]"
                     caption="模型映射列表"
                     .columns=${[
-                        ...mappingColumns,
+                        ...mappingColumns(id => this.copyId(id)),
                         {
                             label: html`<span class="sr-only">操作</span>`,
                             class: 'text-right',
-                            render: ({ alias }) => html`<button
-                                class="rounded-md border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50 disabled:opacity-40"
-                                ?disabled=${this.aliasBusy}
-                                @click=${() => this.removeAlias(alias)}
-                            >
-                                删除
-                            </button>`
+                            render: ({ alias }) =>
+                                html`<button
+                                    class="rounded-md border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50 disabled:opacity-40"
+                                    ?disabled=${this.aliasBusy}
+                                    @click=${() => this.removeAlias(alias)}
+                                >
+                                    删除
+                                </button>`
                         }
                     ]}
                     .rows=${aliases.map(({ alias, created_at }) => ({
@@ -458,3 +484,4 @@ class ModelsPanel extends LitElement {
     }
 }
 customElements.define('models-panel', ModelsPanel);
+
