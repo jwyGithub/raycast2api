@@ -245,7 +245,7 @@ impl AppState {
 #[cfg(test)]
 pub(crate) fn compact_test_state() -> SharedState {
     let db = crate::storage::db::Db::open(":memory:").unwrap();
-    let accounts = Arc::new(AccountStore::new(db.clone()));
+    let accounts = Arc::new(AccountStore::new(db.clone()).unwrap());
     let statistics = Arc::new(crate::statistics::store::StatisticsStore::new(db.clone()));
     let log = Arc::new(RequestLogStore::new(db.clone()));
     let settings = Arc::new(Settings {

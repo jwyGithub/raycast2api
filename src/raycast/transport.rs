@@ -120,8 +120,15 @@ impl RaycastClient {
                 .first()
                 .map_or(&self.http, |(_, client)| client),
         };
+        #[cfg(test)]
+        let url = self
+            .oauth_url
+            .as_deref()
+            .unwrap_or(crate::config::OAUTH_TOKEN_URL);
+        #[cfg(not(test))]
+        let url = crate::config::OAUTH_TOKEN_URL;
         let request = http
-            .post(crate::config::OAUTH_TOKEN_URL)
+            .post(url)
             .json(body)
             .timeout(self.settings.upstream_timeout())
             .build()?;

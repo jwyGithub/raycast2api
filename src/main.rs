@@ -30,7 +30,9 @@ async fn run() -> Result<(), String> {
 
     let db = raycast2api::storage::db::Db::open(&settings.accounts_db)
         .map_err(|e| format!("accounts db error: {e}"))?;
-    let accounts = Arc::new(raycast2api::account::store::AccountStore::new(db.clone()));
+    let accounts = Arc::new(
+        raycast2api::account::store::AccountStore::new(db.clone()).expect("accounts store"),
+    );
 
     let statistics = Arc::new(raycast2api::statistics::store::StatisticsStore::new(
         db.clone(),
@@ -85,6 +87,18 @@ async fn run() -> Result<(), String> {
         .statistics
         .interrupt_unfinished()
         .expect("failed to recover unfinished statistics");
+
+    // 只根据本地已知有效期安排必要续期;不触发其他上游查询。
+    {
+        let accounts = accounts.clone();
+        let client = client.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(raycast2api::account::token_renewal::CHECK_INTERVAL).await;
+                raycast2api::account::token_renewal::renew_expiring(&accounts, &client).await;
+            }
+        });
+    }
 
     // 启动后等待一个刷新周期再首次刷新账号额度。
     {

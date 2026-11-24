@@ -49,6 +49,8 @@ pub struct RaycastClient {
     pub(crate) chat_url: Option<String>,
     #[cfg(test)]
     pub(crate) models_url: Option<String>,
+    #[cfg(test)]
+    pub(crate) oauth_url: Option<String>,
 }
 
 impl RaycastClient {
@@ -68,6 +70,8 @@ impl RaycastClient {
             chat_url: None,
             #[cfg(test)]
             models_url: None,
+            #[cfg(test)]
+            oauth_url: None,
         }
     }
 

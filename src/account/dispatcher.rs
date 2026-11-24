@@ -104,7 +104,7 @@ fn enrich_no_account(error: GatewayError, accounts: &AccountStore) -> GatewayErr
             }
         }
         _ => GatewayError::NoAccount(format!(
-            "{message}; no account is in cooldown — every account was removed (flagged/unavailable) or the pool is empty"
+            "{message}; no account is in cooldown — every account is disabled, removed (flagged/unavailable), or the pool is empty"
         )),
     }
 }
@@ -186,8 +186,18 @@ impl AccountDispatcher {
             // 剥附件、文本加占位,请求照发,不让一张图废掉整个推理。
             let mut request = request.clone();
             if !request.pending_uploads.is_empty() {
-                self.upload_attachments(&mut request, &account, &device_id)
-                    .await;
+                if let Err(error) = self
+                    .upload_attachments(&mut request, &account, &device_id)
+                    .await
+                {
+                    last_error = Some(error);
+                    continue;
+                }
+            }
+            // 上传等异步操作期间账号可能进入冷却或被停用,聊天前再次检查。
+            if let Err(error) = self.accounts.get_for_upstream(&account.email) {
+                last_error = Some(error);
+                continue;
             }
             let body = serde_json::to_string(&request)?;
             let mut result = self
@@ -203,18 +213,21 @@ impl AccountDispatcher {
                 .await;
             if matches!(result, Err(GatewayError::TokenInvalid { .. })) {
                 result = match self.renew(&mut account).await {
-                    Ok(()) => {
-                        self.client
-                            .chat(
-                                &account.email,
-                                &account.access_token,
-                                &device_id,
-                                &body,
-                                call,
-                                reserved.take(),
-                            )
-                            .await
-                    }
+                    Ok(()) => match self.accounts.get_for_upstream(&account.email) {
+                        Ok(_) => {
+                            self.client
+                                .chat(
+                                    &account.email,
+                                    &account.access_token,
+                                    &device_id,
+                                    &body,
+                                    call,
+                                    reserved.take(),
+                                )
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    },
                     Err(error) => Err(error),
                 };
             }
@@ -334,9 +347,10 @@ impl AccountDispatcher {
         request: &mut RaycastChatRequest,
         account: &AccountRow,
         device_id: &str,
-    ) {
+    ) -> Result<(), GatewayError> {
         let pending = std::mem::take(&mut request.pending_uploads);
         for upload in pending {
+            self.accounts.get_for_upstream(&account.email)?;
             let result = self
                 .client
                 .upload_file(
@@ -402,6 +416,7 @@ impl AccountDispatcher {
                 message.content.attachments = None;
             }
         }
+        Ok(())
     }
 
     /// 拉模型列表。与 [`Self::send_chat`] 一致地做 401 续期与账号故障切换:
@@ -417,7 +432,10 @@ impl AccountDispatcher {
             let mut result = self.client.fetch_models(&account.access_token).await;
             if matches!(result, Err(GatewayError::TokenInvalid { .. })) {
                 result = match self.renew(&mut account).await {
-                    Ok(()) => self.client.fetch_models(&account.access_token).await,
+                    Ok(()) => match self.accounts.get_for_upstream(&account.email) {
+                        Ok(_) => self.client.fetch_models(&account.access_token).await,
+                        Err(error) => Err(error),
+                    },
                     Err(error) => Err(error),
                 };
             }

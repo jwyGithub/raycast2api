@@ -10,6 +10,13 @@ pub async fn restore(
     client: &RaycastClient,
     email: &str,
 ) -> Result<(AccountRow, Option<String>), GatewayError> {
+    let row = store
+        .get(email)?
+        .ok_or_else(|| GatewayError::NotFound(format!("no account with email {email}")))?;
+    if !row.enabled {
+        row.ensure_upstream_allowed(crate::util::unix_secs() as i64)?;
+    }
+    store.ensure_upstream_priority(&row)?;
     if !store.reinstate(email)? {
         return Err(GatewayError::NotFound(format!(
             "no account with email {}",
@@ -19,8 +26,8 @@ pub async fn restore(
 
     // 实时验证:能查通则顺手更新额度信息;查不通不影响"已恢复"这个事实。
     let mut upstream_note: Option<String> = None;
-    if let Some(row) = store.get(email)? {
-        match crate::account::quota_refresh::fetch_info(client, &row.access_token).await {
+    if store.get(email)?.is_some() {
+        match crate::account::quota_refresh::fetch_info(store, client, email).await {
             Ok(Some(info)) => {
                 store.update_info(email, &info)?;
             }
@@ -33,6 +40,7 @@ pub async fn restore(
                 let err = crate::account::quota_refresh::record_refresh_error(store, email, err);
                 upstream_note = Some(err.to_string());
             }
+            Err(err @ GatewayError::Admission { .. }) => return Err(err),
             Err(_) => {
                 upstream_note =
                     Some("上游查询失败(网络/其他),账号已恢复可用但额度信息未更新".into());

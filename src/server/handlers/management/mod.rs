@@ -19,9 +19,13 @@ pub(crate) fn routes() -> Router<SharedState> {
     Router::new()
         .route("/accounts/list", post(accounts::list))
         .route("/accounts/detail", post(accounts::detail))
-        .route("/accounts/create", post(accounts::create))
+        .route(
+            "/accounts/create",
+            post(accounts::create).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
         .route("/accounts/delete", post(accounts::delete))
         .route("/accounts/restore", post(accounts::restore))
+        .route("/accounts/update", post(accounts::update))
         .route("/accounts/export", get(accounts::export))
         .route("/accounts/refresh", post(accounts::refresh))
         .route("/api-keys/list", post(api_keys::list))

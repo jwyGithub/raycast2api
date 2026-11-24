@@ -229,7 +229,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_inference_body_is_fully_captured_and_reaches_handler() {
         let db = Db::open(":memory:").unwrap();
-        let accounts = Arc::new(AccountStore::new(db.clone()));
+        let accounts = Arc::new(AccountStore::new(db.clone()).unwrap());
         let statistics = Arc::new(crate::statistics::store::StatisticsStore::new(db.clone()));
         let log = Arc::new(RequestLogStore::new(db.clone()));
         let settings = Arc::new(Settings {
