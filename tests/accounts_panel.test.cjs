@@ -4,7 +4,7 @@ const { join } = require('node:path');
 const { test } = require('node:test');
 const { runInNewContext } = require('node:vm');
 
-function mount(tag = 'accounts-panel') {
+function mount(tag = 'accounts-panel', messages = []) {
     const elements = new Map();
     const source = readFileSync(join(__dirname, '../src/page/views/accounts.js'), 'utf8');
     runInNewContext(source.replace(/^import .*;\r?\n/gm, ''), {
@@ -16,7 +16,13 @@ function mount(tag = 'accounts-panel') {
         }),
         formatDate: () => '',
         CSS: { escape: value => value },
-        message() {}
+        CustomEvent: class {
+            constructor(type, init) {
+                this.type = type;
+                this.detail = init?.detail;
+            }
+        },
+        message: (text, type) => messages.push([text, type])
     });
     return new (elements.get(tag))();
 }
@@ -94,4 +100,112 @@ test('a failed priority save restores the stored value and releases all cards', 
     assert.equal(panel.accounts[0].priority, 3);
     assert.equal(panel.workingEmail, '');
     assert.deepEqual(busyStates(panel.render()), [false]);
+});
+
+test('settings dialog rejects invalid priority, skips unchanged values and stays open when saving fails', async () => {
+    const messages = [];
+    const panel = mount('accounts-panel', messages);
+    panel.accounts = [{ email: 'first@x', priority: 3 }];
+    const input = { value: 'abc' };
+    panel.querySelector = selector => {
+        assert.match(selector, /^(#account-priority|input\[data-priority-email="first@x"\])$/);
+        return input;
+    };
+    const requests = [];
+    panel.request = async (path, body) => {
+        requests.push({ path, body });
+        return { items: panel.accounts, total: 1, total_pages: 1 };
+    };
+
+    await panel.accountAction({ detail: { action: 'settings', email: 'first@x' } });
+    assert.equal(panel.settingsEmail, 'first@x');
+    await panel.saveSettings();
+    assert.equal(requests.length, 0);
+    assert.equal(panel.settingsEmail, 'first@x');
+    assert.match(messages.at(-1)[0], /优先级必须是/);
+
+    input.value = '3';
+    await panel.saveSettings();
+    assert.equal(requests.length, 0);
+    assert.equal(panel.settingsEmail, '');
+
+    panel.settingsEmail = 'first@x';
+    input.value = '8';
+    await panel.saveSettings();
+    assert.equal(requests[0].path, 'update');
+    assert.deepEqual({ ...requests[0].body }, { email: 'first@x', priority: 8 });
+    assert.equal(panel.settingsEmail, '');
+
+    panel.settingsEmail = 'first@x';
+    input.value = '9';
+    panel.request = async () => {
+        throw new Error('save failed');
+    };
+    await panel.saveSettings();
+    assert.equal(panel.settingsEmail, 'first@x');
+    assert.equal(panel.workingEmail, '');
+    assert.equal(messages.at(-1)[0], 'save failed');
+});
+
+function text(template) {
+    if (Array.isArray(template)) return Array.from(template).map(text).join('');
+    if (!template?.parts) return String(template ?? '');
+    return Array.from(template.parts)
+        .map((part, index) => part + (index < template.values.length ? text(template.values[index]) : ''))
+        .join('');
+}
+
+test('the card settings button dispatches a settings action for its account', () => {
+    const card = mount('account-card');
+    const events = [];
+    card.dispatchEvent = event => events.push(event);
+    card.busy = false;
+    card.account = { email: 'first@x', available: true };
+    const template = card.render();
+    const index = template.parts.findIndex(
+        (part, i) => part.endsWith('@button-click=') && template.parts[i - 1]?.includes('label="设置"')
+    );
+    assert.notEqual(index, -1);
+    template.values[index]();
+    assert.equal(events[0].type, 'account-action');
+    assert.equal(events[0].detail.action, 'settings');
+    assert.equal(events[0].detail.email, 'first@x');
+});
+
+test('settings dialog renders the account and its saved priority, and only the priority field', () => {
+    const panel = mount();
+    panel.accounts = [{ email: 'first@x', priority: 7 }];
+    panel.settingsEmail = 'first@x';
+    const rendered = text(panel.renderSettings());
+    assert.match(rendered, /first@x/);
+    assert.match(rendered, /优先级：/);
+    assert.match(rendered, /id="account-priority"/);
+    assert.match(rendered, /7/);
+    assert.doesNotMatch(rendered, /创建时间|额度同步/);
+    panel.settingsEmail = '';
+    assert.doesNotMatch(text(panel.renderSettings()), /first@x/);
+});
+
+test('updated() syncs native dialogs with state and closes settings when the account is gone', () => {
+    const panel = mount();
+    const dialogs = {
+        '#account-import-dialog': { open: false, showModal() { this.open = true; }, close() { this.open = false; } },
+        '#account-settings-dialog': { open: false, showModal() { this.open = true; }, close() { this.open = false; } }
+    };
+    panel.querySelector = selector => dialogs[selector];
+    panel.accounts = [{ email: 'first@x' }];
+
+    panel.dialog = true;
+    panel.settingsEmail = 'first@x';
+    panel.updated();
+    assert.equal(dialogs['#account-import-dialog'].open, true);
+    assert.equal(dialogs['#account-settings-dialog'].open, true);
+
+    panel.dialog = false;
+    panel.accounts = [];
+    panel.updated();
+    assert.equal(panel.settingsEmail, '');
+    assert.equal(dialogs['#account-import-dialog'].open, false);
+    panel.updated();
+    assert.equal(dialogs['#account-settings-dialog'].open, false);
 });

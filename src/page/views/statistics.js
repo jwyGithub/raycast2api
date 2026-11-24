@@ -228,7 +228,7 @@ class StatisticsPanel extends LitElement {
             .filter(Boolean)
             .join(' · ');
         return html`<section
-            class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5"
+            class="mx-auto flex h-full min-h-0 w-full flex-col px-4 pt-4"
             aria-label="上游调用统计"
         >
             <form class="mb-4 shrink-0 rounded-xl border border-line bg-white p-4" @submit=${this.search}>

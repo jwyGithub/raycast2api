@@ -46,17 +46,6 @@ class AccountCard extends LitElement {
                     composed: true
                 })
             );
-        const commitPriority = e => {
-            // 严格解析:拒绝 "12abc"、"1e3"、小数与超出 i32 的值;非法输入回退为当前值。
-            const raw = e.target.value.trim();
-            const next = /^-?\d+$/.test(raw) ? Number(raw) : NaN;
-            if (Number.isSafeInteger(next) && next >= -2147483648 && next <= 2147483647) {
-                if (next !== (a.priority ?? 0)) action('priority', next);
-            } else {
-                message('优先级必须是 -2147483648 到 2147483647 之间的整数。');
-                e.target.value = String(a.priority ?? 0);
-            }
-        };
         return html`<article
             class="h-full overflow-hidden rounded-xl border border-line bg-white p-0 hover:border-[#c9ced7] flex flex-col"
             aria-label=${(a.email || '未知账号') + '，' + state}
@@ -102,33 +91,22 @@ class AccountCard extends LitElement {
                 </div>
                 <div class="grid gap-0.5 border-t border-[#eff0f2] pt-1.5 text-xs leading-[18px]">
                     <dl
-                        class="grid grid-cols-2 gap-x-2 [&>div]:flex [&>div]:min-w-0 [&>div]:items-baseline [&>div]:gap-1 [&_dd]:min-w-0 [&_dd]:text-[#596373] [&_dt]:shrink-0 [&_dt]:whitespace-nowrap [&_dt]:text-muted"
+                        class="grid grid-cols-1 gap-y-0.5 [&>div]:flex [&>div]:min-w-0 [&>div]:items-baseline [&>div]:gap-1 [&_dd]:min-w-0 [&_dd]:font-medium [&_dd]:text-ink [&_dt]:w-[5em] [&_dt]:shrink-0 [&_dt]:whitespace-nowrap [&_dt]:text-muted"
                     >
                         <div class="min-w-0">
-                            <dt>创建时间</dt>
+                            <dt>创建时间：</dt>
                             <dd><ui-tooltip .content=${this.date(a.created_at)}></ui-tooltip></dd>
                         </div>
                         <div class="min-w-0">
-                            <dt>额度同步</dt>
+                            <dt>额度同步：</dt>
                             <dd><ui-tooltip .content=${this.date(a.info_fetched_at)}></ui-tooltip></dd>
                         </div>
                         <div class="min-w-0">
-                            <dt>优先级</dt>
+                            <dt>优先级：</dt>
                             <dd>
-                                <input
-                                    type="number"
-                                    step="1"
-                                    min="-2147483648"
-                                    max="2147483647"
-                                    data-priority-email=${a.email || ''}
-                                    aria-label=${'优先级，' + (a.email || '')}
-                                    title="数值越大越优先；高优先级有可用账号时不用低优先级账号"
-                                    class="w-20 rounded-md border border-line bg-white px-1.5 py-0.5 text-xs tabular-nums text-ink outline-none focus:border-brand disabled:opacity-50"
-                                    .value=${String(a.priority ?? 0)}
-                                    ?disabled=${this.busy}
-                                    @change=${commitPriority}
-                                    @keydown=${e => e.key === 'Enter' && e.target.blur()}
-                                />
+                                <span class="inline-flex rounded-md border border-blue-200 bg-blue-50 px-[7px] py-px tabular-nums text-blue-700"
+                                    >${a.priority ?? 0}</span
+                                >
                             </dd>
                         </div>
                     </dl>
@@ -170,6 +148,12 @@ class AccountCard extends LitElement {
                 ></ui-button>
                 <ui-button
                     class="inline-flex"
+                    label="设置"
+                    .disabled=${this.busy}
+                    @button-click=${() => action('settings')}
+                ></ui-button>
+                <ui-button
+                    class="inline-flex"
                     label="删除"
                     variant="danger"
                     .disabled=${this.busy}
@@ -180,6 +164,13 @@ class AccountCard extends LitElement {
     }
 }
 customElements.define('account-card', AccountCard);
+
+// 严格解析优先级:拒绝 "12abc"、"1e3"、小数与超出 i32 的值,非法返回 null。
+function parsePriority(raw) {
+    const text = String(raw).trim();
+    const next = /^-?\d+$/.test(text) ? Number(text) : NaN;
+    return Number.isSafeInteger(next) && next >= -2147483648 && next <= 2147483647 ? next : null;
+}
 
 const filters = [
     ['all', '全部状态'],
@@ -205,7 +196,8 @@ class AccountsPanel extends LitElement {
         dialog: { state: true },
         source: { state: true },
         importing: { state: true },
-        dragActive: { state: true }
+        dragActive: { state: true },
+        settingsEmail: { state: true }
     };
     constructor() {
         super();
@@ -223,7 +215,8 @@ class AccountsPanel extends LitElement {
             dialog: false,
             source: '',
             importing: false,
-            dragActive: false
+            dragActive: false,
+            settingsEmail: ''
         });
     }
     createRenderRoot() {
@@ -233,7 +226,7 @@ class AccountsPanel extends LitElement {
         super.connectedCallback();
         // 列表 60s 静默轮询，仅账号面板可见且未操作时刷新。
         this.pollTimer = setInterval(() => {
-            if (!this.active || this.workingEmail || this.dialog) return;
+            if (!this.active || this.workingEmail || this.dialog || this.settingsEmail) return;
             this.load(true);
         }, 60000);
     }
@@ -338,6 +331,21 @@ class AccountsPanel extends LitElement {
             this.importing = false;
         }
     }
+    async saveSettings() {
+        const email = this.settingsEmail;
+        const input = this.querySelector('#account-priority');
+        const value = parsePriority(input?.value ?? '');
+        if (value === null) {
+            message('优先级必须是 -2147483648 到 2147483647 之间的整数。');
+            return;
+        }
+        const current = this.accounts.find(x => x.email === email)?.priority ?? 0;
+        if (value === current) {
+            this.settingsEmail = '';
+            return;
+        }
+        if (await this.accountAction({ detail: { action: 'priority', email, value } })) this.settingsEmail = '';
+    }
     chooseStatus(e) {
         this.status = e.detail.value;
         this.page = 1;
@@ -345,6 +353,10 @@ class AccountsPanel extends LitElement {
     }
     async accountAction(e) {
         const { action, email, value } = e.detail;
+        if (action === 'settings') {
+            this.settingsEmail = email;
+            return;
+        }
         const resetPriority = () => {
             // Lit 对未变化的绑定值不会重写 DOM,须主动回退未保存的输入。
             const input = this.querySelector(`input[data-priority-email="${CSS.escape(email)}"]`);
@@ -363,7 +375,7 @@ class AccountsPanel extends LitElement {
                 await this.request('update', body);
                 message(action === 'toggle' ? (value ? '账号已启用' : '账号已停用') : '优先级已更新', 'success');
                 await this.load();
-                return;
+                return true;
             }
             const account = await this.request(action, { email });
             const failed = action === 'restore' && !account.available;
@@ -390,7 +402,7 @@ class AccountsPanel extends LitElement {
         return html`<section class="min-h-0 flex-1 flex flex-col pt-4" aria-label="账号列表">
             <div class="mx-auto min-h-0 flex-1 flex flex-col w-full">
                 <div
-                    class="mb-4 shrink-0 px-8 max-[700px]:px-5 flex items-center justify-between gap-3 max-[700px]:flex-wrap"
+                    class="mb-4 shrink-0 px-4 flex items-center justify-between gap-3 max-[700px]:flex-wrap"
                 >
                     <div class="flex items-center gap-3">
                         <span class="shrink-0 whitespace-nowrap text-xs text-muted">状态</span>
@@ -420,7 +432,7 @@ class AccountsPanel extends LitElement {
                     </div>
                 </div>
                 <div
-                    class="[scrollbar-width:thin] [scrollbar-color:#d9dce5_transparent] [&::-webkit-scrollbar]:w-[7px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#d9dce5] min-h-0 flex-1 overflow-y-auto px-8 max-[700px]:px-5"
+                    class="[scrollbar-width:thin] [scrollbar-color:#d9dce5_transparent] [&::-webkit-scrollbar]:w-[7px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#d9dce5] min-h-0 flex-1 overflow-y-auto px-4"
                     @scroll=${() => this.querySelectorAll('ui-tooltip').forEach(tooltip => tooltip.hide())}
                 >
                     ${this.loading && !this.accounts.length
@@ -472,7 +484,7 @@ class AccountsPanel extends LitElement {
                                     : ''}
                             </div>`}
                 </div>
-                <footer class="shrink-0 px-8 max-[700px]:px-5">
+                <footer class="shrink-0 px-4">
                     <div
                         class="flex items-center justify-between gap-4 py-4 max-[700px]:flex-wrap max-[700px]:[&>div]:ml-auto"
                     >
@@ -519,88 +531,153 @@ class AccountsPanel extends LitElement {
                 </footer>
             </div>
         </section>
-        ${this.dialog
-            ? html`<div
-                  class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-[2px]"
-                  @click=${e => {
-                      if (e.target === e.currentTarget) this.dialog = false;
-                  }}
-              >
-                  <section
-                      role="dialog"
-                      aria-modal="true"
-                      aria-labelledby="import-title"
-                      class="max-h-[calc(100dvh-32px)] overflow-y-auto rounded-xl border border-line p-0 shadow-[0_24px_80px_#10182826] [&_input]:rounded-lg [&_textarea]:rounded-lg max-[700px]:[&_input]:text-base max-[700px]:[&_textarea]:text-base w-full max-w-xl bg-white"
-                  >
-                      <div class="flex items-center justify-between gap-4 border-b border-line px-6 py-5 max-[700px]:p-4">
-                          <h2 id="import-title" class="text-base font-semibold">导入账号</h2>
+        ${this.renderImport()} ${this.renderSettings()}`;
+    }
+    renderImport() {
+        return html`<dialog
+            id="account-import-dialog"
+            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-xl overflow-y-auto rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
+            aria-labelledby="import-title"
+            @close=${this.closeImport}
+        >
+            <div class="flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3">
+                <h2 id="import-title" class="truncate text-sm font-semibold">导入账号</h2>
+                <button
+                    class="size-8 shrink-0 rounded-lg text-lg text-muted hover:bg-slate-100"
+                    aria-label="关闭导入窗口"
+                    @click=${this.closeImport}
+                >
+                    ×
+                </button>
+            </div>
+            <div class="p-5">
+                <p class="text-xs leading-5 text-muted">
+                    粘贴账号 JSON，或选择 / 拖入一个或多个 .json 文件；支持单个对象或数组，按 user.email 更新账号。
+                </p>
+                <div class="mt-4 flex items-center justify-between gap-3">
+                    <label for="account-json" class="block text-xs font-medium">账号 JSON</label>
+                    <label
+                        class="inline-flex cursor-pointer items-center rounded-lg border border-line px-3 py-1.5 text-xs hover:bg-slate-50"
+                    >
+                        选择 JSON 文件
+                        <input
+                            type="file"
+                            accept=".json,application/json"
+                            multiple
+                            class="sr-only"
+                            @change=${e => {
+                                this.readJsonFiles(e.target.files);
+                                e.target.value = '';
+                            }}
+                        />
+                    </label>
+                </div>
+                <textarea
+                    id="account-json"
+                    class="mt-2 h-64 w-full resize-y rounded-lg border border-dashed bg-slate-50 p-3 font-mono text-xs leading-5 outline-none focus:border-brand focus:bg-white max-[700px]:text-base ${this
+                        .dragActive
+                        ? 'border-brand bg-white'
+                        : 'border-line'}"
+                    .value=${this.source}
+                    @input=${e => (this.source = e.target.value)}
+                    @dragover=${e => {
+                        e.preventDefault();
+                        this.dragActive = true;
+                    }}
+                    @dragleave=${() => (this.dragActive = false)}
+                    @drop=${e => {
+                        e.preventDefault();
+                        this.dragActive = false;
+                        this.readJsonFiles(e.dataTransfer?.files);
+                    }}
+                    placeholder='[{"tag":"主账号","user":{"email":"name@example.com"},"access_token":"rca_...","refresh_token":"..."}]'
+                ></textarea>
+            </div>
+            <div class="flex shrink-0 flex-wrap justify-end gap-2 border-t border-line px-5 py-3">
+                <ui-button class="inline-flex" label="取消" @button-click=${this.closeImport}></ui-button>
+                <ui-button
+                    class="inline-flex"
+                    variant="primary"
+                    label=${this.importing ? '导入中…' : '确定导入'}
+                    .disabled=${this.importing}
+                    @button-click=${this.importAccounts}
+                ></ui-button>
+            </div>
+        </dialog>`;
+    }
+    closeImport() {
+        this.dialog = false;
+    }
+    renderSettings() {
+        const a = this.accounts.find(x => x.email === this.settingsEmail);
+        const busy = Boolean(this.workingEmail);
+        return html`<dialog
+            id="account-settings-dialog"
+            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-sm overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
+            aria-labelledby="account-settings-title"
+            @close=${this.closeSettings}
+        >
+            ${a
+                ? html`<div class="flex shrink-0 items-start justify-between gap-3 border-b border-line px-5 py-3">
+                          <div class="min-w-0">
+                              <h2 id="account-settings-title" class="truncate text-sm font-semibold">优先级设置</h2>
+                              <p class="truncate font-mono text-[11px] text-muted">${a.email}</p>
+                          </div>
                           <button
-                              class="grid size-8 place-items-center rounded-lg text-muted hover:bg-gray-100"
-                              aria-label="关闭导入窗口"
-                              @click=${() => (this.dialog = false)}
+                              class="size-8 shrink-0 rounded-lg text-lg text-muted hover:bg-slate-100"
+                              aria-label="关闭优先级设置"
+                              @click=${this.closeSettings}
                           >
                               ×
                           </button>
                       </div>
-                      <div class="p-6 max-[700px]:p-4">
-                          <p class="mt-1 text-xs leading-5 text-muted">
-                              粘贴账号 JSON，或选择 / 拖入一个或多个 .json 文件；支持单个对象或数组，按 user.email 更新账号。
-                          </p>
-                          <div class="mt-5 flex items-center justify-between gap-3">
-                              <label for="account-json" class="block text-xs font-medium">账号 JSON</label>
-                              <label
-                                  class="inline-flex cursor-pointer items-center rounded-lg border border-line px-3 py-1.5 text-xs hover:bg-gray-50"
-                              >
-                                  选择 JSON 文件
-                                  <input
-                                      type="file"
-                                      accept=".json,application/json"
-                                      multiple
-                                      class="sr-only"
-                                      @change=${e => {
-                                          this.readJsonFiles(e.target.files);
-                                          e.target.value = '';
-                                      }}
-                                  />
-                              </label>
+                      <div class="p-5">
+                          <div class="flex items-center gap-1">
+                              <label for="account-priority" class="shrink-0 whitespace-nowrap text-xs text-muted">优先级：</label>
+                              <input
+                                  id="account-priority"
+                                  type="number"
+                                  step="1"
+                                  min="-2147483648"
+                                  max="2147483647"
+                                  data-priority-email=${a.email}
+                                  class="h-9 min-w-0 flex-1 rounded-lg border border-line bg-white px-3 text-[13px] tabular-nums text-ink disabled:opacity-50"
+                                  .value=${String(a.priority ?? 0)}
+                                  ?disabled=${busy}
+                                  @keydown=${e => e.key === 'Enter' && this.saveSettings()}
+                              />
                           </div>
-                          <textarea
-                              id="account-json"
-                              class="mt-2 h-64 w-full resize-y rounded-lg border border-dashed bg-slate-50 p-4 font-mono text-xs leading-5 outline-none focus:border-brand focus:bg-white ${this.dragActive
-                                  ? 'border-brand bg-white'
-                                  : 'border-line'}"
-                              .value=${this.source}
-                              @input=${e => (this.source = e.target.value)}
-                              @dragover=${e => {
-                                  e.preventDefault();
-                                  this.dragActive = true;
-                              }}
-                              @dragleave=${() => (this.dragActive = false)}
-                              @drop=${e => {
-                                  e.preventDefault();
-                                  this.dragActive = false;
-                                  this.readJsonFiles(e.dataTransfer?.files);
-                              }}
-                              placeholder='[{"tag":"主账号","user":{"email":"name@example.com"},"access_token":"rca_...","refresh_token":"..."}]'
-                          ></textarea>
                       </div>
-                      <div class="flex justify-end gap-2 border-t border-line bg-[#fafbfc] px-6 py-4 max-[700px]:p-4">
-                          <button
-                              class="inline-flex min-h-9 items-center justify-center rounded-lg border border-line px-3.5 py-2 text-[13px]"
-                              @click=${() => (this.dialog = false)}
-                          >
-                              取消</button
-                          ><button
-                              class="inline-flex min-h-9 items-center justify-center rounded-lg border border-line px-3.5 py-2 text-[13px] bg-brand text-white disabled:opacity-50"
-                              ?disabled=${this.importing}
-                              @click=${this.importAccounts}
-                          >
-                              ${this.importing ? '导入中…' : '确定导入'}
-                          </button>
-                      </div>
-                  </section>
-              </div>`
-            : ''}`;
+                      <div class="flex shrink-0 flex-wrap justify-end gap-2 border-t border-line px-5 py-3">
+                          <ui-button class="inline-flex" label="取消" @button-click=${this.closeSettings}></ui-button>
+                          <ui-button
+                              class="inline-flex"
+                              variant="primary"
+                              label=${this.workingEmail === a.email ? '保存中…' : '保存'}
+                              .disabled=${busy}
+                              @button-click=${this.saveSettings}
+                          ></ui-button>
+                      </div>`
+                : ''}
+        </dialog>`;
+    }
+    closeSettings() {
+        this.settingsEmail = '';
+    }
+    updated() {
+        // 账号被删除或被筛选掉后,不留下没有内容的弹窗。
+        if (this.settingsEmail && !this.accounts.some(x => x.email === this.settingsEmail)) {
+            this.settingsEmail = '';
+        }
+        for (const [id, wanted] of [
+            ['account-import-dialog', this.dialog],
+            ['account-settings-dialog', this.settingsEmail]
+        ]) {
+            const dialog = this.querySelector('#' + id);
+            if (!dialog) continue;
+            if (wanted && !dialog.open) dialog.showModal();
+            else if (!wanted && dialog.open) dialog.close();
+        }
     }
 }
 customElements.define('accounts-panel', AccountsPanel);

@@ -264,7 +264,7 @@ class LogsPanel extends LitElement {
         ];
     }
     render() {
-        return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5">
+        return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-4 pt-4">
             <form class="mb-4 flex shrink-0 flex-wrap items-center gap-3" @submit=${this.search}>
                 <div class="flex min-w-48 flex-1 items-center gap-3">
                     <label for="log-request-id" class="shrink-0 whitespace-nowrap text-xs text-muted">请求 ID</label
