@@ -315,6 +315,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_alias_can_override_an_existing_model_id() {
+        use axum::{
+            Json,
+            body::{Body, to_bytes},
+            extract::State,
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        use crate::server::handlers::management::models::{DeleteAliasParams, delete_alias};
+
+        let state = compact_test_state();
+        let opus = "claude-opus-5-5";
+        let sonnet = "claude-sonnet-5-5";
+        let haiku = "claude-haiku-5-5";
+        *state.models_cache.write().await = Some(ModelsCache {
+            fetched_at: Instant::now(),
+            models: [opus, sonnet, haiku]
+                .into_iter()
+                .map(|id| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "model": id, "provider": "anthropic",
+                        "owned_id": format!("anthropic-{id}")
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+        });
+        assert_eq!(state.resolve_model(opus).await.unwrap().model, opus);
+        let app = crate::server::build_router(state.clone());
+        let create = |target| {
+            app.clone().oneshot(
+                Request::post("/v1/models/alias/create")
+                    .header("authorization", "Bearer test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"alias": opus, "model_id": target}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+        };
+        assert_eq!(create(sonnet).await.unwrap().status(), StatusCode::OK);
+        let conflict = create(haiku).await.unwrap();
+        assert_eq!(conflict.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(conflict.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["message"],
+            format!("映射「{opus}」已指向「{sonnet}」,请先删除原映射,再重新添加")
+        );
+        assert_eq!(state.resolve_model(opus).await.unwrap().model, sonnet);
+        let reopened = ModelAliasStore::new(state.db.clone());
+        assert_eq!(reopened.resolve(opus).as_deref(), Some(sonnet));
+        delete_alias(
+            State(state.clone()),
+            Json(DeleteAliasParams { alias: opus.into() }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.resolve_model(opus).await.unwrap().model, opus);
+
+        state
+            .aliases
+            .create(opus, "anthropic-claude-sonnet-5-5")
+            .unwrap();
+        let response = create(sonnet).await.unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(state.resolve_model(opus).await.unwrap().model, sonnet);
+        let reopened = ModelAliasStore::new(state.db.clone());
+        assert_eq!(reopened.resolve(opus).as_deref(), Some(sonnet));
+    }
+
+    #[tokio::test]
     async fn failed_model_refresh_keeps_known_model_instead_of_default() {
         let mut state = compact_test_state();
         let inner = Arc::get_mut(&mut state).unwrap();

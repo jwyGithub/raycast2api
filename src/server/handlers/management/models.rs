@@ -184,8 +184,7 @@ pub struct DeleteAliasParams {
     pub alias: String,
 }
 
-/// `POST /v1/models/alias/create` — 新增别名:客户端用 `alias` 请求时,网关改用
-/// `model_id` 发给上游。别名已存在则拒绝(不覆盖,要换目标须先删除)。
+/// `POST /v1/models/alias/create` — 新增别名，或更新同一目标的旧模型 ID。
 pub async fn create_alias(
     State(state): State<SharedState>,
     Json(params): Json<CreateAliasParams>,
@@ -197,21 +196,26 @@ pub async fn create_alias(
         ));
     }
     let models = state.models().await?;
-    if !models.iter().any(|m| m.id == params.model_id) {
+    let Some(target) = models.iter().find(|m| m.id == params.model_id) else {
         return Err(GatewayError::NotFound(format!(
             "Model '{}' was not found",
             params.model_id
         )));
+    };
+    // 允许用目录中的模型 ID 作为映射来源，推理时映射优先。
+    if alias == params.model_id {
+        return Err(GatewayError::BadRequest(
+            "alias and target model id must differ".into(),
+        ));
     }
-    // 别名等于目标是空操作;等于某个真实模型 ID 则会悄悄把该模型的请求改道。
-    if alias == params.model_id || models.iter().any(|m| m.id == alias) {
-        return Err(GatewayError::BadRequest(format!(
-            "alias '{alias}' is a real model id; pick a different name"
-        )));
-    }
+    let previous_id = target
+        .extra
+        .get("owned_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !models.iter().any(|model| model.id == *id));
     state
         .aliases
-        .create(alias, &params.model_id)
+        .create_with_previous_id(alias, &target.id, previous_id)
         .map_err(|error| match error {
             // 控制台原样展示这条消息,所以用中文,并区分"已经加过"和"名字被别的模型占用"。
             CreateError::Exists(target) if target == params.model_id => {
@@ -322,7 +326,7 @@ mod tests {
         state.aliases.create("moved", "elsewhere").unwrap();
         assert!(message(create("moved", "test-model").await).contains("请先删除原映射"));
         state.aliases.delete("moved").unwrap();
-        // 目标模型不存在 → 404;别名撞上真实模型 ID(含自映射)→ 400;空别名 → 400。
+        // 目标模型不存在 → 404，自映射或空别名 → 400。
         assert_eq!(
             status(create("other", "missing").await),
             StatusCode::NOT_FOUND
