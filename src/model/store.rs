@@ -107,10 +107,40 @@ impl ModelAliasStore {
 
     /// 新增别名;已存在则拒绝(不覆盖,要换目标须先删除)。
     pub fn create(&self, alias: &str, model_id: &str) -> Result<(), CreateError> {
+        self.create_with_previous_id(alias, model_id, None)
+    }
+
+    /// 创建映射，或将同一模型的原始 ID 更新为当前目录 ID。
+    pub(crate) fn create_with_previous_id(
+        &self,
+        alias: &str,
+        model_id: &str,
+        previous_id: Option<&str>,
+    ) -> Result<(), CreateError> {
         // 写锁覆盖整个"检查 + 落库 + 更新缓存",写入本来就稀少,换来无竞态。
         let mut cache = self.cache.write().expect("alias cache poisoned");
-        if let Some(existing) = cache.get(alias) {
-            return Err(CreateError::Exists(existing.model_id.clone()));
+        if let Some(existing) = cache.get_mut(alias) {
+            let old_id = existing.model_id.as_str();
+            if old_id == model_id || previous_id != Some(old_id) {
+                return Err(CreateError::Exists(old_id.to_owned()));
+            }
+            let updated = blocking(|| {
+                diesel::update(
+                    t::table
+                        .filter(t::alias.eq(alias))
+                        .filter(t::model_id.eq(old_id)),
+                )
+                .set(t::model_id.eq(model_id))
+                .execute(&mut *self.db.lock())
+            })
+            .map_err(|error| CreateError::Db(error.to_string()))?;
+            if updated == 0 {
+                return Err(CreateError::Db(format!(
+                    "alias '{alias}' changed in storage"
+                )));
+            }
+            existing.model_id = model_id.to_owned();
+            return Ok(());
         }
         let created_at = unix_secs() as i64;
         blocking(|| {
