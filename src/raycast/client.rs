@@ -223,13 +223,37 @@ impl RaycastClient {
         result
     }
 
-    /// Fetch the raw list of models available to the account owning `token`.
+    /// Fetch the account's model list and format the gateway model IDs.
     pub async fn fetch_models(&self, token: &str) -> Result<Vec<RaycastRawModel>, GatewayError> {
         #[cfg(test)]
         let url = self.models_url.as_deref().unwrap_or(RAYCAST_MODELS_URL);
         #[cfg(not(test))]
         let url = RAYCAST_MODELS_URL;
-        let parsed: RaycastModelsResponse = self.get_json(url, token).await?;
+        let mut parsed: RaycastModelsResponse = self.get_json(url, token).await?;
+        let is_id_part = |part: &str| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+        };
+        for model in &mut parsed.models {
+            model
+                .extra
+                .insert("owned_id".into(), model.id.clone().into());
+            if let Some(name) = model.extra.get("name").cloned() {
+                model.extra.insert("display_name".into(), name);
+            } else {
+                model.extra.remove("display_name");
+            }
+            if let Some((namespace, id)) = model.id.split_once('/')
+                && is_id_part(namespace)
+                && is_id_part(id)
+            {
+                model.id = id.to_owned();
+            } else if let Some(brand) = model.extra.get("provider_brand").and_then(|v| v.as_str()) {
+                model.id = model.id.replacen(&format!("{brand}-"), "", 1);
+            }
+        }
         Ok(parsed.models)
     }
 
