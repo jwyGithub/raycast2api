@@ -343,7 +343,7 @@ impl AccountStore {
                 let mut conn = db.lock();
                 conn.batch_execute(SCHEMA)
                     .map_err(|e| GatewayError::Internal(format!("create accounts schema: {e}")))?;
-                conn.immediate_transaction(|conn| migrate(conn))
+                conn.immediate_transaction(migrate)
                     .map_err(|e| GatewayError::Internal(format!("migrate accounts schema: {e}")))?;
             }
             Ok(Self {

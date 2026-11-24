@@ -185,14 +185,13 @@ impl AccountDispatcher {
             // 序列化之前(fileId 要进 wire)。上传失败按官方客户端行为降级:
             // 剥附件、文本加占位,请求照发,不让一张图废掉整个推理。
             let mut request = request.clone();
-            if !request.pending_uploads.is_empty() {
-                if let Err(error) = self
+            if !request.pending_uploads.is_empty()
+                && let Err(error) = self
                     .upload_attachments(&mut request, &account, &device_id)
                     .await
-                {
-                    last_error = Some(error);
-                    continue;
-                }
+            {
+                last_error = Some(error);
+                continue;
             }
             // 上传等异步操作期间账号可能进入冷却或被停用,聊天前再次检查。
             if let Err(error) = self.accounts.get_for_upstream(&account.email) {

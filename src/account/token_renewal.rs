@@ -92,10 +92,10 @@ pub async fn renew_expiring(store: &AccountStore, client: &crate::raycast::clien
         }
     };
     for account in accounts {
-        if expiring(&account, unix_secs() as i64) {
-            if let Err(error) = renew(store, client, &account, RenewalReason::Expiring).await {
-                tracing::warn!(email = %account.email, %error, "necessary token renewal failed");
-            }
+        if expiring(&account, unix_secs() as i64)
+            && let Err(error) = renew(store, client, &account, RenewalReason::Expiring).await
+        {
+            tracing::warn!(email = %account.email, %error, "necessary token renewal failed");
         }
     }
 }
