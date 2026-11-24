@@ -47,10 +47,11 @@ async fn format_response(request: Request, next: Next, api_keys: bool) -> Respon
         .is_some_and(|value| value.starts_with("application/json"));
     let (mut parts, body) = response.into_parts();
     parts.status = status;
-    let (body, error_message) = if invalid_key_payload {
+    let (body, error_message, error_code) = if invalid_key_payload {
         (
             Body::empty(),
             Some("API Key 请求字段无效，请检查 JSON 参数。".to_owned()),
+            None,
         )
     } else if status.is_client_error() || status.is_server_error() {
         let bytes = match to_bytes(body, MAX_ERROR_RESPONSE_BYTES).await {
@@ -91,9 +92,15 @@ async fn format_response(request: Request, next: Next, api_keys: bool) -> Respon
                 .or_else(|| data.as_str())
                 .map(str::to_owned)
         };
-        (Body::empty(), message)
+        // 机器可读的业务错误码（如 account_status_mismatch）保留到顶层 error_code。
+        let code = data
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        (Body::empty(), message, code)
     } else {
-        (body, None)
+        (body, None, None)
     };
     let message = error_message.unwrap_or_else(|| {
         if status.is_success() {
@@ -112,12 +119,15 @@ async fn format_response(request: Request, next: Next, api_keys: bool) -> Respon
         .headers
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     let body = if status.is_client_error() || status.is_server_error() {
-        let bytes = serde_json::to_vec(&json!({
+        let mut envelope = json!({
             "code": response_code,
             "message": message,
             "data": null,
-        }))
-        .expect("REST API envelope serializes");
+        });
+        if let (Some(error_code), Some(object)) = (error_code, envelope.as_object_mut()) {
+            object.insert("error_code".to_owned(), json!(error_code));
+        }
+        let bytes = serde_json::to_vec(&envelope).expect("REST API envelope serializes");
         Body::from(bytes)
     } else if is_json {
         let prefix = format!("{{\"code\":{response_code},\"data\":",);

@@ -72,6 +72,32 @@ curl http://localhost:8787/v1/accounts/create \
 
 控制台和接口均接受单个 JSON 对象或数组，按 `user.email` 识别账号。`refresh_token` 可选，用于自动续期。
 
+账号调度相关字段（均可选）：
+
+* `enabled`：默认 `true`。设为 `false` 即停用账号，停用后不参与选号，也不发起额度查询等普通上游请求，仅允许必要的 token 续期。需要先启用才能刷新或恢复。
+* `priority`：整数，默认 `0`，取值范围 `i32`，数值越大越优先。请求只在最高优先级档内轮询，该档全部不可用（停用、摘除或冷却）时才使用低档账号。高档仍有可调度账号时，低档保持备用，不主动调用上游查询接口；手动刷新或恢复备用账号返回 409。
+
+冷却期间同样不发起额度查询等普通上游请求，冷却到期或显式恢复后才恢复调用。手动刷新停用或冷却中的账号返回 409，控制台也会禁用相应的刷新按钮。
+
+必要的 token 续期是冷却、停用和备用账号的唯一例外：仅在上游明确返回 401，或已知 access token 将在一分钟内过期时调用 OAuth 续期接口，不附带 `/me`、额度等查询，也不改变账号健康状态、启停、冷却或优先级。可在导入时通过 `access_token_expires_at` 提供 Unix 秒格式的过期时间，续期响应的 `expires_in` / `expires_at` 也会保存。过期时间未知时不猜测、不定期轮换，恢复使用后按需续期。网络失败会退避，`invalid_grant` 会停止重试该凭据，需重新授权。相同账号同时运行于多个实例时，续期会作废另一实例保存的旧凭据，应避免多实例分别维护同一份凭据。
+
+数组导入是原子的：任一条目非法（如 device_id 不合法、`priority` 越界），整批回滚，不会留下部分账号。
+
+重复导入同一账号且不带这两个字段时，已有的开关与优先级保持不变；显式给出则覆盖。`null` 等同于省略。
+
+账号详情中的 `available` 表示 token 与额度的健康状态；`schedulable` 表示当前是否参与选号（未停用、未摘除、不在冷却）。停用账号的 `available` 可以为 `true`，但 `schedulable` 为 `false`。
+
+启停与优先级可单独修改，不必重新导入：
+
+```bash
+curl http://localhost:8787/v1/accounts/update \
+    -H 'Authorization: Bearer <api_key>' \
+    -H 'Content-Type: application/json' \
+    -d '{"email": "you@example.com", "enabled": false, "priority": 10}'
+```
+
+`enabled` 与 `priority` 至少传一个，`update` 只修改启停与优先级，不会修改 token、tag 或 device_id。`priority` 超出 `i32` 范围时返回 400。
+
 ## 请求示例
 
 以下示例使用默认地址 `http://localhost:8787`。将 `<api_key>` 替换为全局 Key 或控制台创建的托管 Key，将 `<模型 ID>` 替换为模型列表返回的 `data[].id`。网关接受 `Authorization: Bearer <api_key>` 或 `x-api-key: <api_key>` 两种鉴权头。

@@ -16,7 +16,7 @@ use tower::ServiceExt;
 
 fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
     let db = Db::open(":memory:").unwrap();
-    let accounts = Arc::new(AccountStore::new(db.clone()));
+    let accounts = Arc::new(AccountStore::new(db.clone()).unwrap());
     let statistics = Arc::new(raycast2api::statistics::store::StatisticsStore::new(
         db.clone(),
     ));

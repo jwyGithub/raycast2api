@@ -1,23 +1,25 @@
 //! `/v1/accounts` — 账号池的查看、新增/更新、删除与手动额度刷新。
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{State, rejection::JsonRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::account::store::{AccountRow, AccountStore, UpsertOutcome};
-use crate::account::wire::{AccountRecord, AccountView, mask_token};
+use crate::account::store::{AccountRow, AccountStatus, UpsertOutcome};
+use crate::account::wire::{AccountRecord, AccountView, mask_token, priority_i32};
 use crate::core::page::{Page, page_params};
 use crate::error::GatewayError;
 use crate::server::state::SharedState;
+use crate::util::unix_secs;
 
 /// `POST /v1/accounts/create` 的请求体,支持单账号或账号数组。
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum UpsertRequest {
     One(AccountRecord),
-    Many(Vec<AccountRecord>),
+    /// 数组条目保留为原始 JSON,逐条反序列化,使错误能带上条目序号。
+    Many(Vec<serde_json::Value>),
 }
 
 #[derive(Serialize)]
@@ -66,9 +68,13 @@ pub async fn list(
 }
 
 fn account_view(row: AccountRow) -> AccountView {
+    let status = row.status_at(unix_secs() as i64);
+    let schedulable = status == AccountStatus::Available;
     AccountView {
         email: row.email,
         tag: row.tag,
+        enabled: row.enabled,
+        priority: row.priority,
         // 只露前 8 位:够核对注册/网关是否一致,不泄露全值。
         device_id: row
             .device_id
@@ -76,8 +82,11 @@ fn account_view(row: AccountRow) -> AccountView {
             .map(|id| id.chars().take(8).collect::<String>() + "…"),
         access_token: mask_token(&row.access_token),
         available: row.available,
+        schedulable,
+        status: status.as_str(),
         unavailable_reason: row.unavailable_reason,
         obtained_at: row.obtained_at,
+        access_token_expires_at: row.access_token_expires_at,
         has_pro_features: row.has_pro_features,
         tier: row.tier,
         sub_status: row.sub_status,
@@ -114,68 +123,95 @@ pub async fn detail(
 }
 
 /// `POST /v1/accounts/create` — 新增或更新账号(按 email upsert)。
+///
+/// 数组请求是原子的:任一条目非法(缺 email、device_id 不合法、priority 越界)
+/// 或写入失败,整批回滚,响应为错误而非部分成功。
 pub async fn create(
     State(state): State<SharedState>,
     Json(request): Json<UpsertRequest>,
 ) -> Result<Json<UpsertResponse>, GatewayError> {
     match request {
-        UpsertRequest::One(record) => {
-            record.validate_device_id()?;
-            Ok(Json(UpsertResponse::One {
-                result: upsert_result(&state.accounts, &record)?,
-            }))
-        }
-        UpsertRequest::Many(records) => {
-            if records.iter().any(|record| record.email().is_none()) {
+        UpsertRequest::One(record) => Ok(Json(UpsertResponse::One {
+            result: upsert_label(state.accounts.upsert(&record)?),
+        })),
+        UpsertRequest::Many(items) => {
+            if items.is_empty() {
                 return Err(GatewayError::BadRequest(
-                    "every account entry must contain user.email".into(),
+                    "account array must contain at least one entry".into(),
                 ));
             }
-            for record in &records {
-                record.validate_device_id()?;
-            }
-            let results = records
-                .iter()
-                .map(|record| upsert_result(&state.accounts, record))
-                .collect::<Result<_, _>>()?;
+            let records = items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let record: AccountRecord = serde_json::from_value(item).map_err(|error| {
+                        GatewayError::BadRequest(format!("entries[{index}]: {error}"))
+                    })?;
+                    if record.email().is_none() {
+                        return Err(GatewayError::BadRequest(format!(
+                            "entries[{index}]: every account entry must contain user.email"
+                        )));
+                    }
+                    Ok(record)
+                })
+                .collect::<Result<Vec<_>, GatewayError>>()?;
+            let results = state
+                .accounts
+                .upsert_batch(&records)?
+                .into_iter()
+                .map(upsert_label)
+                .collect();
             Ok(Json(UpsertResponse::Many { results }))
         }
     }
 }
 
-fn upsert_result(
-    accounts: &AccountStore,
-    record: &AccountRecord,
-) -> Result<&'static str, GatewayError> {
-    Ok(match accounts.upsert(record)? {
+fn upsert_label(outcome: UpsertOutcome) -> &'static str {
+    match outcome {
         UpsertOutcome::Inserted => "inserted",
         UpsertOutcome::Updated => "updated",
         UpsertOutcome::Unchanged => "unchanged",
-    })
+    }
+}
+
+#[derive(Serialize)]
+pub struct DeleteResponse {
+    /// 实际删除的账号数量(按状态批量删除时可能大于 1)。
+    pub deleted: usize,
 }
 
 /// `POST /v1/accounts/delete` — 按邮箱或状态删除;邮箱与状态同时传入时须同时匹配。
+///
+/// 状态与列表筛选使用同一套归类:同时停用又不可用的账号归为 `disabled`。
+/// 指定邮箱但不匹配时,404 信息会说明该账号的实际状态。
 pub async fn delete(
     State(state): State<SharedState>,
     Json(request): Json<DeleteParams>,
-) -> Result<StatusCode, GatewayError> {
+) -> Result<Json<DeleteResponse>, GatewayError> {
     let deleted = state
         .accounts
         .delete(request.email.as_deref(), request.status.as_deref())?;
     if request.email.is_none() || deleted > 0 {
-        Ok(StatusCode::OK)
-    } else {
-        let message = match request.status {
-            Some(status) => format!(
-                "no account with email {} and status {status}",
-                request.email.as_deref().unwrap_or_default()
+        return Ok(Json(DeleteResponse { deleted }));
+    }
+    let email = request.email.as_deref().unwrap_or_default();
+    let status = request.status.as_deref().filter(|value| !value.is_empty());
+    match (status, state.accounts.get(email)?) {
+        // 账号存在但状态不符:机器可读的 code 供客户端区分,文案仅供人读。
+        (Some(status), Some(row)) => Err(GatewayError::Admission {
+            status: StatusCode::NOT_FOUND,
+            code: "account_status_mismatch",
+            message: format!(
+                "account {email} is {} (requested status: {status})",
+                row.status_at(unix_secs() as i64).as_str()
             ),
-            None => format!(
-                "no account with email {}",
-                request.email.as_deref().unwrap_or_default()
-            ),
-        };
-        Err(GatewayError::NotFound(message))
+        }),
+        (Some(status), None) => Err(GatewayError::NotFound(format!(
+            "no account with email {email} and status {status}"
+        ))),
+        (None, _) => Err(GatewayError::NotFound(format!(
+            "no account with email {email}"
+        ))),
     }
 }
 
@@ -196,6 +232,49 @@ pub async fn restore(
     view.unavailable_reason = upstream_note.clone();
     // note 不该污染 available 语义:查询成功时 reason 已是 None。
     Ok(Json(view).into_response())
+}
+
+/// `POST /v1/accounts/update` 的请求体:开关和/或优先级至少给一个,缺省字段保持不变。
+/// 只能修改调度策略,不会触碰 token、tag、device_id。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRequest {
+    pub email: String,
+    pub enabled: Option<bool>,
+    /// 用 `i64` 接收,越界时由 [`priority_i32`] 返回统一的 400 错误而不是提取器的原始拒绝。
+    pub priority: Option<i64>,
+}
+
+/// `POST /v1/accounts/update` — 修改账号的启停开关与调度优先级。
+///
+/// `enabled` / `priority` 传 `null` 等同于省略;两者都省略返回 400;
+/// `priority` 须在 `i32` 范围内,越界返回 400;请求体结构错误(类型不符、
+/// 未知字段、缺少 email)同样统一返回 400 的错误信封,而不是 422。
+pub async fn update(
+    State(state): State<SharedState>,
+    body: Result<Json<UpdateRequest>, JsonRejection>,
+) -> Result<Json<AccountView>, GatewayError> {
+    let Json(request) =
+        body.map_err(|rejection| GatewayError::BadRequest(rejection.body_text()))?;
+    if request.enabled.is_none() && request.priority.is_none() {
+        return Err(GatewayError::BadRequest(
+            "enabled or priority is required".into(),
+        ));
+    }
+    let priority = request.priority.map(priority_i32).transpose()?;
+    if !state
+        .accounts
+        .update_policy(&request.email, request.enabled, priority)?
+    {
+        return Err(GatewayError::NotFound(format!(
+            "no account with email {}",
+            request.email
+        )));
+    }
+    let row = state.accounts.get(&request.email)?.ok_or_else(|| {
+        GatewayError::NotFound(format!("no account with email {}", request.email))
+    })?;
+    Ok(Json(account_view(row)))
 }
 
 /// `POST /v1/accounts/refresh` — 刷新指定账号额度。
