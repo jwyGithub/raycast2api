@@ -40,11 +40,6 @@ class ApiKeysPanel extends LitElement {
         this.clear();
         super.disconnectedCallback();
     }
-    updated() {
-        const element = this.querySelector('dialog');
-        if (this.dialog && !element.open) element.showModal();
-        if (!this.dialog && element.open) element.close();
-    }
     clear() {
         this.pendingList = null;
         this.items = [];
@@ -251,7 +246,7 @@ class ApiKeysPanel extends LitElement {
     }
     renderForm() {
         const { row, draft, busy } = this.dialog;
-        return html`<form id="api-key-form" @submit=${this.submitForm} class="grid gap-4">
+        return html`<form id="api-key-form" @submit=${event => this.submitForm(event)} class="grid gap-4">
             <fieldset ?disabled=${!!busy} class="grid gap-4">
                 ${row ? nothing : html`
                     <div class="grid gap-1 text-xs text-muted"><span>生成方式</span><ui-select class="block" label="生成方式" .disabled=${!!busy}
@@ -315,7 +310,7 @@ class ApiKeysPanel extends LitElement {
     renderDialog() {
         const dialog = this.dialog;
         const busy = !!dialog?.busy;
-        const cancel = html`<ui-button class="inline-flex" label="取消" @button-click=${this.closeDialog}></ui-button>`;
+        const cancel = html`<ui-button class="inline-flex" label="取消" @button-click=${() => this.closeDialog()}></ui-button>`;
         let title, content, footer = nothing;
         if (dialog?.type === 'form') {
             title = dialog.row ? '编辑 API Key' : '新增 API Key';
@@ -341,27 +336,21 @@ class ApiKeysPanel extends LitElement {
             footer = html`${cancel}<ui-button class="inline-flex" variant=${revoke ? 'danger' : 'primary'} label=${revoke ? '确认删除' : '确认重置'}
                 .disabled=${busy} @button-click=${() => this.save(revoke ? 'delete' : 'reset-usage', { id: dialog.row.id }, revoke ? 'API Key 已删除' : '用量已重置')}></ui-button>`;
         }
-        return html`<dialog aria-labelledby="api-keys-dialog-title"
-            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] ${dialog?.type === 'models' ? 'max-w-5xl' : 'max-w-lg'} overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
-            @cancel=${event => { event.preventDefault(); this.closeDialog(); }}>
-            ${dialog ? html`<div class="flex max-h-[calc(100dvh-34px)] flex-col">
-                <div class="flex shrink-0 items-start justify-between gap-3 border-b border-line px-5 py-3">
-                    <div class="min-w-0">
-                        <h2 id="api-keys-dialog-title" class="truncate text-sm font-semibold">${title}</h2>
-                        ${dialog.row ? html`<p class="truncate font-mono text-[11px] text-muted">${dialog.row.api_key_masked}</p>` : nothing}
-                    </div>
-                    <button type="button" class="size-8 shrink-0 rounded-lg text-lg text-muted hover:bg-slate-100" aria-label="关闭" @click=${this.closeDialog}>×</button>
-                </div>
-                <div class="min-h-0 overflow-auto p-5">
-                    ${dialog.error ? html`<p role="alert" class="mb-3 text-xs text-red-700">${dialog.error}</p>` : nothing}
-                    ${content}
-                </div>
-                ${footer === nothing ? nothing : html`<div class="flex shrink-0 flex-wrap justify-end gap-2 border-t border-line px-5 py-3">${footer}</div>`}
-            </div>` : nothing}
-        </dialog>`;
+        return html`<ui-dialog
+            .open=${!!dialog}
+            .heading=${title || ''}
+            .subtitle=${dialog?.row?.api_key_masked || ''}
+            .size=${dialog?.type === 'models' ? '5xl' : 'lg'}
+            @dialog-close=${this.closeDialog}
+            .content=${dialog ? html`
+                ${dialog.error ? html`<p role="alert" class="mb-3 text-xs text-red-700">${dialog.error}</p>` : nothing}
+                ${content}
+            ` : nothing}
+            .footer=${footer}
+        ></ui-dialog>`;
     }
     render() {
-        return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5">
+        return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-4 pt-4 max-[700px]:px-5">
             <div class="mb-4 flex shrink-0 flex-wrap items-center gap-3">
                 <div class="flex min-w-48 flex-1 items-center gap-3">
                     <label for="api-key-filter" class="shrink-0 whitespace-nowrap text-xs text-muted">API Key</label>

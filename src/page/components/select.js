@@ -19,7 +19,7 @@ class UiSelect extends LitElement {
         this.activeIndex = -1;
         this.listId = 'select-options-' + ++UiSelect.nextId;
         this.closeOnViewportChange = event => {
-            if (!this.querySelector('[role=listbox]')?.contains(event.target)) this.close();
+            if (!(event.target instanceof Node) || !this.querySelector('[role=listbox]')?.contains(event.target)) this.close();
         };
     }
     createRenderRoot() {

@@ -1,18 +1,21 @@
 import { LitElement, html, css } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 import { repeat } from 'https://cdn.jsdelivr.net/npm/lit-html@3.3.1/directives/repeat.js';
 import { motionEnabled } from '../utils.js';
-import './tooltip.js';
 
 class UiMessage extends LitElement {
     static properties = { items: { state: true } };
     static styles = css`
         :host {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
             position: fixed;
             inset: 20px 20px auto auto;
             margin: 0;
             padding: 0;
             border: 0;
-            width: min(440px, calc(100vw - 32px));
+            width: max-content;
+            max-width: min(440px, calc(100vw - 32px));
             overflow: visible;
             background: transparent;
             color: #242933;
@@ -21,7 +24,10 @@ class UiMessage extends LitElement {
                 sans-serif;
         }
         .message {
+            box-sizing: border-box;
             display: flex;
+            width: max-content;
+            max-width: 100%;
             align-items: center;
             gap: 10px;
             margin-bottom: 10px;
@@ -47,9 +53,11 @@ class UiMessage extends LitElement {
             background: #ecfdf5;
             color: #047857;
         }
-        ui-tooltip {
+        .text {
             flex: 1;
             min-width: 0;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
         }
         button {
             flex: none;
@@ -164,7 +172,7 @@ class UiMessage extends LitElement {
                     @focusout=${() => this.resume(item)}
                 >
                     <span class="icon" aria-hidden="true">${item.type === 'success' ? '✓' : '!'}</span
-                    ><ui-tooltip .content=${item.text}></ui-tooltip
+                    ><span class="text">${item.text}</span
                     ><button type="button" aria-label="关闭提示" @click=${() => this.close(item.id)}>×</button>
                 </div>`
         )}`;

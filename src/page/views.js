@@ -5,6 +5,7 @@ import './views/logs.js';
 import './views/models.js';
 import './views/statistics.js';
 import { message } from './components/message.js';
+import './components/dialog.js';
 
 class AccountConsole extends LitElement {
     static properties = {
@@ -44,13 +45,6 @@ class AccountConsole extends LitElement {
         window.removeEventListener('pageshow', this.handlePageShow);
         window.removeEventListener('pagehide', this.handlePageHide);
         this.lockConsole('', true);
-    }
-    updated() {
-        const dialog = this.querySelector('#dashboard-login');
-        if (dialog && !dialog.open) {
-            dialog.showModal();
-            dialog.querySelector('input').focus();
-        }
     }
     lockConsole(error = '', restoringSession = false) {
         this.authenticated = false;
@@ -179,17 +173,15 @@ class AccountConsole extends LitElement {
         if (!this.authenticated && this.restoringSession)
             return html`<div role="status" class="grid h-full place-items-center text-sm text-muted">正在恢复会话…</div>`;
         if (!this.authenticated)
-            return html`<dialog
+            return html`<ui-dialog
                 id="dashboard-login"
-                aria-labelledby="login-title"
-                aria-describedby="login-description"
-                aria-modal="true"
-                class="fixed inset-0 m-auto w-[calc(100%-32px)] max-w-sm rounded-xl border border-line bg-white p-6 text-ink shadow-[0_24px_80px_#10182826] backdrop:bg-slate-950/40 backdrop:backdrop-blur-[2px]"
-                @cancel=${event => event.preventDefault()}
-            >
-                <form @submit=${this.login}>
-                    <h2 id="login-title" class="text-base font-semibold">登录管理控制台</h2>
-                    <p id="login-description" class="mt-2 text-xs leading-5 text-muted">请输入控制台密码以继续。</p>
+                .open=${true}
+                heading="登录管理控制台"
+                describedBy="login-description"
+                size="sm"
+                .dismissible=${false}
+                .content=${html`<form @submit=${event => this.login(event)}>
+                    <p id="login-description" class="text-xs leading-5 text-muted">请输入控制台密码以继续。</p>
                     <label for="dashboard-password" class="mt-5 block text-xs font-medium">控制台密码</label>
                     <input
                         id="dashboard-password"
@@ -216,8 +208,8 @@ class AccountConsole extends LitElement {
                     >
                         ${this.loggingIn ? '验证中…' : '进入控制台'}
                     </button>
-                </form>
-            </dialog>`;
+                </form>`}
+            ></ui-dialog>`;
         return html` <main class="flex h-full flex-col overflow-hidden">
             <header class="border-b border-line bg-white shrink-0">
                 <div

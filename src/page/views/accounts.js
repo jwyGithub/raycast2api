@@ -306,7 +306,7 @@ class AccountsPanel extends LitElement {
         return html`<section class="min-h-0 flex-1 flex flex-col pt-4" aria-label="账号列表">
             <div class="mx-auto min-h-0 flex-1 flex flex-col w-full">
                 <div
-                    class="mb-4 shrink-0 px-8 max-[700px]:px-5 flex items-center justify-between gap-3 max-[700px]:flex-wrap"
+                    class="mb-4 shrink-0 px-4 max-[700px]:px-5 flex items-center justify-between gap-3 max-[700px]:flex-wrap"
                 >
                     <div class="flex items-center gap-3">
                         <span class="shrink-0 whitespace-nowrap text-xs text-muted">状态</span>
@@ -336,7 +336,7 @@ class AccountsPanel extends LitElement {
                     </div>
                 </div>
                 <div
-                    class="[scrollbar-width:thin] [scrollbar-color:#d9dce5_transparent] [&::-webkit-scrollbar]:w-[7px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#d9dce5] min-h-0 flex-1 overflow-y-auto px-8 max-[700px]:px-5"
+                    class="[scrollbar-width:thin] [scrollbar-color:#d9dce5_transparent] [&::-webkit-scrollbar]:w-[7px] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#d9dce5] min-h-0 flex-1 overflow-y-auto px-4 max-[700px]:px-5"
                     @scroll=${() => this.querySelectorAll('ui-tooltip').forEach(tooltip => tooltip.hide())}
                 >
                     ${this.loading && !this.accounts.length
@@ -388,7 +388,7 @@ class AccountsPanel extends LitElement {
                                     : ''}
                             </div>`}
                 </div>
-                <footer class="shrink-0 px-8 max-[700px]:px-5">
+                <footer class="shrink-0 px-4 max-[700px]:px-5">
                     <div
                         class="flex items-center justify-between gap-4 py-4 max-[700px]:flex-wrap max-[700px]:[&>div]:ml-auto"
                     >
@@ -435,59 +435,31 @@ class AccountsPanel extends LitElement {
                 </footer>
             </div>
         </section>
-        ${this.dialog
-            ? html`<div
-                  class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-[2px]"
-                  @click=${e => {
-                      if (e.target === e.currentTarget) this.dialog = false;
-                  }}
-              >
-                  <section
-                      role="dialog"
-                      aria-modal="true"
-                      aria-labelledby="import-title"
-                      class="max-h-[calc(100dvh-32px)] overflow-y-auto rounded-xl border border-line p-0 shadow-[0_24px_80px_#10182826] [&_input]:rounded-lg [&_textarea]:rounded-lg max-[700px]:[&_input]:text-base max-[700px]:[&_textarea]:text-base w-full max-w-xl bg-white"
-                  >
-                      <div class="flex items-center justify-between gap-4 border-b border-line px-6 py-5 max-[700px]:p-4">
-                          <h2 id="import-title" class="text-base font-semibold">导入账号</h2>
-                          <button
-                              class="grid size-8 place-items-center rounded-lg text-muted hover:bg-gray-100"
-                              aria-label="关闭导入窗口"
-                              @click=${() => (this.dialog = false)}
-                          >
-                              ×
-                          </button>
-                      </div>
-                      <div class="p-6 max-[700px]:p-4">
-                          <p class="mt-1 text-xs leading-5 text-muted">
-                              粘贴单个账号 JSON 或账号 JSON 数组，按 user.email 更新账号。
-                          </p>
-                          <label for="account-json" class="mt-5 block text-xs font-medium">账号 JSON</label
-                          ><textarea
-                              id="account-json"
-                              class="mt-2 h-64 w-full resize-y rounded-lg border border-line bg-slate-50 p-4 font-mono text-xs leading-5 outline-none focus:border-brand focus:bg-white"
-                              .value=${this.source}
-                              @input=${e => (this.source = e.target.value)}
-                              placeholder='[{"tag":"主账号","user":{"email":"name@example.com"},"access_token":"rca_...","refresh_token":"..."}]'
-                          ></textarea>
-                      </div>
-                      <div class="flex justify-end gap-2 border-t border-line bg-[#fafbfc] px-6 py-4 max-[700px]:p-4">
-                          <button
-                              class="inline-flex min-h-9 items-center justify-center rounded-lg border border-line px-3.5 py-2 text-[13px]"
-                              @click=${() => (this.dialog = false)}
-                          >
-                              取消</button
-                          ><button
-                              class="inline-flex min-h-9 items-center justify-center rounded-lg border border-line px-3.5 py-2 text-[13px] bg-brand text-white disabled:opacity-50"
-                              ?disabled=${this.importing}
-                              @click=${this.importAccounts}
-                          >
-                              ${this.importing ? '导入中…' : '确定导入'}
-                          </button>
-                      </div>
-                  </section>
-              </div>`
-            : ''}`;
+        <ui-dialog
+            .open=${this.dialog}
+            heading="导入账号"
+            size="xl"
+            .closeOnBackdrop=${true}
+            @dialog-close=${() => (this.dialog = false)}
+            .content=${this.dialog ? html`
+                <p class="text-xs leading-5 text-muted">粘贴单个账号 JSON 或账号 JSON 数组，按 user.email 更新账号。</p>
+                <label for="account-json" class="mt-5 block text-xs font-medium">账号 JSON</label>
+                <textarea
+                    id="account-json"
+                    class="mt-2 h-64 w-full resize-y rounded-lg border border-line bg-slate-50 p-4 font-mono text-xs leading-5 outline-none focus:border-brand focus:bg-white max-[700px]:text-base"
+                    .value=${this.source}
+                    @input=${e => (this.source = e.target.value)}
+                    placeholder='[{"tag":"主账号","user":{"email":"name@example.com"},"access_token":"rca_...","refresh_token":"..."}]'
+                ></textarea>
+            ` : ''}
+            .footer=${html`
+                <ui-button class="inline-flex" label="取消" @button-click=${() => (this.dialog = false)}></ui-button>
+                <ui-button class="inline-flex" variant="primary"
+                    .label=${this.importing ? '导入中…' : '确定导入'}
+                    .disabled=${this.importing}
+                    @button-click=${() => this.importAccounts()}></ui-button>
+            `}
+        ></ui-dialog>`;
     }
 }
 customElements.define('accounts-panel', AccountsPanel);

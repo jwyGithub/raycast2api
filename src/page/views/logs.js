@@ -51,11 +51,11 @@ class LogsPanel extends LitElement {
         return this;
     }
     updated(changed) {
-        const dialog = this.querySelector('dialog');
-        if (this.detailId && !dialog.open) dialog.showModal();
-        else if (!this.detailId && dialog.open) dialog.close();
         if (changed.has('detailTab')) {
-            for (const region of dialog.querySelectorAll('pre')) region.scrollTop = 0;
+            const dialog = this.querySelector('ui-dialog');
+            dialog.updateComplete.then(() => {
+                for (const region of dialog.querySelectorAll('pre')) region.scrollTop = 0;
+            });
         }
     }
     async load() {
@@ -197,7 +197,7 @@ class LogsPanel extends LitElement {
         const headers = this.detail?.[tab.headers];
         const body = this.detail?.[this.detailTab];
         const formattedBody = this.formatBody(body);
-        return html`<div class="log-detail-content grid h-[min(40rem,72dvh)] min-h-52 grid-rows-[minmax(0,1fr)_minmax(0,2fr)] gap-4 p-3 sm:px-5">
+        return html`<div class="log-detail-content grid h-[min(40rem,72dvh)] min-h-52 grid-rows-[minmax(0,1fr)_minmax(0,2fr)] gap-4">
             ${this.renderDetailRegion('headers', tab.headerLabel, headers || '暂无记录', headers)}
             ${this.renderDetailRegion('body', tab.bodyLabel, formattedBody, body ? formattedBody : '')}
         </div>`;
@@ -264,7 +264,7 @@ class LogsPanel extends LitElement {
         ];
     }
     render() {
-        return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5">
+        return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-4 pt-4 max-[700px]:px-5">
             <form class="mb-4 flex shrink-0 flex-wrap items-center gap-3" @submit=${this.search}>
                 <div class="flex min-w-48 flex-1 items-center gap-3">
                     <label for="log-request-id" class="shrink-0 whitespace-nowrap text-xs text-muted">请求 ID</label
@@ -317,23 +317,12 @@ class LogsPanel extends LitElement {
                     this.load();
                 }}
             ></ui-table>
-            <dialog
-                class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-7xl overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
-                aria-labelledby="log-detail-title"
-                @close=${this.closeDetail}
-            >
-                <div class="flex max-h-[calc(100dvh-34px)] flex-col overflow-y-auto">
-                    <div class="flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3">
-                        <h2 id="log-detail-title" class="text-sm font-semibold">日志详情</h2>
-                        <button
-                            class="size-8 rounded-lg text-lg text-muted hover:bg-slate-100"
-                            aria-label="关闭日志详情"
-                            @click=${this.closeDetail}
-                        >
-                            ×
-                        </button>
-                    </div>
-                    ${this.renderDetailSummary()}
+            <ui-dialog
+                .open=${!!this.detailId}
+                heading="日志详情"
+                size="7xl"
+                @dialog-close=${this.closeDetail}
+                .toolbar=${html`${this.renderDetailSummary()}
                     <div class="flex shrink-0 gap-1 border-b border-line px-5 pb-2" aria-label="日志内容">
                         ${Object.entries(detailTabs).map(
                             ([value, { label }]) =>
@@ -347,21 +336,17 @@ class LogsPanel extends LitElement {
                                     ${label}
                                 </button>`
                         )}
-                    </div>
-                    ${this.detailLoading
-                        ? html`<p class="p-5 text-xs text-muted" role="status">正在加载详情…</p>`
-                        : this.detailError
-                          ? html`<div role="alert" class="flex items-center justify-between gap-3 p-5 text-xs text-red-700">
-                                <span>详情加载失败</span
-                                ><ui-button
-                                    class="inline-flex"
-                                    label="重试"
-                                    @button-click=${() => this.openDetail(this.detailId)}
-                                ></ui-button>
-                            </div>`
-                          : this.renderDetailContent()}
-                </div>
-            </dialog>
+                    </div>`}
+                .content=${this.detailLoading
+                    ? html`<p class="text-xs text-muted" role="status">正在加载详情…</p>`
+                    : this.detailError
+                      ? html`<div role="alert" class="flex items-center justify-between gap-3 text-xs text-red-700">
+                            <span>详情加载失败</span>
+                            <ui-button class="inline-flex" label="重试"
+                                @button-click=${() => this.openDetail(this.detailId)}></ui-button>
+                        </div>`
+                      : this.renderDetailContent()}
+            ></ui-dialog>
         </div>`;
     }
 }

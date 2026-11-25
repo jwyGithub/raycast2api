@@ -91,17 +91,6 @@ class ModelsPanel extends LitElement {
     createRenderRoot() {
         return this;
     }
-    updated() {
-        for (const [id, wanted] of [
-            ['model-detail-dialog', this.detail],
-            ['model-config-dialog', this.config],
-            ['model-preview-dialog', this.preview]
-        ]) {
-            const dialog = this.querySelector('#' + id);
-            if (wanted && !dialog.open) dialog.showModal();
-            else if (!wanted && dialog.open) dialog.close();
-        }
-    }
     openDetail(item) {
         this.detail = item;
     }
@@ -228,7 +217,7 @@ class ModelsPanel extends LitElement {
         this.load();
     }
     render() {
-        return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5">
+        return html`<div class="mx-auto flex h-full min-h-0 w-full flex-col px-4 pt-4 max-[700px]:px-5">
             <div class="mb-4 flex shrink-0 flex-wrap items-center gap-3">
                 <div class="flex items-center gap-3">
                     <span class="shrink-0 whitespace-nowrap text-xs text-muted">供应商</span>
@@ -284,59 +273,31 @@ class ModelsPanel extends LitElement {
                     this.load();
                 }}
             ></ui-table>
-            <dialog
-                id="model-detail-dialog"
-                class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-sm overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
-                aria-labelledby="model-detail-title"
-                @close=${this.closeDetail}
-            >
-                <div class="flex shrink-0 items-start justify-between gap-3 border-b border-line px-5 py-3">
-                    <div class="min-w-0">
-                        <h2 id="model-detail-title" class="truncate text-sm font-semibold">
-                            ${this.detail?.name || this.detail?.id || '价格详情'}
-                        </h2>
-                        <p class="truncate font-mono text-[11px] text-muted">${this.detail?.id}</p>
-                    </div>
-                    <button
-                        class="size-8 shrink-0 rounded-lg text-lg text-muted hover:bg-slate-100"
-                        aria-label="关闭价格详情"
-                        @click=${this.closeDetail}
-                    >
-                        ×
-                    </button>
-                </div>
-                ${this.renderDetail()}
-            </dialog>
+            <ui-dialog
+                .open=${!!this.detail}
+                .heading=${this.detail?.name || this.detail?.id || '价格详情'}
+                .subtitle=${this.detail?.id || ''}
+                size="sm"
+                @dialog-close=${this.closeDetail}
+                .content=${this.renderDetail()}
+            ></ui-dialog>
             ${this.renderConfig()} ${this.renderPreview()}
         </div>`;
     }
     renderPreview() {
-        return html`<dialog
-            id="model-preview-dialog"
-            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-4xl overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
-            aria-labelledby="model-preview-title"
-            @close=${this.closePreview}
-        >
-            <div class="flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3">
-                <h2 id="model-preview-title" class="text-sm font-semibold">映射预览 · 共 ${this.previewItems.length} 条</h2>
-                <button
-                    class="size-8 shrink-0 rounded-lg text-lg text-muted hover:bg-slate-100"
-                    aria-label="关闭映射预览"
-                    @click=${this.closePreview}
-                >
-                    ×
-                </button>
-            </div>
-            <div class="p-5">
-                <ui-table
-                    class="max-h-[60dvh]"
-                    caption="全部模型映射"
-                    .columns=${mappingColumns(id => this.copyId(id))}
-                    .rows=${this.previewItems}
-                    .empty=${this.previewLoading ? '正在加载映射…' : '暂无映射'}
-                ></ui-table>
-            </div>
-        </dialog>`;
+        return html`<ui-dialog
+            .open=${this.preview}
+            .heading=${'映射预览 · 共 ' + this.previewItems.length + ' 条'}
+            size="4xl"
+            @dialog-close=${this.closePreview}
+            .content=${html`<ui-table
+                class="max-h-[60dvh]"
+                caption="全部模型映射"
+                .columns=${mappingColumns(id => this.copyId(id))}
+                .rows=${this.previewItems}
+                .empty=${this.previewLoading ? '正在加载映射…' : '暂无映射'}
+            ></ui-table>`}
+        ></ui-dialog>`;
     }
     columns() {
         return [
@@ -396,26 +357,13 @@ class ModelsPanel extends LitElement {
         const model = this.config;
         // 取最新一次列表里的别名;列表翻页/筛选后找不到时退回打开时的快照。
         const aliases = (this.items.find(item => item.id === model?.id) || model)?.aliases || [];
-        return html`<dialog
-            id="model-config-dialog"
-            class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-4xl overflow-hidden rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
-            aria-labelledby="model-config-title"
-            @close=${this.closeConfig}
-        >
-            <div class="flex shrink-0 items-start justify-between gap-3 border-b border-line px-5 py-3">
-                <div class="min-w-0">
-                    <h2 id="model-config-title" class="truncate text-sm font-semibold">模型映射 · ${model?.name || model?.id}</h2>
-                    <p class="truncate font-mono text-[11px] text-muted">${model?.id}</p>
-                </div>
-                <button
-                    class="size-8 shrink-0 rounded-lg text-lg text-muted hover:bg-slate-100"
-                    aria-label="关闭模型配置"
-                    @click=${this.closeConfig}
-                >
-                    ×
-                </button>
-            </div>
-            <form class="flex shrink-0 items-center gap-2 border-b border-line px-5 py-3" @submit=${this.addAlias}>
+        return html`<ui-dialog
+            .open=${!!model}
+            .heading=${'模型映射 · ' + (model?.name || model?.id || '')}
+            .subtitle=${model?.id || ''}
+            size="4xl"
+            @dialog-close=${this.closeConfig}
+            .toolbar=${html`<form class="flex shrink-0 items-center gap-2 border-b border-line px-5 py-3" @submit=${event => this.addAlias(event)}>
                 <label for="model-alias-input" class="sr-only">映射名称</label>
                 <input
                     id="model-alias-input"
@@ -429,9 +377,8 @@ class ModelsPanel extends LitElement {
                 <button class="h-9 shrink-0 rounded-lg bg-brand px-4 text-xs text-white disabled:opacity-40" ?disabled=${this.aliasBusy}>
                     添加
                 </button>
-            </form>
-            <div class="p-5">
-                <ui-table
+            </form>`}
+            .content=${html`<ui-table
                     class="max-h-[50dvh]"
                     caption="模型映射列表"
                     .columns=${[
@@ -456,9 +403,8 @@ class ModelsPanel extends LitElement {
                         model_name: model?.name
                     }))}
                     empty="暂无映射"
-                ></ui-table>
-            </div>
-        </dialog>`;
+                ></ui-table>`}
+        ></ui-dialog>`;
     }
     renderDetail() {
         const item = this.detail;
@@ -474,7 +420,7 @@ class ModelsPanel extends LitElement {
             ['缓存输入($/M)', usd(pricing.cached_input_per_million_usd)],
             ['单次对话($)', usd(pricing.typical_message_usd)]
         ];
-        return html`<dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 px-5 py-4 text-xs">
+        return html`<dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-xs">
             ${rows.map(
                 ([label, value]) =>
                     html`<dt class="text-muted">${label}</dt>

@@ -54,11 +54,6 @@ class StatisticsPanel extends LitElement {
     createRenderRoot() {
         return this;
     }
-    updated() {
-        const dialog = this.querySelector('dialog');
-        if (this.detailId && !dialog.open) dialog.showModal();
-        else if (!this.detailId && dialog.open) dialog.close();
-    }
     async load() {
         if (this.loading) return;
         this.loading = true;
@@ -228,7 +223,7 @@ class StatisticsPanel extends LitElement {
             .filter(Boolean)
             .join(' · ');
         return html`<section
-            class="mx-auto flex h-full min-h-0 w-full flex-col px-8 pt-4 max-[700px]:px-5"
+            class="mx-auto flex h-full min-h-0 w-full flex-col px-4 pt-4 max-[700px]:px-5"
             aria-label="上游调用统计"
         >
             <form class="mb-4 shrink-0 rounded-xl border border-line bg-white p-4" @submit=${this.search}>
@@ -338,25 +333,15 @@ class StatisticsPanel extends LitElement {
                     this.load();
                 }}
             ></ui-table>
-            <dialog
-                class="m-auto max-h-[calc(100dvh-32px)] w-[calc(100%-32px)] max-w-5xl overflow-auto rounded-xl border border-line bg-white p-0 text-ink shadow-xl backdrop:bg-slate-950/40"
-                aria-labelledby="statistic-detail-title"
-                @close=${this.closeDetail}
-            >
-                <div class="sticky top-0 flex items-center justify-between gap-3 border-b border-line bg-white px-5 py-3">
-                    <h2 id="statistic-detail-title" class="text-sm font-semibold">调用详情</h2>
-                    <button
-                        class="size-8 rounded-lg text-lg text-muted hover:bg-slate-100"
-                        aria-label="关闭调用详情"
-                        @click=${this.closeDetail}
-                    >
-                        ×
-                    </button>
-                </div>
-                ${this.detailLoading
-                    ? html`<p class="p-5 text-xs text-muted" role="status">正在加载详情…</p>`
+            <ui-dialog
+                .open=${!!this.detailId}
+                heading="调用详情"
+                size="5xl"
+                @dialog-close=${this.closeDetail}
+                .content=${this.detailLoading
+                    ? html`<p class="text-xs text-muted" role="status">正在加载详情…</p>`
                     : this.detailError
-                      ? html`<div role="alert" class="flex items-center justify-between gap-3 p-5 text-xs text-red-700">
+                      ? html`<div role="alert" class="flex items-center justify-between gap-3 text-xs text-red-700">
                             <span>${this.detailError}</span
                             ><ui-button
                                 class="inline-flex"
@@ -365,7 +350,7 @@ class StatisticsPanel extends LitElement {
                             ></ui-button>
                         </div>`
                       : detail
-                        ? html`<div class="p-5 text-xs">
+                        ? html`<div class="text-xs">
                               <div class="space-y-5">
                                   ${[
                                       [
@@ -442,7 +427,7 @@ ${detail.usage_json == null ? '暂无记录' : JSON.stringify(detail.usage_json,
                               >
                           </div>`
                         : ''}
-            </dialog>
+            ></ui-dialog>
         </section>`;
     }
 }
