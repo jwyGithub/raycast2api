@@ -12,7 +12,9 @@ COPY transport/node/package.json transport/node/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY transport/node/ ./
 # Fail this architecture's build if its real TLS profile or transport differs.
-RUN node fingerprint.mjs && node --test test/*.test.mjs
+RUN node fingerprint.mjs \
+    && node --dns-result-order=ipv4first --test test/*.test.mjs \
+    && node --dns-result-order=ipv6first --test test/*.test.mjs
 
 # ---- Rust build stage ----
 # Full `rust` image (not -slim) so the C toolchain that `ring` needs is present.

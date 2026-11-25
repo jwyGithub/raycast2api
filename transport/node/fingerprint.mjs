@@ -70,7 +70,7 @@ export function parseHello(handshake) {
 export async function captureHello(send) {
   let resolveCapture, rejectCapture;
   const captured = new Promise((resolve, reject) => { resolveCapture = resolve; rejectCapture = reject; });
-  const server = net.createServer(socket => {
+  const onConnection = socket => {
     let records = Buffer.alloc(0), handshake = Buffer.alloc(0);
     socket.on('error', () => {});
     socket.on('data', chunk => {
@@ -88,11 +88,30 @@ export async function captureHello(send) {
         }
       }
     });
+  };
+  const listen = (server, host, port) => new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen({ host, port, ipv6Only: true }, () => { server.off('error', reject); resolve(); });
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  // Keep localhost TLS SNI, and accept either local-DNS or TCP fallback choice.
+  // Separate loopback listeners avoid exposing this probe on external interfaces.
+  const server = net.createServer(onConnection);
+  await listen(server, '127.0.0.1', 0);
+  const ipv6 = net.createServer(onConnection);
+  try { await listen(ipv6, '::1', server.address().port); }
+  catch (error) {
+    if (!['EAFNOSUPPORT', 'EADDRNOTAVAIL'].includes(error.code)) {
+      await new Promise(resolve => server.close(resolve));
+      throw error;
+    }
+  }
   const timer = setTimeout(() => rejectCapture(new Error('ClientHello capture timed out')), 5000);
   const sending = send(`https://localhost:${server.address().port}/`).catch(() => {});
-  try { return await captured; } finally { clearTimeout(timer); await sending; await new Promise(resolve => server.close(resolve)); }
+  try { return await captured; } finally {
+    clearTimeout(timer);
+    await sending;
+    await Promise.all([server, ipv6].filter(listener => listener.listening).map(listener => new Promise(resolve => listener.close(resolve))));
+  }
 }
 
 export function httpsProbe(url) {

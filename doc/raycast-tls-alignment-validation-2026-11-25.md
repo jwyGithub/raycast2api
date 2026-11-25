@@ -86,7 +86,7 @@ ChatFetch 的 JA3、JA4、Akamai 均与目标快照一致；Got 的 JA3 一致�
 
 ## 4. 回归与复验
 
-Node 的 14 项测试全部通过，覆盖真实双管道握手、直连与三种认证代理、HTTP/2 协商、原始签名字节/二进制上传、四种压缩编码、429 状态、部分 SSE 断流、取消、重定向凭据、本机鉴权和按请求设置响应头截止时间。
+Node 的 16 项测试分别在 IPv4 优先和 IPv6 优先的 DNS 配置下全部通过，覆盖真实双管道握手、直连与三种认证代理、IPv4/IPv6 SOCKS5 隧道、HTTP/2 协商、原始签名字节/二进制上传、四种压缩编码、429 状态、部分 SSE 断流、取消、重定向凭据、本机鉴权和按请求设置响应头截止时间。
 
 Rust 跨进程测试启动真正的固定 Node，覆盖状态/body/header/SSE 错误、代理 fallback、OAuth 单次执行、Node 崩溃后的快速失败、重启不重放及关闭。它们默认标记 ignored，必须用下列命令显式执行，不能用普通 cargo test 的成功代替。
 
@@ -96,7 +96,8 @@ Rust 跨进程测试启动真正的固定 Node，覆盖状态/body/header/SSE �
 
 ```bash:项目根目录
 cargo test --locked --quiet
-node --test transport/node/test/*.test.mjs
+node --dns-result-order=ipv4first --test transport/node/test/*.test.mjs
+node --dns-result-order=ipv6first --test transport/node/test/*.test.mjs
 RAYCAST_TEST_NODE_PATH=/绝对路径/node cargo test --locked --lib raycast::node_transport::tests -- --ignored
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
@@ -108,7 +109,7 @@ cargo fmt --check
 node transport/node/echo.mjs --output /tmp/raycast-tls-echo.json
 ```
 
-Docker 构建会执行 Node 指纹与传输测试、Rust 常规测试及三项跨进程测试，最终以运行用户再次执行指纹检查。[CI 工作流](../.github/workflows/transport-check.yml) 在 PR/main/master 相关文件变更后构建本地镜像，检查 Node 模式下的网关启动、健康检查、账号就绪分支和正常退出，不发布镜像。
+Docker 构建会执行 Node 指纹与 IPv4/IPv6 两种 DNS 顺序的传输测试、Rust 常规测试及三项跨进程测试，最终以运行用户再次执行指纹检查。[CI 工作流](../.github/workflows/transport-check.yml) 在 PR/main/master 相关文件变更后构建本地镜像，检查 Node 模式下的网关启动、健康检查、账号就绪分支和正常退出，不发布镜像。
 
 ## 5. 验证边界
 
@@ -118,8 +119,14 @@ Docker 构建会执行 Node 指纹与传输测试、Rust 常规测试及三项�
 | HTTP/HTTPS/SOCKS5 代理 | 本地真实认证隧道及隧道内双管道 ClientHello 通过；未测用户的实际公网代理出口 |
 | 连接池复用 | 本地连续多请求、取消后继续请求通过；没有与真实客户端会话恢复握手做逐字段比较 |
 | Rust 业务协议 | 常规契约回归与三项真实跨进程测试通过 |
-| Linux 镜像 | 固定依赖、构建准入与启动 CI 已编写；本机无 Docker，尚未实际构建或运行该 CI |
+| Linux 镜像 | CI 已运行并暴露 SOCKS5 测试的 IPv4 假设；修复已本机复验，本机无 Docker，完整镜像仍待 CI 重跑 |
 | 真实 Raycast 账号流程 | 尚未执行 models/me/OAuth/文件上传/聊天的真实上游验收 |
 | 完整流量形态与负载 | 未做会话恢复、所有 HTTP/2 帧/HPACK 行为及大规模并发内存的完整比对 |
 
 这些证据支持已测平台上的首次握手和 HTTP/2 摘要对齐；不能推定所有部署架构或实际业务流量完全一致，也不构成上游风控行为的验证。
+
+## 6. CI 的 SOCKS5 地址族修复
+
+构建失败中的 `4 !== 1` 是 SOCKS5 地址类型差异：`1` 表示 IPv4，`4` 表示 IPv6。Linux 的 `localhost` 可优先解析为 `::1`，原测试代理只接受 IPv4；抓取 ClientHello 的服务也只监听 `127.0.0.1`。
+
+修复后，测试代理按地址类型等待并解析完整的 4/16 字节地址及端口。抓包服务在同一端口分别监听 `127.0.0.1` 和可用的 `::1`，保留 `localhost` 的 TLS SNI，仅开放回环地址。生产 SOCKS5 的本地 DNS 策略保持不变。Docker 构建同时执行 IPv4/IPv6 优先两组测试，防止仅在开发机 DNS 顺序下通过。

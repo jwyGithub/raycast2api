@@ -17,6 +17,7 @@ import { createChatChannel } from '../chat.mjs';
 import { createGotChannel } from '../got.mjs';
 import { captureHello } from '../fingerprint.mjs';
 import { frame, readMetadata } from '../protocol.mjs';
+import { openTunnel } from '../proxy.mjs';
 
 let directory, credentials, originalCa;
 before(() => {
@@ -28,15 +29,19 @@ before(() => {
 });
 after(() => { tls.setDefaultCACertificates(originalCa); rmSync(directory, { recursive: true, force: true }); });
 
-async function listen(server) {
+async function listen(server, host = '127.0.0.1') {
   const sockets = new Set();
   server.on('connection', socket => { sockets.add(socket); socket.on('error', () => {}); socket.on('close', () => sockets.delete(socket)); });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, host, () => { server.off('error', reject); resolve(); });
+  });
   return { server, port: server.address().port, async close() { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); } };
 }
 
 async function proxy(scheme) {
   let connects = 0, authenticated = false;
+  const addressTypes = [];
   const outgoing = new Set();
   const tunnel = (client, host, port, head, connected) => {
     const socket = net.connect(port, host);
@@ -60,10 +65,16 @@ async function proxy(scheme) {
           authenticated = bytes.subarray(2, 2 + userLength).toString() === 'u' && bytes.subarray(3 + userLength, 3 + userLength + passwordLength).toString() === 'p';
           consume(3 + userLength + passwordLength); client.write(Buffer.from([1, authenticated ? 0 : 1])); state = 'connect';
         }
-        if (state === 'connect' && bytes.length >= 10) {
-          assert.equal(bytes[3], 1, 'SOCKS5 uses local IPv4 DNS in this fixture');
-          const host = [...bytes.subarray(4, 8)].join('.'), port = bytes.readUInt16BE(8);
-          consume(10); client.off('data', data);
+        if (state === 'connect' && bytes.length >= 4) {
+          const type = bytes[3];
+          assert.ok([1, 4].includes(type), 'SOCKS5 local DNS sends an IPv4 or IPv6 address');
+          const size = type === 1 ? 4 : 16;
+          if (bytes.length < 4 + size + 2) return;
+          const host = type === 1 ? [...bytes.subarray(4, 8)].join('.')
+            : Array.from({ length: 8 }, (_, i) => bytes.readUInt16BE(4 + i * 2).toString(16)).join(':');
+          const port = bytes.readUInt16BE(4 + size);
+          addressTypes.push(type);
+          consume(4 + size + 2); client.off('data', data);
           tunnel(client, host, port, bytes, () => client.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, 0, 0])));
         }
       };
@@ -79,7 +90,34 @@ async function proxy(scheme) {
   }
   const listener = await listen(server);
   return { url: `${scheme}://u:p@127.0.0.1:${listener.port}`, get connects() { return connects; }, get authenticated() { return authenticated; },
+    get addressTypes() { return [...addressTypes]; },
     async close() { for (const socket of outgoing) socket.destroy(); await listener.close(); } };
+}
+
+for (const [host, addressType] of [['127.0.0.1', 1], ['::1', 4]]) {
+  test(`SOCKS5 authenticated tunnel carries data to ${host}`, async t => {
+    let upstream;
+    try { upstream = await listen(net.createServer(socket => socket.pipe(socket)), host); }
+    catch (error) {
+      if (host === '::1' && ['EAFNOSUPPORT', 'EADDRNOTAVAIL'].includes(error.code)) { t.skip('IPv6 loopback unavailable'); return; }
+      throw error;
+    }
+    let p, socket;
+    try {
+      p = await proxy('socks5');
+      const authority = host === '::1' ? `[${host}]` : host;
+      socket = await openTunnel(new URL(`http://${authority}:${upstream.port}/`), p.url, 3000);
+      const echoed = once(socket, 'data');
+      socket.resume();
+      const payload = Buffer.from([0, 255, 13, 10, 128]);
+      socket.write(payload);
+      const [data] = await echoed;
+      assert.deepEqual(data, payload);
+      assert.deepEqual(p.addressTypes, [addressType]);
+      assert.equal(p.authenticated, true);
+      assert.equal(p.connects, 1);
+    } finally { socket?.destroy(); await p?.close(); await upstream.close(); }
+  });
 }
 
 function executeChannel(channel, url, headers = [], method = 'GET', data = '') {
