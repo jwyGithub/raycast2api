@@ -67,5 +67,5 @@ jobs:
           test "$healthy" = true
           # With no accounts, /ready must reach account validation after a healthy IPC check.
           curl --silent "http://$address/ready" | jq --exit-status '.message == "No available accounts"'
-          docker stop --time 15 raycast-transport-check
+          docker stop --timeout 15 raycast-transport-check
           test "$(docker inspect --format '{{.State.ExitCode}}' raycast-transport-check)" = 0

@@ -18,7 +18,8 @@ RUN node fingerprint.mjs \
 
 # ---- Rust build stage ----
 # Full `rust` image (not -slim) so the C toolchain that `ring` needs is present.
-FROM rust:1 AS builder
+# Match the runtime distro: the floating rust:1 tag can move to a newer glibc.
+FROM rust:1-bookworm AS builder
 WORKDIR /app
 COPY . .
 COPY --from=node_transport /opt/node /opt/node
@@ -40,6 +41,14 @@ COPY --from=builder /app/target/release/raycast2api /usr/local/bin/raycast2api
 COPY --from=node_transport /opt/node /opt/node
 COPY --from=node_transport /app/transport/node /app/transport/node
 ENV PATH="/opt/node/bin:$PATH"
+# Catch missing dynamic libraries and weak GLIBC version requirements here,
+# before a binary that emits loader warnings can pass the HTTP smoke test.
+RUN set -eu; \
+    ldd --verbose /usr/local/bin/raycast2api > /tmp/raycast-linkage.txt 2>&1 \
+        || { cat /tmp/raycast-linkage.txt; exit 1; }; \
+    cat /tmp/raycast-linkage.txt; \
+    if grep -Fq 'not found' /tmp/raycast-linkage.txt; then exit 1; fi; \
+    rm /tmp/raycast-linkage.txt
 # The gateway reads config.json / store/ relative to its CWD.
 WORKDIR /app
 # Writable home for the SQLite store (bind-mounted over by compose).

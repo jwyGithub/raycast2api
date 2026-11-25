@@ -119,7 +119,7 @@ Docker 构建会执行 Node 指纹与 IPv4/IPv6 两种 DNS 顺序的传输测试
 | HTTP/HTTPS/SOCKS5 代理 | 本地真实认证隧道及隧道内双管道 ClientHello 通过；未测用户的实际公网代理出口 |
 | 连接池复用 | 本地连续多请求、取消后继续请求通过；没有与真实客户端会话恢复握手做逐字段比较 |
 | Rust 业务协议 | 常规契约回归与三项真实跨进程测试通过 |
-| Linux 镜像 | Node 阶段已在 CI 通过；Rust 阶段的测试文件缺失已修复构建上下文，本机无 Docker，完整镜像仍待 CI 重跑 |
+| Linux 镜像 | CI 已通过 Node、Rust 测试并完成网关启动与就绪检查；运行时 GLIBC 弱版本警告已修复基底并增加检查，本机无 Docker，新镜像仍待 CI 重跑 |
 | 真实 Raycast 账号流程 | 尚未执行 models/me/OAuth/文件上传/聊天的真实上游验收 |
 | 完整流量形态与负载 | 未做会话恢复、所有 HTTP/2 帧/HPACK 行为及大规模并发内存的完整比对 |
 
@@ -132,3 +132,7 @@ Docker 构建会执行 Node 指纹与 IPv4/IPv6 两种 DNS 顺序的传输测试
 修复后，测试代理按地址类型等待并解析完整的 4/16 字节地址及端口。抓包服务在同一端口分别监听 `127.0.0.1` 和可用的 `::1`，保留 `localhost` 的 TLS SNI，仅开放回环地址。生产 SOCKS5 的本地 DNS 策略保持不变。Docker 构建同时执行 IPv4/IPv6 优先两组测试，防止仅在开发机 DNS 顺序下通过。
 
 Rust 构建阶段新增 `cargo test` 后，需要完整的 `tests/` 源码。原 `.dockerignore` 排除了该目录，导致 `#[path]` 引用的 `tests/unit/compact_redis.rs`、`statistics.rs` 等文件在镜像内缺失。已移除该排除规则，保留单元与集成测试文件。最终运行阶段仍仅复制 Rust 二进制、Node 运行时及 Node 传输目录，不复制 Rust 测试源码。
+
+后续 CI 已成功启动网关，但输出 `weak version GLIBC_2.39 not found`。Rust 构建镜像原先使用浮动的 `rust:1`，官方镜像清单当前将其指向 Trixie，运行阶段则为 Bookworm。已将构建镜像改为 `rust:1-bookworm`，使构建、Node 和运行阶段均使用 Bookworm；运行阶段执行 `ldd --verbose` 检查动态库及符号版本，并拒绝任何 `not found` 提示，包含不阻止进程启动的弱版本警告。镜像标签依据：[Rust 官方镜像清单](https://github.com/docker-library/official-images/blob/master/library/rust)。
+
+CI 的 `docker stop --time 15` 同时更新为 `docker stop --timeout 15`，保留 15 秒正常退出窗口。空账号配置下 `/ready` 返回 503 且消息为 `No available accounts` 是预期断言；健康检查成功和正常退出仍分别验证。
