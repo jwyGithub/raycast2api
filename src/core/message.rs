@@ -57,9 +57,8 @@ pub struct Thinking {
 pub enum Attachment {
     /// Inline image: media type + raw bytes (base64 already decoded).
     Inline { media_type: String, data: Vec<u8> },
-    /// A remote image URL the client referenced. Resolved (fetched) by the
-    /// handler layer before the request enters the pipeline; failures drop
-    /// the attachment rather than failing the request.
+    /// 客户端引用的远程图片 URL。由调度器在选号后按账号出口下载；
+    /// 失败时省略该图片并添加占位文本，不阻止其余内容发送。
     Remote { url: String },
 }
 

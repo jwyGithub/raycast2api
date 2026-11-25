@@ -89,7 +89,7 @@ async fn run() -> Result<(), String> {
     // 启动后等待一个刷新周期再首次刷新账号额度。
     {
         let accounts = accounts;
-        let client = client;
+        let client = client.with_proxy_store(state.proxies.clone());
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(raycast2api::account::quota_refresh::REFRESH_INTERVAL).await;

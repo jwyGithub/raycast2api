@@ -184,14 +184,14 @@ impl AccountDispatcher {
             // 图片附件上传:必须在账号选定之后(附件 ACL 绑定账号),且 body
             // 序列化之前(fileId 要进 wire)。上传失败按官方客户端行为降级:
             // 剥附件、文本加占位,请求照发,不让一张图废掉整个推理。
+            let client = self.client.for_account(&account)?;
             let mut request = request.clone();
             if !request.pending_uploads.is_empty() {
-                self.upload_attachments(&mut request, &account, &device_id)
+                self.upload_attachments(&client, &mut request, &account, &device_id)
                     .await;
             }
             let body = serde_json::to_string(&request)?;
-            let mut result = self
-                .client
+            let mut result = client
                 .chat(
                     &account.email,
                     &account.access_token,
@@ -204,7 +204,7 @@ impl AccountDispatcher {
             if matches!(result, Err(GatewayError::TokenInvalid { .. })) {
                 result = match self.renew(&mut account).await {
                     Ok(()) => {
-                        self.client
+                        client
                             .chat(
                                 &account.email,
                                 &account.access_token,
@@ -224,6 +224,10 @@ impl AccountDispatcher {
                     let (peeked, response) =
                         peek_first_payload(response, self.client.settings.upstream_timeout()).await;
                     let Some(err) = peeked else {
+                        let mut response = response;
+                        response
+                            .extensions_mut()
+                            .insert(client.fetch_clients(crate::proxies::Transport::ChatFetch)?);
                         return Ok(response);
                     };
                     if let Some(log) = &self.client.log {
@@ -318,9 +322,8 @@ impl AccountDispatcher {
         }))
     }
 
-    /// Upload the request's pending image attachments (bytes ride in
-    /// `request.pending_uploads`, set by the builder) and fill the wire
-    /// `attachments` arrays with the returned file ids.
+    /// 复用聊天已选账号的客户端下载远程图片、上传附件并回填文件 ID。
+    /// 每次换号重新按该账号的代理设置执行，避免提前使用共享直连出口。
     ///
     /// `chat_id` is the request's `thread_id` — the upstream scopes uploads to
     /// a chat, and the builder already derives it for session affinity.
@@ -331,30 +334,50 @@ impl AccountDispatcher {
     /// (text-only) when everything fails.
     async fn upload_attachments(
         &self,
+        client: &RaycastClient,
         request: &mut RaycastChatRequest,
         account: &AccountRow,
         device_id: &str,
     ) {
         let pending = std::mem::take(&mut request.pending_uploads);
         for upload in pending {
-            let result = self
-                .client
-                .upload_file(
-                    &account.access_token,
-                    device_id,
-                    &request.thread_id,
-                    &crate::core::attachment::upload_filename(&upload.media_type, &upload.data),
-                    &upload.media_type,
-                    &upload.data,
-                )
-                .await;
+            let result = async {
+                let attachment = match upload.attachment {
+                    crate::core::message::Attachment::Remote { url } => {
+                        let clients = client.fetch_clients(crate::proxies::Transport::Got)?;
+                        crate::core::attachment::fetch_url(&clients, &url)
+                            .await
+                            .ok_or_else(|| GatewayError::BadRequest("远程图片下载失败".into()))?
+                    }
+                    inline => inline,
+                };
+                let crate::core::message::Attachment::Inline { media_type, data } = attachment
+                else {
+                    return Err(GatewayError::BadRequest("图片内容无效".into()));
+                };
+                if !request.image_formats.contains(&media_type) {
+                    return Err(GatewayError::BadRequest("模型不支持该图片格式".into()));
+                }
+                let id = client
+                    .upload_file(
+                        &account.access_token,
+                        device_id,
+                        &request.thread_id,
+                        &crate::core::attachment::upload_filename(&media_type, &data),
+                        &media_type,
+                        &data,
+                    )
+                    .await?;
+                Ok((id, media_type, data.len()))
+            }
+            .await;
             match result {
-                Ok(id) => {
+                Ok((id, media_type, bytes)) => {
                     tracing::info!(
                         account = %account.email,
                         file_id = %id,
-                        media_type = %upload.media_type,
-                        bytes = upload.data.len(),
+                        media_type,
+                        bytes,
                         "→ attachment uploaded"
                     );
                     if let Some(message) = request.messages.get_mut(upload.message_index) {
@@ -368,9 +391,7 @@ impl AccountDispatcher {
                 Err(error) => {
                     tracing::warn!(
                         account = %account.email,
-                        media_type = %upload.media_type,
-                        bytes = upload.data.len(),
-                        "attachment upload failed, dropping image: {error}"
+                        "attachment download or upload failed, dropping image: {error}"
                     );
                     if let Some(message) = request.messages.get_mut(upload.message_index) {
                         message.content.text.push(' ');
@@ -414,10 +435,11 @@ impl AccountDispatcher {
                 Ok(account) => account,
                 Err(error) => return Err(last_error.unwrap_or(error)),
             };
-            let mut result = self.client.fetch_models(&account.access_token).await;
+            let client = self.client.for_account(&account)?;
+            let mut result = client.fetch_models(&account.access_token).await;
             if matches!(result, Err(GatewayError::TokenInvalid { .. })) {
                 result = match self.renew(&mut account).await {
-                    Ok(()) => self.client.fetch_models(&account.access_token).await,
+                    Ok(()) => client.fetch_models(&account.access_token).await,
                     Err(error) => Err(error),
                 };
             }
@@ -445,7 +467,7 @@ impl AccountDispatcher {
     }
 
     /// 把上游响应转成 canonical 事件流;流在输出前被截断时经本调度器重发一次。
-    /// 代理通道列表一并传入,供生成图片的内联下载复用同一代理策略。
+    /// 响应携带已选账号的图片下载客户端，重试换号后随新响应更新。
     pub(crate) fn events(
         &self,
         response: reqwest::Response,
@@ -455,9 +477,8 @@ impl AccountDispatcher {
     ) -> impl Stream<Item = CanonicalEvent> + Send + 'static {
         let id = debug::current_request_id();
         let timeout = self.client.settings.upstream_timeout();
-        let fetch_channels = self.client.fetch_channels();
         let dispatcher = self.clone();
-        canonical_events_with_retry(response, log, timeout, fetch_channels, move || {
+        canonical_events_with_retry(response, log, timeout, move || {
             Box::pin(async move {
                 debug::REQUEST_ID
                     .scope(id, dispatcher.send_chat(&request, &call, None))
@@ -564,6 +585,7 @@ mod tests {
                         .unwrap(),
                     )
                     .unwrap();
+                state.accounts.set_use_status(email, "enable").unwrap();
             }
             let mut dispatcher = state.dispatcher.clone();
             dispatcher.client.http = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -643,6 +665,7 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap();
+            state.accounts.set_use_status(email, "enable").unwrap();
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

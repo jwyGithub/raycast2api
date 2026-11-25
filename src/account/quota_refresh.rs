@@ -55,8 +55,8 @@ pub fn trial_expired(info: &AccountInfo) -> bool {
     matches!(info.trial_days_left, Some(days) if days <= 0)
 }
 
-/// 刷新所有账号(含不可用的 —— 它们的 token 可能已恢复)。单个账号
-/// 失败只记日志,不影响其余。
+/// 刷新所有已启用账号（含 token 不可用的账号）；每个账号使用自己的出口。
+/// 单个账号失败只记日志，不影响其余。禁用账号仅支持手动刷新。
 pub async fn refresh_all(store: &Arc<AccountStore>, client: &RaycastClient) {
     let accounts = match store.list_all() {
         Ok(accounts) => accounts,
@@ -65,7 +65,10 @@ pub async fn refresh_all(store: &Arc<AccountStore>, client: &RaycastClient) {
             return;
         }
     };
-    for account in &accounts {
+    for account in accounts
+        .iter()
+        .filter(|account| account.use_status == "enable")
+    {
         if let Err(err) = refresh_account(store, client, account).await {
             tracing::warn!("account refresh: {} failed: {err}", account.email);
         }
@@ -90,6 +93,8 @@ async fn refresh_account(
     client: &RaycastClient,
     account: &AccountRow,
 ) -> Result<(), GatewayError> {
+    let selected = client.for_account(account)?;
+    let client = &selected;
     match fetch_info(client, &account.access_token).await {
         Ok(Some(info)) => {
             store.update_info(&account.email, &info)?;

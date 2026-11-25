@@ -456,6 +456,10 @@ async fn model_list_is_shared_through_redis_for_a_day() {
                 .unwrap(),
             )
             .unwrap();
+        inner
+            .accounts
+            .set_use_status("a@example.com", "enable")
+            .unwrap();
         inner.dispatcher.client.http = reqwest::Client::builder().no_proxy().build().unwrap();
         inner.dispatcher.client.models_url =
             Some(mock_models(r#"{"models":[{"id":"m","model":"m","provider":"openai"}]}"#).await);

@@ -190,9 +190,9 @@ flowchart TB
 | A3 | token 换新 (`account/token_renewal`) | 401 自动换新(rotation 原子落盘)、`invalid_grant` 判死 | 是(见协议文档 §6) |
 | A4 | 账号 API (`server/handlers/management/accounts`) | 列表/单账号(live)/upsert/删除/恢复/手动刷新 | 否 |
 
-> 依赖方向:`A2/A3 → A1`,`A4 → A2/A3/A1`;`raycast/client` 在 send_chat 的 401
-> 分支调用 `A3`(经 `main` 装配注入,避免 raycast ↔ account 循环依赖)。
-> 自动 token 刷新复用 `RaycastClient` 的共享 HTTP 客户端(含代理链)。
+> 依赖方向:`A2/A3 → A1`,`A4 → A2/A3/A1`；`account/dispatcher` 在聊天或模型查询的 401 分支调用 `A3`。
+> `RaycastClient::for_account` 从账号记录选择直连或单个代理；只有账号勾选回退时才允许代理失败后直连。
+> 自动 token 刷新先重新读取该账号记录，再按其出口设置请求，不使用全局代理配置。
 
 ---
 

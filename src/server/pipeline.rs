@@ -36,10 +36,8 @@ pub(crate) async fn run<O: OutboundAdapter>(
     model: &RaycastRawModel,
     accounting: Option<Accounting>,
 ) -> Result<Response, GatewayError> {
-    // Resolve remote image references before anything else: the adapters are
-    // synchronous (they cannot fetch), and compaction should see the final
-    // message shapes.
-    let mut request = resolve_remote_attachments(&state.dispatcher.client.http, request).await;
+    // 先按模型能力筛选图片；远程 URL 留到选号后，使用该账号的出口下载。
+    let mut request = request;
     // Vision gating mirrors the real client: a model without `abilities.vision`
     // gets every image attachment stripped and an omission placeholder in its
     // place — no upload is attempted (B1 in doc/multimodal-images-2026-11-21.md).
@@ -157,43 +155,6 @@ fn model_vision_formats(model: &RaycastRawModel) -> Vec<&'static str> {
         .unwrap_or_default()
 }
 
-/// Fetch every [`Attachment::Remote`] in the request's user messages, replacing
-/// each with an inline attachment on success. A failed fetch **drops** the
-/// attachment (with a warn) instead of failing the request — the real client
-/// degrades missing images the same way. Text is untouched.
-async fn resolve_remote_attachments(
-    client: &reqwest::Client,
-    mut request: CanonicalRequest,
-) -> CanonicalRequest {
-    let remotes: Vec<(usize, usize, String)> = request
-        .messages
-        .iter()
-        .enumerate()
-        .flat_map(|(m, message)| {
-            message
-                .attachments
-                .iter()
-                .enumerate()
-                .filter_map(move |(a, attachment)| match attachment {
-                    crate::core::message::Attachment::Remote { url } => Some((m, a, url.clone())),
-                    _ => None,
-                })
-        })
-        .collect();
-    for (m, a, url) in remotes {
-        let fetched = crate::core::attachment::fetch_url(client, &url).await;
-        match fetched {
-            Some(inline) => {
-                request.messages[m].attachments[a] = inline;
-            }
-            None => {
-                request.messages[m].attachments.remove(a);
-            }
-        }
-    }
-    request
-}
-
 pub(crate) async fn run_admitted<O: OutboundAdapter>(
     state: &SharedState,
     request: CanonicalRequest,
@@ -244,7 +205,11 @@ pub(crate) async fn events(
     // client preset; the compaction/summarize call is a deliberately plain
     // completion and must not carry the remote tool.
     let image_gen = (call_type == "inference") && model_supports_image_generation(target);
-    let raycast_request = build_chat_request(request, provider, model, image_gen);
+    let mut raycast_request = build_chat_request(request, provider, model, image_gen);
+    raycast_request.image_formats = model_vision_formats(target)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     let mut call = CallContext::new(request, provider, model, call_type);
     call.accounting = accounting;
     let usage_key = UsageKey::new(request);

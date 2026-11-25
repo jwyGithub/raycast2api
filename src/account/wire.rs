@@ -95,6 +95,11 @@ pub struct AccountView {
     pub device_id: Option<String>,
     pub access_token: String,
     pub available: bool,
+    pub use_status: String,
+    pub proxy: String,
+    /// 卡片展示的连接地址：direct 或 type://host:port，不含认证凭据。
+    pub proxy_config: String,
+    pub proxy_fallback_direct: bool,
     pub unavailable_reason: Option<String>,
     pub obtained_at: Option<String>,
     pub has_pro_features: Option<bool>,

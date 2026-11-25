@@ -28,20 +28,31 @@ use super::wire::{
 
 pub use crate::proxies::Transport;
 
-/// Cheap-to-clone handle to the Raycast backend. Carries **two** client pools
-/// mirroring the real client's transports (see [`Transport`]): `http` /
-/// `proxies` are HTTP/1.1-only (got pipeline: /me, oauth, file registration),
-/// `chat_http` / `chat_proxies` negotiate h2 (undici fetch pipeline: chat).
-/// All four are built internally from `settings` — callers cannot mix pools.
+/// 当前账号的单个代理及其回退选项，由数据库中的账号设置生成。
+#[derive(Clone)]
+pub(crate) struct AccountProxy {
+    pub id: String,
+    pub fallback_direct: bool,
+    pub http: Client,
+    pub chat_http: Client,
+}
+
+/// 共享客户端尚未选号；只有 for_account 返回的客户端可以发起账号请求。
+#[derive(Clone)]
+pub(crate) enum AccountRoute {
+    Unselected,
+    Direct,
+    Proxy(AccountProxy),
+}
+
+/// Shared direct pools and per-account proxy clients for both upstream transports.
 #[derive(Clone)]
 pub struct RaycastClient {
     pub(crate) http: Client,
-    /// 代理客户端链,与 `settings.proxies` 一一对应;通道顺序由 `proxies_mode` 决定。
-    pub(crate) proxies: Vec<(String, Client)>,
+    pub(crate) account_route: AccountRoute,
+    pub(crate) proxy_store: Option<Arc<crate::proxies::store::ProxyStore>>,
     /// chat 专用直连客户端(h2 能力,对齐 undici fetch)。
     pub(crate) chat_http: Client,
-    /// chat 专用代理客户端链(h2 能力)。
-    pub(crate) chat_proxies: Vec<(String, Client)>,
     pub(crate) settings: Arc<Settings>,
     pub(crate) statistics: Arc<StatisticsStore>,
     pub(crate) log: Option<Arc<RequestLogStore>>,
@@ -52,15 +63,14 @@ pub struct RaycastClient {
 }
 
 impl RaycastClient {
-    /// Build all four pools internally: got pipeline (HTTP/1.1-only) and chat
-    /// pipeline (h2-capable), each with its own proxy chain when configured.
+    /// Build shared direct pools; account proxy clients are cached by ProxyStore.
     pub fn new(settings: Arc<Settings>, statistics: Arc<StatisticsStore>) -> Self {
         let timeout = settings.upstream_timeout();
         Self {
             http: crate::proxies::direct_client(timeout),
-            proxies: crate::proxies::build_clients(&settings.proxies, timeout),
+            account_route: AccountRoute::Unselected,
+            proxy_store: None,
             chat_http: crate::proxies::direct_chat_client(timeout),
-            chat_proxies: crate::proxies::build_chat_clients(&settings.proxies, timeout),
             settings,
             statistics,
             log: None,
@@ -71,20 +81,76 @@ impl RaycastClient {
         }
     }
 
-    /// Fetch clients in proxy-channel order, for auxiliary upstream downloads
-    /// (generated-image inlining) that must respect the proxy policy the way
-    /// [`chat`](Self::chat) does: Proxy mode never direct, fallback orders
-    /// proxies first. Uses the chat (h2-capable) pool — the real client
-    /// downloads these through the same Node process as chat.
-    pub(crate) fn fetch_channels(&self) -> Vec<Client> {
-        crate::proxies::channels(
-            self.settings.proxies_mode,
-            &self.chat_http,
-            &self.chat_proxies,
-        )
-        .into_iter()
-        .map(|(_, client)| client.clone())
-        .collect()
+    pub fn with_proxy_store(mut self, store: Arc<crate::proxies::store::ProxyStore>) -> Self {
+        self.proxy_store = Some(store);
+        self
+    }
+
+    /// 按当前账号的 proxy 和 proxy_fallback_direct 选择出口，不读取全局代理配置。
+    /// 指定代理不存在或无法构造客户端时返回错误，不隐式改为直连。
+    pub(crate) fn for_account(
+        &self,
+        account: &crate::account::store::AccountRow,
+    ) -> Result<Self, GatewayError> {
+        let mut client = self.clone();
+        if account.proxy == "direct" {
+            client.account_route = AccountRoute::Direct;
+        } else {
+            let store = self
+                .proxy_store
+                .as_ref()
+                .ok_or_else(|| GatewayError::Internal("proxy store unavailable".into()))?;
+            let (http, chat) = store.clients(&account.proxy, self.settings.upstream_timeout())?;
+            client.account_route = AccountRoute::Proxy(AccountProxy {
+                id: account.proxy.clone(),
+                fallback_direct: account.proxy_fallback_direct,
+                http,
+                chat_http: chat,
+            });
+        }
+        Ok(client)
+    }
+
+    /// 当前账号的请求出口：直连，或指定代理；仅勾选回退时追加直连。
+    /// 共享客户端未选号时拒绝请求，避免绕过账号设置。
+    pub(crate) fn request_channels(
+        &self,
+        transport: Transport,
+    ) -> Result<Vec<(&str, &Client)>, GatewayError> {
+        let direct = match transport {
+            Transport::Got => &self.http,
+            Transport::ChatFetch => &self.chat_http,
+        };
+        match &self.account_route {
+            AccountRoute::Unselected => Err(GatewayError::Internal(
+                "upstream account must be selected before request".into(),
+            )),
+            AccountRoute::Direct => Ok(vec![("direct", direct)]),
+            AccountRoute::Proxy(proxy) => {
+                let http = match transport {
+                    Transport::Got => &proxy.http,
+                    Transport::ChatFetch => &proxy.chat_http,
+                };
+                let mut channels = vec![(proxy.id.as_str(), http)];
+                if proxy.fallback_direct {
+                    channels.push(("direct", direct));
+                }
+                Ok(channels)
+            }
+        }
+    }
+
+    pub(crate) fn fallback_direct(&self) -> bool {
+        matches!(&self.account_route, AccountRoute::Proxy(proxy) if proxy.fallback_direct)
+    }
+
+    /// 下载客户端也由已选账号生成。生成图片使用 chat 池，输入图片使用 got 池。
+    pub(crate) fn fetch_clients(&self, transport: Transport) -> Result<Vec<Client>, GatewayError> {
+        Ok(self
+            .request_channels(transport)?
+            .into_iter()
+            .map(|(_, client)| client.clone())
+            .collect())
     }
 
     /// Common headers shared by every request, aligned to the real client's
@@ -339,7 +405,9 @@ impl RaycastClient {
             .body(bytes.to_vec())
             .timeout(self.settings.upstream_timeout())
             .build()?;
-        self.http.execute(put_request).await?.error_for_status()?;
+        self.send_got(put_request, None, None)
+            .await?
+            .error_for_status()?;
 
         Ok(registered.id)
     }
@@ -457,4 +525,117 @@ fn encode_query_value(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod account_proxy_tests {
+    use super::*;
+    use axum::{Router, routing::get};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn both_transports_use_account_proxy_and_failure_never_reaches_direct() {
+        let state = crate::server::state::compact_test_state();
+        let record = serde_json::from_value(serde_json::json!({"user":{"email":"proxy@test"},"device_id":"1".repeat(64),"access_token":"fixture"})).unwrap();
+        state.accounts.upsert(&record).unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hit_count = hits.clone();
+        let direct = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/test", direct.local_addr().unwrap());
+        let direct_server = tokio::spawn(async move {
+            axum::serve(
+                direct,
+                Router::new().route(
+                    "/test",
+                    get(move || {
+                        let hits = hit_count.clone();
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            "direct"
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let account = state.accounts.get("proxy@test").unwrap().unwrap();
+        let root = state.dispatcher.client.clone();
+        let client = root.for_account(&account).unwrap();
+        let response = client
+            .send(
+                client.http.get(&url).build().unwrap(),
+                Transport::Got,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "direct");
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = proxy.local_addr().unwrap().port();
+        let input = crate::proxies::store::ProxyInput {
+            kind: "http".into(),
+            host: "127.0.0.1".into(),
+            port,
+            user_name: String::new(),
+            password: String::new(),
+        };
+        let row = state.proxies.save(None, input.clone()).unwrap();
+        state
+            .proxies
+            .set_account_proxy("proxy@test", &row.id)
+            .unwrap();
+        let proxy_server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for _ in 0..2 {
+                let (mut socket, _) = proxy.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                let n = socket.read(&mut bytes).await.unwrap();
+                assert!(String::from_utf8_lossy(&bytes[..n]).starts_with("GET http://127.0.0.1:"));
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nproxy",
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let account = state.accounts.get("proxy@test").unwrap().unwrap();
+        let client = root.for_account(&account).unwrap();
+        for transport in [Transport::Got, Transport::ChatFetch] {
+            let response = client
+                .send(
+                    client.http.get(&url).build().unwrap(),
+                    transport,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.text().await.unwrap(), "proxy");
+        }
+        proxy_server.await.unwrap();
+        state
+            .proxies
+            .save(
+                Some(&row.id),
+                crate::proxies::store::ProxyInput { port: 1, ..input },
+            )
+            .unwrap();
+        let client = root.for_account(&account).unwrap();
+        assert!(
+            client
+                .send(
+                    client.http.get(&url).build().unwrap(),
+                    Transport::Got,
+                    None,
+                    None
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        direct_server.abort();
+    }
 }

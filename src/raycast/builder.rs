@@ -146,10 +146,14 @@ pub fn build_chat_request(
         // least 2.12.0 (`2026-11-13T01:45:10.062Z`), not a bare date.
         current_date: Some(current_timestamp()),
         pending_uploads: pending_uploads(&canonical.messages),
+        image_formats: crate::core::attachment::VISION_FORMATS
+            .iter()
+            .map(|format| (*format).to_owned())
+            .collect(),
     }
 }
 
-/// Collect the image bytes the dispatcher must upload, in wire-message order.
+/// 按消息顺序收集内联图片与远程引用；下载和上传由选号后的调度器执行。
 /// Wire indices match `build_messages` output positionally (one canonical
 /// message in, one wire message out). Each attachment becomes its own
 /// `PendingUpload`; the dispatcher appends the file id to the message's
@@ -170,16 +174,10 @@ fn pending_uploads(messages: &[Message]) -> Vec<PendingUpload> {
             if replay_budget == 0 {
                 continue;
             }
-            let crate::core::message::Attachment::Inline { media_type, data } = attachment else {
-                // Remote references are resolved by the pipeline before it
-                // reaches here; a leftover one has no bytes to upload.
-                continue;
-            };
             replay_budget -= 1;
             uploads.push(PendingUpload {
                 message_index: index,
-                media_type: media_type.clone(),
-                data: data.clone(),
+                attachment: attachment.clone(),
             });
         }
     }
@@ -241,8 +239,8 @@ fn derive_message_id(messages: &[Message]) -> String {
 /// "Tool loaded." (emitted alongside tool results) masquerade as a new turn.
 ///
 /// Image attachments: the newest [`IMAGE_REPLAY_LIMIT`] attachments ride as
-/// `pending_uploads` (bytes sidecar, see [`pending_uploads`]); the dispatcher
-/// uploads after account selection and fills the ids. Older ones are stripped
+/// `pending_uploads` (inline bytes or remote references, see [`pending_uploads`]);
+/// the dispatcher downloads and uploads after account selection, then fills the ids. Older ones are stripped
 /// here and their text gains the same omission placeholder the client uses.
 fn build_messages(messages: &[Message]) -> Vec<RaycastMessage> {
     let mut out = Vec::with_capacity(messages.len());
@@ -495,7 +493,10 @@ mod image_tests {
         ]);
         assert_eq!(request.pending_uploads.len(), 1);
         assert_eq!(request.pending_uploads[0].message_index, 1);
-        assert_eq!(request.pending_uploads[0].media_type, "image/png");
+        assert!(matches!(
+            &request.pending_uploads[0].attachment,
+            crate::core::message::Attachment::Inline { media_type, .. } if media_type == "image/png"
+        ));
         let json = serde_json::to_value(&request).unwrap();
         let messages = json["messages"].as_array().unwrap();
         // wire 上暂无 attachments(等 fileId 回填),文本未动。

@@ -16,8 +16,8 @@ use super::auth::extract_api_key;
 /// store, then run the rest of the stack inside a [`REQUEST_ID`] scope so the
 /// upstream and response writes correlate with it.
 ///
-/// Scope is inference-only (see the request-log spec). Log writes run in
-/// blocking sections; failures never fail the request.
+/// 数据库请求日志只记录推理接口；代理测试复用请求 ID 与控制台完成日志。
+/// 数据库写入在阻塞区执行，失败不影响请求。
 pub async fn request_logging(
     State(state): State<SharedState>,
     request: Request,
@@ -32,6 +32,12 @@ pub async fn request_logging(
         "/v1/chat/completions" | "/v1/messages" | "/v1/responses"
     );
     if !is_inference {
+        if matches!(
+            path,
+            "/v1/proxies/test" | "/v1/proxies/test-config" | "/v1/proxies/exit-details"
+        ) {
+            return log_completion(util::new_ulid(), request, next).await;
+        }
         return next.run(request).await;
     }
 
@@ -111,32 +117,48 @@ async fn capture(state: SharedState, request: Request, next: Next) -> Response {
 }
 
 async fn run_with_request_id(id: String, request: Request, next: Next) -> Response {
-    let started = std::time::Instant::now();
-    // handler 的 Err(GatewayError) 已由 axum 渲染为错误响应,这里只看状态码。
     let mut context = REQUEST_CONTEXT.with(Clone::clone);
     context.request_id = id.clone();
-    let response = REQUEST_CONTEXT
-        .scope(context, REQUEST_ID.scope(id.clone(), next.run(request)))
-        .await;
+    REQUEST_CONTEXT
+        .scope(context, log_completion(id, request, next))
+        .await
+}
+
+/// 推理和代理测试共用控制台完成日志；无需读取或保存请求正文。
+async fn log_completion(id: String, request: Request, next: Next) -> Response {
+    let started = std::time::Instant::now();
+    let method = request.method().to_string();
+    let path = request.uri().path().to_owned();
+    // handler 的 Err(GatewayError) 已由 axum 渲染为错误响应,这里只看状态码。
+    let response = REQUEST_ID.scope(id.clone(), next.run(request)).await;
 
     // 请求/响应配对的完成日志:状态码 + 耗时,与 stream 层的 `[id]` 前缀
-    // 和 client 层的账号日志对得上。配置了代理时,上游客户端会登记实际
-    // 走的通道("direct" 或代理 URL),这里带出来方便排查走线;未登记
-    // (无代理配置)保持原格式。
+    // 和 client 层的账号日志对得上。上游客户端登记实际使用的账号出口
+    // ("direct" 或指定的代理 ID)，这里一并输出；未发送上游请求时没有登记。
     let status = response.status();
     let elapsed = started.elapsed();
     match debug::take_channel(&id) {
         Some(channel) if status.is_success() => {
-            tracing::info!("← {status} [{id}] via {channel} in {elapsed:?}");
+            tracing::info!(
+                request_id = %id,
+                method = %method,
+                path = %path,
+                "← {status} [{id}] via {channel} in {elapsed:?}"
+            );
         }
         Some(channel) => {
-            tracing::warn!("← {status} [{id}] via {channel} in {elapsed:?}");
+            tracing::warn!(
+                request_id = %id,
+                method = %method,
+                path = %path,
+                "← {status} [{id}] via {channel} in {elapsed:?}"
+            );
         }
         None if status.is_success() => {
-            tracing::info!("← {status} [{id}] in {elapsed:?}");
+            tracing::info!(request_id = %id, method = %method, path = %path, "← {status} [{id}] in {elapsed:?}");
         }
         None => {
-            tracing::warn!("← {status} [{id}] in {elapsed:?}");
+            tracing::warn!(request_id = %id, method = %method, path = %path, "← {status} [{id}] in {elapsed:?}");
         }
     }
     response
@@ -241,8 +263,6 @@ mod tests {
             bind_addr_dual: None,
             upstream_timeout_secs: 20,
             accounts_db: ":memory:".into(),
-            proxies: Vec::new(),
-            proxies_mode: crate::proxies::ProxyMode::Direct,
         });
         let client = RaycastClient::new(settings.clone(), statistics.clone());
         let state = Arc::new(

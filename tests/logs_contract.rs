@@ -30,8 +30,6 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
         bind_addr_dual: None,
         upstream_timeout_secs: 20,
         accounts_db: ":memory:".into(),
-        proxies: Vec::new(),
-        proxies_mode: raycast2api::proxies::ProxyMode::Direct,
     });
     let client =
         raycast2api::raycast::client::RaycastClient::new(settings.clone(), statistics.clone());

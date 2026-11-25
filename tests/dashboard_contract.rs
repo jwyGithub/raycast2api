@@ -30,8 +30,6 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
         bind_addr_dual: None,
         upstream_timeout_secs: 20,
         accounts_db: ":memory:".into(),
-        proxies: Vec::new(),
-        proxies_mode: raycast2api::proxies::ProxyMode::Direct,
     });
     let client = RaycastClient::new(settings.clone(), statistics.clone());
     AppState::new(raycast2api::server::state::AppDeps {
@@ -468,6 +466,7 @@ async fn console_page_and_assets_are_served_without_auth() {
         ("/views.js", "text/javascript"),
         ("/views/api-keys.js", "text/javascript"),
         ("/views/accounts.js", "text/javascript"),
+        ("/views/proxies.js", "text/javascript"),
         ("/views/logs.js", "text/javascript"),
         ("/views/statistics.js", "text/javascript"),
     ] {

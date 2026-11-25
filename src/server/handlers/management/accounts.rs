@@ -1,5 +1,7 @@
 //! `/v1/accounts` — 账号池的查看、新增/更新、删除与手动额度刷新。
 
+use std::collections::HashMap;
+
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -57,15 +59,27 @@ pub async fn list(
     let page = state
         .accounts
         .list_page(page, page_size, params.status.as_deref())?;
+    let proxy_labels = state.proxies.connection_labels()?;
     Ok(Json(Page::new(
-        page.items.into_iter().map(account_view).collect(),
+        page.items
+            .into_iter()
+            .map(|row| account_view(row, &proxy_labels))
+            .collect(),
         page.total,
         page.page,
         page.page_size,
     )))
 }
 
-fn account_view(row: AccountRow) -> AccountView {
+fn account_view(row: AccountRow, proxy_labels: &HashMap<String, String>) -> AccountView {
+    let proxy_config = if row.proxy == "direct" {
+        "direct".into()
+    } else {
+        proxy_labels
+            .get(&row.proxy)
+            .cloned()
+            .unwrap_or_else(|| "代理不可用".into())
+    };
     AccountView {
         email: row.email,
         tag: row.tag,
@@ -76,6 +90,10 @@ fn account_view(row: AccountRow) -> AccountView {
             .map(|id| id.chars().take(8).collect::<String>() + "…"),
         access_token: mask_token(&row.access_token),
         available: row.available,
+        use_status: row.use_status,
+        proxy: row.proxy,
+        proxy_config,
+        proxy_fallback_direct: row.proxy_fallback_direct,
         unavailable_reason: row.unavailable_reason,
         obtained_at: row.obtained_at,
         has_pro_features: row.has_pro_features,
@@ -110,7 +128,7 @@ pub async fn detail(
     let row = state.accounts.get(&request.email)?.ok_or_else(|| {
         GatewayError::NotFound(format!("no account with email {}", request.email))
     })?;
-    Ok(Json(account_view(row)))
+    Ok(Json(account_view(row, &state.proxies.connection_labels()?)))
 }
 
 /// `POST /v1/accounts/create` — 新增或更新账号(按 email upsert)。
@@ -192,7 +210,7 @@ pub async fn restore(
     let (row, upstream_note) =
         crate::account::service::restore(&state.accounts, &state.dispatcher.client, &request.email)
             .await?;
-    let mut view = account_view(row);
+    let mut view = account_view(row, &state.proxies.connection_labels()?);
     view.unavailable_reason = upstream_note.clone();
     // note 不该污染 available 语义:查询成功时 reason 已是 None。
     Ok(Json(view).into_response())
@@ -212,5 +230,43 @@ pub async fn refresh(
     let row = state.accounts.get(&request.email)?.ok_or_else(|| {
         GatewayError::NotFound(format!("no account with email {}", request.email))
     })?;
-    Ok(Json(account_view(row)))
+    Ok(Json(account_view(row, &state.proxies.connection_labels()?)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsRequest {
+    pub email: String,
+    pub use_status: Option<String>,
+    pub proxy: Option<String>,
+    pub proxy_fallback_direct: Option<bool>,
+}
+
+pub async fn settings(
+    State(state): State<SharedState>,
+    Json(request): Json<SettingsRequest>,
+) -> Result<Json<AccountView>, GatewayError> {
+    // Validate before either mutation; each UI action updates one setting.
+    if request.use_status.is_some() == request.proxy.is_some()
+        || (request.proxy_fallback_direct.is_some() && request.proxy.is_none())
+    {
+        return Err(GatewayError::BadRequest(
+            "provide either use_status or proxy".into(),
+        ));
+    }
+    if let Some(status) = request.use_status {
+        state.accounts.set_use_status(&request.email, &status)?;
+    }
+    if let Some(proxy) = request.proxy {
+        state.proxies.set_account_proxy_options(
+            &request.email,
+            &proxy,
+            request.proxy_fallback_direct,
+        )?;
+    }
+    let row = state
+        .accounts
+        .get(&request.email)?
+        .ok_or_else(|| GatewayError::NotFound("account not found".into()))?;
+    Ok(Json(account_view(row, &state.proxies.connection_labels()?)))
 }

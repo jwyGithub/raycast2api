@@ -1,6 +1,6 @@
 //! Request-correlation support for the request-log store.
 //!
-//! [`REQUEST_ID`] is a task-local correlation id set by the `log_request`
+//! [`REQUEST_ID`] is a task-local correlation id set by the `request_logging`
 //! middleware; the upstream client and the SSE bridge use it to attribute
 //! their log writes to the originating inbound request — without threading an
 //! id through every handler and pipeline signature.
@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 
 tokio::task_local! {
     /// Correlation id for the request currently being handled. Set by the
-    /// `log_request` middleware so the Raycast client can name its upstream
+    /// `request_logging` middleware so the Raycast client can name its upstream
     /// dump after the originating inbound one — without threading an id through
     /// every handler and pipeline signature.
     pub static REQUEST_ID: String;
@@ -49,9 +49,9 @@ pub(super) fn headers_to_text(headers: &HeaderMap) -> String {
     text
 }
 
-/// 上游通道登记:request_id → 最终成功送达上游的通道("direct" 或代理 URL)。
-/// `RaycastClient::send` 成功后写入,中间件的完成日志读取后打印,让 trace 能看出这条
-/// 请求走的是直连还是哪个代理。无论是否配置代理都上报(直连即 "direct")。
+/// 上游出口登记：request_id → 最终成功送达上游的出口（"direct" 或账号指定的代理 ID）。
+/// 账号请求或代理测试收到上游响应后写入，中间件的完成日志读取后打印，便于查看
+/// 请求按账号设置走直连、指定代理还是失败后回退直连；直连也会上报。
 ///
 /// 进程内旁路表(与请求日志 store 同级),条目由中间件在请求结束后取走,
 /// 只在极端情况(请求被 abort)下残留,量级为单条字符串,不做主动清理。
@@ -60,7 +60,7 @@ fn channel_registry() -> &'static Mutex<HashMap<String, String>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 登记某请求实际使用的上游通道。`channel` 为 `"direct"` 或代理 URL。
+/// 登记某请求实际使用的上游出口。channel 为 "direct" 或账号指定的代理 ID。
 pub fn record_channel(request_id: &str, channel: &str) {
     if let Ok(mut map) = channel_registry().lock() {
         map.insert(request_id.to_string(), channel.to_string());

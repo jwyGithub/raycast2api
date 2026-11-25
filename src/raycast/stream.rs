@@ -36,22 +36,19 @@ fn premature_error() -> CanonicalEvent {
 /// Drive one upstream chat SSE to canonical events, retrying an identical
 /// request at most once when the stream truncates before any output.
 ///
-/// `response` is the chat SSE body; `fetch_clients` are the proxy-ordered
-/// clients for downloading generated images (inline data-URL conversion) —
-/// kept separate from `response` because the image CDN is a different host
-/// and must respect the same proxy policy as the chat request.
+/// 生成图片下载复用该响应已选账号的出口。发生重试换号时，从新响应更新客户端。
+/// 直连账号只使用直连；代理账号只使用其指定代理，勾选回退后才可尝试直连。
 /// `resend` re-issues the identical upstream request on retry.
 pub(crate) fn canonical_events_with_retry(
     response: reqwest::Response,
     log: Arc<RequestLogStore>,
     timeout: std::time::Duration,
-    fetch_clients: Vec<reqwest::Client>,
     resend: impl FnOnce() -> BoxFuture<'static, Result<reqwest::Response, GatewayError>>
     + Send
     + 'static,
 ) -> impl Stream<Item = CanonicalEvent> + Send + 'static {
     let id = debug::current_request_id();
-    let first = decode_events(response, log.clone(), timeout, fetch_clients.clone());
+    let first = decode_events(response, log.clone(), timeout);
     stream! {
         let mut output_started = false;
         let mut first = std::pin::pin!(first);
@@ -89,7 +86,7 @@ pub(crate) fn canonical_events_with_retry(
                 return;
             }
         };
-        let retry = debug::REQUEST_ID.scope(id.clone(), async { decode_events(response, log, timeout, fetch_clients) }).await;
+        let retry = debug::REQUEST_ID.scope(id.clone(), async { decode_events(response, log, timeout) }).await;
         let mut retry = std::pin::pin!(retry);
         while let Some(result) = retry.next().await {
             let event = match result {
@@ -118,8 +115,8 @@ pub(crate) fn canonical_events_with_retry(
 
 /// Download a generated image and wrap it as an inline `data:` URL, so clients
 /// that cannot reach `ai-images.raycast.com` (S3/CloudFront, often blocked or
-/// geo-fenced) can still render it. Tries the proxy channels in order — same
-/// policy as the chat request — so Proxy mode never falls back to direct.
+/// geo-fenced) can still render it. The clients come from the selected account's
+/// chat transport; direct fallback is included only when that account enables it.
 /// Returns a `data:<mime>;base64,...` string; the caller falls back to the
 /// raw upstream URL on `Err`.
 async fn fetch_image_data_url(
@@ -193,12 +190,16 @@ fn decode_events(
     mut response: reqwest::Response,
     log: Arc<RequestLogStore>,
     timeout: std::time::Duration,
-    fetch_clients: Vec<reqwest::Client>,
 ) -> impl Stream<Item = Result<CanonicalEvent, ()>> + Send + 'static {
     // Grab the correlation id *here*: the task-local REQUEST_ID scope is only
     // valid inside the handler, while the stream below is polled outside it.
     // The stream! block is an async move, so both are moved into it.
     let id = debug::current_request_id();
+    // A retry may select a different account; image downloads follow that response.
+    let fetch_clients = response
+        .extensions_mut()
+        .remove::<Vec<reqwest::Client>>()
+        .unwrap_or_default();
     let attempt = response
         .extensions_mut()
         .remove::<crate::statistics::Attempt>();
@@ -379,7 +380,6 @@ mod tests {
             response(&[json!({"text":text})]),
             log(),
             std::time::Duration::from_secs(20),
-            vec![reqwest::Client::new()],
             || panic!("oversized output must not be replayed"),
         )
         .collect()
@@ -437,7 +437,6 @@ mod tests {
             first_response,
             state.log.clone(),
             std::time::Duration::from_secs(1),
-            vec![reqwest::Client::new()],
             move || Box::pin(async move { Ok(second_response) }),
         )
         .collect()
@@ -498,7 +497,6 @@ mod tests {
             stalled,
             state.log.clone(),
             std::time::Duration::from_millis(50),
-            vec![reqwest::Client::new()],
             || Box::pin(async { Err(GatewayError::Internal("no retry".into())) }),
         )
         .collect()
@@ -520,7 +518,6 @@ mod tests {
             ]),
             log(),
             std::time::Duration::from_secs(20),
-            vec![reqwest::Client::new()],
             move || {
                 Box::pin(async move {
                     retried.fetch_add(1, Ordering::SeqCst);
@@ -561,7 +558,6 @@ mod tests {
                 response(&payloads),
                 log(),
                 std::time::Duration::from_secs(20),
-                vec![reqwest::Client::new()],
                 || panic!("must not retry explicit terminal events"),
             )
             .collect()
@@ -579,7 +575,6 @@ mod tests {
             response(&[]),
             log(),
             std::time::Duration::from_secs(20),
-            vec![reqwest::Client::new()],
             || Box::pin(async { Ok(response(&[json!({"text":"AB"})])) }),
         )
         .collect()
@@ -616,7 +611,6 @@ mod tests {
                 response(&[payload]),
                 log(),
                 std::time::Duration::from_secs(20),
-                vec![reqwest::Client::new()],
                 || panic!("delivered content must never be replayed"),
             )
             .collect()
@@ -636,7 +630,6 @@ mod tests {
                 response(&[]),
                 log(),
                 std::time::Duration::from_secs(20),
-                vec![reqwest::Client::new()],
                 move || {
                     Box::pin(async move {
                         if connection_error {
@@ -680,7 +673,6 @@ mod tests {
                     first,
                     store.clone(),
                     std::time::Duration::from_secs(20),
-                    vec![reqwest::Client::new()],
                     || panic!("transport errors after output must not replay the request"),
                 )
             })
@@ -717,7 +709,6 @@ mod tests {
                         first,
                         store.clone(),
                         std::time::Duration::from_millis(5),
-                        vec![reqwest::Client::new()],
                         move || {
                             Box::pin(async move {
                                 assert!(!partial, "read timeout after output must not retry");
@@ -755,7 +746,6 @@ mod tests {
             response(&[json!({"text":"A"})]),
             log(),
             std::time::Duration::from_secs(20),
-            vec![reqwest::Client::new()],
             || panic!("cancelled stream must not retry"),
         );
         let mut events = Box::pin(events);
@@ -775,7 +765,6 @@ mod tests {
                 }),
                 log(),
                 std::time::Duration::from_secs(20),
-                vec![reqwest::Client::new()],
                 move || {
                     Box::pin(async move {
                         assert!(!partial, "partial output must not be replayed");

@@ -93,6 +93,10 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap();
+            inner
+                .accounts
+                .set_use_status("test@example.com", "enable")
+                .unwrap();
             let app = crate::server::build_router(state);
             let mut body = json!({"model":"test-model", "stream":streaming, "temperature":0.7,"reasoning_effort":"high",
                 "tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object"}}}],

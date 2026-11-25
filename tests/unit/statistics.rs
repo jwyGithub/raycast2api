@@ -381,6 +381,10 @@ async fn upstream_fixture() -> (
             .unwrap(),
         )
         .unwrap();
+    inner
+        .accounts
+        .set_use_status("actual@example.com", "enable")
+        .unwrap();
     (state, server)
 }
 

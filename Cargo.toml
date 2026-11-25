@@ -18,7 +18,7 @@ axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 # Async client to the Raycast backend. rustls avoids a system OpenSSL dependency;
 # `stream` enables reading the SSE response body incrementally;
-# `socks` adds socks5 proxy support for the fallback proxy chain.
+# `socks` supports the SOCKS5 proxy selected in each account's settings.
 # http2:chat 管道需 h2 协商(对齐真实客户端 undici fetch);移除会静默降级
 # chat 为 HTTP/1.1。gzip/brotli/deflate/zstd:响应自动解压(显式 accept-encoding 时不覆盖)。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks", "gzip", "brotli", "deflate", "zstd", "http2"] }

@@ -34,8 +34,8 @@ class AccountCard extends LitElement {
     render() {
         const a = this.account || {};
         const cooling = a.cooldown_until && dayjs.unix(a.cooldown_until).isAfter(dayjs());
-        const state = !a.available ? '不可用' : cooling ? '冷却中' : '可用';
-        const status = !a.available ? 'unavailable' : cooling ? 'cooldown' : 'available';
+        const state = a.use_status === 'disable' ? '禁用' : !a.available ? '不可用' : cooling ? '冷却中' : '可用';
+        const status = a.use_status === 'disable' ? 'unavailable' : !a.available ? 'unavailable' : cooling ? 'cooldown' : 'available';
         const error = a.unavailable_reason || a.error || '';
         const action = name =>
             this.dispatchEvent(
@@ -86,7 +86,7 @@ class AccountCard extends LitElement {
                 </div>
                 <div class="grid gap-0.5 border-t border-[#eff0f2] pt-1.5 text-xs leading-[18px]">
                     <dl
-                        class="grid grid-cols-2 gap-x-2 [&>div]:flex [&>div]:min-w-0 [&>div]:items-baseline [&>div]:gap-1 [&_dd]:min-w-0 [&_dd]:text-[#596373] [&_dt]:shrink-0 [&_dt]:whitespace-nowrap [&_dt]:text-muted"
+                        class="grid grid-cols-1 gap-y-1.5 [&>div]:flex [&>div]:min-w-0 [&>div]:items-baseline [&>div]:gap-1 [&_dd]:min-w-0 [&_dd]:font-semibold [&_dd]:tabular-nums [&_dd]:text-ink [&_dt]:shrink-0 [&_dt]:whitespace-nowrap [&_dt]:text-muted"
                     >
                         <div class="min-w-0">
                             <dt>创建时间</dt>
@@ -95,6 +95,21 @@ class AccountCard extends LitElement {
                         <div class="min-w-0">
                             <dt>额度同步</dt>
                             <dd><ui-tooltip .content=${this.date(a.info_fetched_at)}></ui-tooltip></dd>
+                        </div>
+                        <div class="min-w-0">
+                            <dt>代理配置</dt>
+                            <dd class="flex flex-1 items-center gap-1.5 font-mono">
+                                <ui-tooltip class="min-w-0" .content=${a.proxy_config || (a.proxy === 'direct' ? 'direct' : '—')}></ui-tooltip>
+                                ${a.proxy && a.proxy !== 'direct' && a.proxy_fallback_direct ? html`<span
+                                    class="inline-flex shrink-0 text-amber-600" title="代理失败时回退直连">
+                                    <svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                                        role="img" aria-label="代理失败时回退直连" focusable="false">
+                                        <path d="m9 10-5 5 5 5"></path>
+                                        <path d="M20 4v7a4 4 0 0 1-4 4H4"></path>
+                                    </svg>
+                                </span>` : ''}
+                            </dd>
                         </div>
                     </dl>
                 </div>
@@ -125,6 +140,10 @@ class AccountCard extends LitElement {
                     .disabled=${this.busy || (!cooling && a.available)}
                     @button-click=${() => action('restore')}
                 ></ui-button>
+                <ui-button class="inline-flex" label=${a.use_status === 'enable' ? '禁用' : '启用'}
+                    .disabled=${this.busy} @button-click=${() => action('toggle')}></ui-button>
+                <ui-button class="inline-flex" label="代理" .disabled=${this.busy}
+                    @button-click=${() => action('proxy')}></ui-button>
                 <ui-button
                     class="inline-flex"
                     label="删除"
@@ -160,7 +179,9 @@ class AccountsPanel extends LitElement {
         error: { state: true },
         dialog: { state: true },
         source: { state: true },
-        importing: { state: true }
+        importing: { state: true },
+        proxyDialog: { state: true }, proxyEmail: { state: true }, proxyMode: { state: true },
+        proxyId: { state: true }, proxyFallbackDirect: { state: true }, proxyOptions: { state: true }, proxyLoading: { state: true }
     };
     constructor() {
         super();
@@ -177,7 +198,7 @@ class AccountsPanel extends LitElement {
             error: '',
             dialog: false,
             source: '',
-            importing: false
+            importing: false, proxyDialog: false, proxyEmail: '', proxyMode: 'direct', proxyId: '', proxyFallbackDirect: false, proxyOptions: [], proxyLoading: false
         });
     }
     createRenderRoot() {
@@ -187,13 +208,14 @@ class AccountsPanel extends LitElement {
         super.connectedCallback();
         // 列表 60s 静默轮询，仅账号面板可见且未操作时刷新。
         this.pollTimer = setInterval(() => {
-            if (!this.active || this.workingEmail || this.dialog) return;
+            if (!this.active || this.workingEmail || this.dialog || this.proxyDialog) return;
             this.load(true);
         }, 60000);
     }
     disconnectedCallback() {
         super.disconnectedCallback();
         clearInterval(this.pollTimer);
+        this.closeProxy();
     }
     async load(silent = false) {
         if (!this.isConnected) return;
@@ -276,16 +298,64 @@ class AccountsPanel extends LitElement {
         this.page = 1;
         this.load();
     }
+    closeProxy() {
+        this.proxyEpoch = {};
+        this.proxyDialog = false;
+        this.proxyOptions = [];
+        this.proxyEmail = '';
+        this.proxyFallbackDirect = false;
+    }
+    async openProxy(email) {
+        const account = this.accounts.find(item => item.email === email);
+        if (!account) return;
+        const epoch = this.proxyEpoch = {};
+        this.proxyEmail = email;
+        this.proxyMode = account.proxy === 'direct' ? 'direct' : 'proxy';
+        this.proxyId = account.proxy === 'direct' ? '' : account.proxy;
+        this.proxyFallbackDirect = account.proxy_fallback_direct === true;
+        this.proxyOptions = [];
+        this.proxyDialog = true;
+        this.proxyLoading = true;
+        try {
+            const proxies = await this.request('list', {}, 'proxies');
+            if (!this.isConnected || this.proxyEpoch !== epoch) return;
+            this.proxyOptions = proxies.map(proxy => [proxy.id, proxy.type + '://' + proxy.host + ':' + proxy.port]);
+        } catch (error) { if (this.proxyEpoch === epoch) message(error.message || '加载代理失败'); }
+        finally { if (this.proxyEpoch === epoch) this.proxyLoading = false; }
+    }
+    async saveProxy() {
+        if (this.workingEmail || this.proxyLoading) return;
+        if (this.proxyMode === 'proxy' && !this.proxyOptions.some(([id]) => id === this.proxyId)) {
+            message('请选择代理'); return;
+        }
+        const email = this.proxyEmail;
+        const epoch = this.proxyEpoch;
+        this.workingEmail = email;
+        try {
+            await this.request('settings', {
+                email,
+                proxy: this.proxyMode === 'direct' ? 'direct' : this.proxyId,
+                proxy_fallback_direct: this.proxyMode === 'proxy' && this.proxyFallbackDirect
+            });
+            if (!this.isConnected || this.proxyEpoch !== epoch) return;
+            this.closeProxy();
+            message('账号代理已保存', 'success');
+            await this.load();
+        } catch (error) { if (this.proxyEpoch === epoch) message(error.message || '保存失败'); }
+        finally { this.workingEmail = ''; }
+    }
     async accountAction(e) {
         const { action, email } = e.detail;
         if (this.workingEmail) return;
+        if (action === 'proxy') { await this.openProxy(email); return; }
         if (action === 'delete' && !confirm('确定删除账号 ' + email + ' 吗？')) return;
         this.workingEmail = email;
         try {
-            const account = await this.request(action, { email });
+            const useStatus = this.accounts.find(item => item.email === email)?.use_status === 'enable' ? 'disable' : 'enable';
+            const account = await this.request(action === 'toggle' ? 'settings' : action, action === 'toggle' ? { email, use_status: useStatus } : { email });
             const failed = action === 'restore' && !account.available;
             message(
-                action === 'delete'
+                action === 'toggle' ? (account.use_status === 'enable' ? '账号已启用' : '账号已禁用') : action === 'delete'
                     ? '账号已删除'
                     : action === 'restore'
                       ? failed
@@ -435,6 +505,28 @@ class AccountsPanel extends LitElement {
                 </footer>
             </div>
         </section>
+        <ui-dialog .open=${this.proxyDialog} heading="设置代理"
+            .dismissible=${!this.workingEmail} .closeOnBackdrop=${!this.workingEmail} @dialog-close=${() => this.closeProxy()}
+            .content=${this.proxyDialog ? html`<div class="grid gap-4">
+                <p class="text-xs text-muted">${this.proxyEmail}</p>
+                <ui-select label="连接方式" .value=${this.proxyMode} .disabled=${!!this.workingEmail}
+                    .options=${[['direct', '直连'], ['proxy', '代理']]}
+                    @select-change=${e => this.proxyMode = e.detail.value}></ui-select>
+                ${this.proxyMode === 'proxy' ? html`<ui-select label="选择代理" .value=${this.proxyId}
+                    .options=${this.proxyOptions} .disabled=${this.proxyLoading || !!this.workingEmail}
+                    @select-change=${e => this.proxyId = e.detail.value}></ui-select>
+                    <label class="flex items-center gap-2 text-xs">
+                        <input type="checkbox" class="size-4 accent-brand"
+                            .checked=${this.proxyFallbackDirect} ?disabled=${!!this.workingEmail}
+                            @change=${e => this.proxyFallbackDirect = e.target.checked}>
+                        代理失败回退直连
+                    </label>
+                    ${!this.proxyOptions.length ? html`<p class="text-xs text-muted">${this.proxyLoading ? '加载中…' : '暂无代理，请先在代理管理中新增'}</p>` : ''}` : ''}
+            </div>` : ''}
+            .footer=${html`<ui-button label="取消" .disabled=${!!this.workingEmail} @button-click=${() => this.closeProxy()}></ui-button>
+                <ui-button label="保存" variant="primary" .disabled=${this.proxyLoading || !!this.workingEmail}
+                    @button-click=${() => this.saveProxy()}></ui-button>`}
+        ></ui-dialog>
         <ui-dialog
             .open=${this.dialog}
             heading="导入账号"

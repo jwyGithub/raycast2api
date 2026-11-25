@@ -31,8 +31,6 @@ fn app_with_api_key(api_key: &str) -> (axum::Router, Arc<AccountStore>) {
         bind_addr_dual: None,
         upstream_timeout_secs: 20,
         accounts_db: ":memory:".into(),
-        proxies: Vec::new(),
-        proxies_mode: raycast2api::proxies::ProxyMode::Direct,
     });
     let log_store = Arc::new(raycast2api::log::store::RequestLogStore::new(db.clone()));
     let client =
@@ -491,4 +489,137 @@ async fn wrong_x_api_key_is_unauthorized() {
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn proxy_management_and_account_settings_round_trip() {
+    let (app, accounts) = app();
+    let proxy = serde_json::json!({"type":"http","host":"127.0.0.1","port":8080,"user_name":"user","password":"password"});
+    let (status, created) = call(
+        &app,
+        Method::POST,
+        "/v1/proxies/create",
+        Some(proxy.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert!(created["data"]["latency_ms"].is_null());
+    let id = created["data"]["id"].as_str().unwrap();
+    let (_, list) = call(
+        &app,
+        Method::POST,
+        "/v1/proxies/list",
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(list["data"][0]["id"], id);
+    let mut updated = proxy.clone();
+    updated["id"] = id.into();
+    updated["type"] = "socks5".into();
+    let (status, updated) = call(&app, Method::POST, "/v1/proxies/update", Some(updated)).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["data"]["type"], "socks5");
+    call(
+        &app,
+        Method::POST,
+        "/v1/accounts/create",
+        Some(account_body("proxy@test", "test")),
+    )
+    .await;
+    assert_eq!(accounts.count_available(), 0);
+    for body in [
+        serde_json::json!({"email":"proxy@test","use_status":"invalid"}),
+        serde_json::json!({"email":"proxy@test","proxy":"missing"}),
+    ] {
+        assert_eq!(
+            call(&app, Method::POST, "/v1/accounts/settings", Some(body))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for body in [
+        serde_json::json!({"email":"proxy@test","use_status":"enable"}),
+        serde_json::json!({"email":"proxy@test","proxy":id}),
+    ] {
+        assert_eq!(
+            call(&app, Method::POST, "/v1/accounts/settings", Some(body))
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+    let selected = accounts.next_available().unwrap();
+    assert_eq!(selected.use_status, "enable");
+    assert_eq!(selected.proxy, id);
+    assert_eq!(
+        call(
+            &app,
+            Method::POST,
+            "/v1/proxies/delete",
+            Some(serde_json::json!({"id":id}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, view) = call(
+        &app,
+        Method::POST,
+        "/v1/accounts/detail",
+        Some(serde_json::json!({"email":"proxy@test"})),
+    )
+    .await;
+    assert_eq!(view["data"]["proxy"], id);
+    assert_eq!(view["data"]["use_status"], "enable");
+    call(
+        &app,
+        Method::POST,
+        "/v1/accounts/settings",
+        Some(serde_json::json!({"email":"proxy@test","proxy":"direct"})),
+    )
+    .await;
+    assert_eq!(
+        call(
+            &app,
+            Method::POST,
+            "/v1/proxies/delete",
+            Some(serde_json::json!({"id":id}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &app,
+            Method::POST,
+            "/v1/proxies/test",
+            Some(serde_json::json!({"id":id}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    for path in [
+        "list",
+        "create",
+        "update",
+        "delete",
+        "test",
+        "test-config",
+        "exit-details",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/proxies/{path}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 }

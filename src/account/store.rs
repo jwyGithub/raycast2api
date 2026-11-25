@@ -35,6 +35,9 @@ pub struct AccountRow {
     pub refresh_token: Option<String>,
     pub obtained_at: Option<String>,
     pub available: bool,
+    pub use_status: String,
+    pub proxy: String,
+    pub proxy_fallback_direct: bool,
     pub unavailable_reason: Option<String>,
     pub has_pro_features: Option<bool>,
     pub tier: Option<String>,
@@ -67,6 +70,9 @@ struct StoredAccount {
     refresh_token: Option<String>,
     obtained_at: Option<String>,
     available: i32,
+    use_status: String,
+    proxy: String,
+    proxy_fallback_direct: i32,
     unavailable_reason: Option<String>,
     has_pro_features: Option<i32>,
     tier: Option<String>,
@@ -94,6 +100,9 @@ impl From<StoredAccount> for AccountRow {
             refresh_token: row.refresh_token,
             obtained_at: row.obtained_at,
             available: row.available != 0,
+            use_status: row.use_status,
+            proxy: row.proxy,
+            proxy_fallback_direct: row.proxy_fallback_direct != 0,
             unavailable_reason: row.unavailable_reason,
             has_pro_features: row.has_pro_features.map(|value| value != 0),
             tier: row.tier,
@@ -123,6 +132,7 @@ struct NewAccount<'a> {
     refresh_token: Option<&'a str>,
     obtained_at: Option<&'a str>,
     user_json: &'a str,
+    use_status: &'a str,
     created_at: &'a str,
     updated_at: &'a str,
 }
@@ -138,6 +148,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     obtained_at         TEXT,
     user_json           TEXT,
     available           INTEGER NOT NULL DEFAULT 1,
+    use_status          TEXT NOT NULL DEFAULT 'disable',
+    proxy               TEXT NOT NULL DEFAULT 'direct',
+    proxy_fallback_direct INTEGER NOT NULL DEFAULT 0,
     unavailable_reason  TEXT,
     has_pro_features    INTEGER,
     tier                TEXT,
@@ -159,6 +172,18 @@ CREATE TABLE IF NOT EXISTS accounts (
 /// 列,`ALTER TABLE` 加列幂等不可行,用 `PRAGMA table_info` 判断。
 fn migrate(conn: &mut diesel::sqlite::SqliteConnection) {
     for (column, ddl) in [
+        (
+            "proxy_fallback_direct",
+            "ALTER TABLE accounts ADD COLUMN proxy_fallback_direct INTEGER NOT NULL DEFAULT 0;",
+        ),
+        (
+            "use_status",
+            "ALTER TABLE accounts ADD COLUMN use_status TEXT NOT NULL DEFAULT 'enable';",
+        ),
+        (
+            "proxy",
+            "ALTER TABLE accounts ADD COLUMN proxy TEXT NOT NULL DEFAULT 'direct';",
+        ),
         (
             "cooldown_until",
             "ALTER TABLE accounts ADD COLUMN cooldown_until INTEGER;",
@@ -262,6 +287,7 @@ impl AccountStore {
                             refresh_token: record.refresh_token.as_deref(),
                             obtained_at: record.obtained_at.as_deref(),
                             user_json: &user_json,
+                            use_status: "disable",
                             created_at: &now,
                             updated_at: &now,
                         })
@@ -453,6 +479,27 @@ impl AccountStore {
     }
 
     /// 按 email 取单个账号;不存在返回 `None`。
+    pub fn set_use_status(&self, email: &str, status: &str) -> Result<(), GatewayError> {
+        if !matches!(status, "enable" | "disable") {
+            return Err(GatewayError::BadRequest(
+                "use_status must be enable or disable".into(),
+            ));
+        }
+        crate::storage::db::blocking(|| {
+            let n = diesel::update(accounts::table.filter(accounts::email.eq(email)))
+                .set((
+                    accounts::use_status.eq(status),
+                    accounts::updated_at.eq(unix_secs().to_string()),
+                ))
+                .execute(&mut *self.db.lock())
+                .map_err(sql_err)?;
+            if n == 0 {
+                return Err(GatewayError::NotFound("account not found".into()));
+            }
+            Ok(())
+        })
+    }
+
     pub fn get(&self, email: &str) -> Result<Option<AccountRow>, GatewayError> {
         crate::storage::db::blocking(|| {
             let mut conn = self.db.lock();
@@ -473,11 +520,14 @@ impl AccountStore {
             let mut conn = self.db.lock();
             accounts::table
                 .filter(
-                    accounts::available.eq(1).and(
-                        accounts::cooldown_until
-                            .is_null()
-                            .or(accounts::cooldown_until.le(now)),
-                    ),
+                    accounts::use_status
+                        .eq("enable")
+                        .and(accounts::available.eq(1))
+                        .and(
+                            accounts::cooldown_until
+                                .is_null()
+                                .or(accounts::cooldown_until.le(now)),
+                        ),
                 )
                 .count()
                 .get_result::<i64>(&mut *conn)
@@ -496,7 +546,11 @@ impl AccountStore {
             let now = unix_secs() as i64;
             let mut conn = self.db.lock();
             accounts::table
-                .filter(accounts::available.eq(1))
+                .filter(
+                    accounts::use_status
+                        .eq("enable")
+                        .and(accounts::available.eq(1)),
+                )
                 .filter(accounts::cooldown_until.gt(now))
                 .select(diesel::dsl::min(accounts::cooldown_until))
                 .first::<Option<i64>>(&mut *conn)
@@ -550,11 +604,14 @@ impl AccountStore {
             for after in [last, 0] {
                 selected = accounts::table
                     .filter(
-                        accounts::available.eq(1).and(
-                            accounts::cooldown_until
-                                .is_null()
-                                .or(accounts::cooldown_until.le(now)),
-                        ),
+                        accounts::use_status
+                            .eq("enable")
+                            .and(accounts::available.eq(1))
+                            .and(
+                                accounts::cooldown_until
+                                    .is_null()
+                                    .or(accounts::cooldown_until.le(now)),
+                            ),
                     )
                     .filter(accounts::id.gt(after))
                     .order(accounts::id.asc())
@@ -708,6 +765,15 @@ mod tests {
         .unwrap()
     }
 
+    fn upsert_enabled(
+        store: &AccountStore,
+        record: &AccountRecord,
+    ) -> Result<UpsertOutcome, GatewayError> {
+        let result = store.upsert(record)?;
+        store.set_use_status(&record.email().unwrap(), "enable")?;
+        Ok(result)
+    }
+
     fn store() -> AccountStore {
         AccountStore::new(Db::open(":memory:").unwrap())
     }
@@ -724,7 +790,7 @@ mod tests {
                 serde_json::json!({"user":{"email":email},"device_id":"1111111111111111111111111111111111111111111111111111111111111111","access_token":"rca_test"}),
             )
             .unwrap();
-            store.upsert(&record).unwrap();
+            upsert_enabled(&store, &record).unwrap();
         }
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
         let threads: Vec<_> = (0..8)
@@ -747,27 +813,30 @@ mod tests {
         let s = store();
         // 插入
         assert_eq!(
-            s.upsert(&rec("a@x", "t1")).unwrap(),
+            upsert_enabled(&s, &rec("a@x", "t1")).unwrap(),
             UpsertOutcome::Inserted
         );
         // token 相同 → 跳过
         assert_eq!(
-            s.upsert(&rec("a@x", "t1")).unwrap(),
+            upsert_enabled(&s, &rec("a@x", "t1")).unwrap(),
             UpsertOutcome::Unchanged
         );
         // token 变化 → 更新
-        assert_eq!(s.upsert(&rec("a@x", "t2")).unwrap(), UpsertOutcome::Updated);
+        assert_eq!(
+            upsert_enabled(&s, &rec("a@x", "t2")).unwrap(),
+            UpsertOutcome::Updated
+        );
         assert_eq!(all(&s)[0].access_token, "t2");
     }
 
     #[test]
     fn update_resets_availability() {
         let s = store();
-        s.upsert(&rec("a@x", "t1")).unwrap();
+        upsert_enabled(&s, &rec("a@x", "t1")).unwrap();
         s.mark_unavailable("a@x", "token 失效 (401)");
         assert!(!all(&s)[0].available);
         // 带 token 更新 → 恢复
-        s.upsert(&rec("a@x", "t9")).unwrap();
+        upsert_enabled(&s, &rec("a@x", "t9")).unwrap();
         let row = all(&s)[0].clone();
         assert!(row.available);
         assert_eq!(row.unavailable_reason, None);
@@ -778,7 +847,7 @@ mod tests {
         let s = store();
         // 不存在 → None
         assert!(s.get("a@x").unwrap().is_none());
-        s.upsert(&rec("a@x", "t1")).unwrap();
+        upsert_enabled(&s, &rec("a@x", "t1")).unwrap();
         let row = s.get("a@x").unwrap().expect("should exist");
         assert_eq!(row.access_token, "t1");
         assert_eq!(row.has_pro_features, None);
@@ -799,7 +868,7 @@ mod tests {
         let s = store();
         let bad: AccountRecord = serde_json::from_str(r#"{ "access_token": "t" }"#).unwrap();
         assert!(matches!(
-            s.upsert(&bad).unwrap_err(),
+            upsert_enabled(&s, &bad).unwrap_err(),
             GatewayError::BadRequest(_)
         ));
     }
@@ -807,9 +876,9 @@ mod tests {
     #[test]
     fn rotation_cycles_and_skips_unavailable() {
         let s = store();
-        s.upsert(&rec("a@x", "ta")).unwrap();
-        s.upsert(&rec("b@x", "tb")).unwrap();
-        s.upsert(&rec("c@x", "tc")).unwrap();
+        upsert_enabled(&s, &rec("a@x", "ta")).unwrap();
+        upsert_enabled(&s, &rec("b@x", "tb")).unwrap();
+        upsert_enabled(&s, &rec("c@x", "tc")).unwrap();
         assert_eq!(s.next_available().unwrap().email, "a@x");
         assert_eq!(s.next_available().unwrap().email, "b@x");
         // 摘除 b 后,轮到 c,再循环 a、c
@@ -822,8 +891,8 @@ mod tests {
     #[test]
     fn cooldown_skips_account_until_expiry() {
         let s = store();
-        s.upsert(&rec("a@x", "ta")).unwrap();
-        s.upsert(&rec("b@x", "tb")).unwrap();
+        upsert_enabled(&s, &rec("a@x", "ta")).unwrap();
+        upsert_enabled(&s, &rec("b@x", "tb")).unwrap();
 
         // a 进入冷却:轮询只剩 b。
         s.mark_cooldown("a@x", unix_secs() as i64 + 600, "限额 25/h");
@@ -845,7 +914,7 @@ mod tests {
             s.next_available().unwrap_err(),
             GatewayError::NoAccount(_)
         ));
-        s.upsert(&rec("a@x", "ta")).unwrap();
+        upsert_enabled(&s, &rec("a@x", "ta")).unwrap();
         s.mark_unavailable("a@x", "x");
         assert!(matches!(
             s.next_available().unwrap_err(),
@@ -856,7 +925,7 @@ mod tests {
     #[test]
     fn delete_reports_existence() {
         let s = store();
-        s.upsert(&rec("a@x", "ta")).unwrap();
+        upsert_enabled(&s, &rec("a@x", "ta")).unwrap();
         assert_eq!(s.delete(Some("a@x"), None).unwrap(), 1);
         assert_eq!(s.delete(Some("a@x"), None).unwrap(), 0);
         assert!(all(&s).is_empty());
@@ -865,7 +934,7 @@ mod tests {
     #[test]
     fn update_info_writes_quota_and_availability() {
         let s = store();
-        s.upsert(&rec("a@x", "ta")).unwrap();
+        upsert_enabled(&s, &rec("a@x", "ta")).unwrap();
         let info = AccountInfo {
             tier: Some("pro".into()),
             sub_status: Some("trialing".into()),

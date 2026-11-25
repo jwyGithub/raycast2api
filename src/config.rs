@@ -4,7 +4,6 @@
 //! `source/src/config.ts`. Runtime settings are read from `config.json` only;
 //! Redis connection settings are read separately from `REDIS_*` environment variables.
 
-use crate::proxies::ProxyMode;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 
@@ -76,12 +75,6 @@ pub struct ConfigFile {
     pub accounts_db: Option<String>,
     /// 上游超时（秒），必须大于零，默认 20。
     pub upstream_timeout_secs: Option<std::num::NonZeroU64>,
-    /// 上游代理链(可选):`http://`/`https://`/`socks5://` URL 列表。
-    pub proxies: Option<Vec<String>>,
-    /// 代理模式 `direct`(缺省) / `proxy` / `proxy_fallback_direct`,
-    /// 语义与校验见 [`crate::proxies`]。
-    #[serde(default, alias = "proxiesMode")]
-    pub proxies_mode: Option<ProxyMode>,
 }
 
 /// Runtime configuration, loaded once at startup via [`Settings::from_path`].
@@ -104,10 +97,6 @@ pub struct Settings {
     /// 上游超时秒数(config.json 的同名键,缺省 20)。运行时统一通过
     /// [`Settings::upstream_timeout`] 取 `Duration`,不要直接换算。
     pub upstream_timeout_secs: u64,
-    /// 上游代理链:按顺序尝试的代理 URL。
-    pub proxies: Vec<String>,
-    /// 代理模式;`proxy` / `proxy_fallback_direct` 保证 `proxies` 非空。
-    pub proxies_mode: ProxyMode,
 }
 
 impl Settings {
@@ -169,8 +158,6 @@ impl Settings {
             None
         };
 
-        let (proxies_mode, proxies) =
-            crate::proxies::validate(config.proxies_mode, config.proxies)?;
         let dashboard_password = non_empty(config.dashboard_password);
         let dashboard_session_secret = non_empty(config.dashboard_session_secret);
         if dashboard_password.is_some()
@@ -192,8 +179,6 @@ impl Settings {
                 .upstream_timeout_secs
                 .map_or(20, std::num::NonZeroU64::get),
             accounts_db,
-            proxies,
-            proxies_mode,
         })
     }
 }
@@ -204,7 +189,7 @@ fn non_empty(value: Option<String>) -> Option<String> {
 }
 
 #[cfg(test)]
-mod proxy_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -348,26 +333,8 @@ mod proxy_tests {
     }
 
     #[test]
-    fn proxies_mode_is_validated_against_proxies_at_startup() {
-        let parse = |extra: &str| {
-            Settings::from_config_file(
-                serde_json::from_str(&format!(
-                    r#"{{"raycast_signature_secret":"s","api_key":"test-key"{extra}}}"#
-                ))
-                .unwrap(),
-            )
-        };
-        assert_eq!(parse("").unwrap().proxies_mode, ProxyMode::Direct);
-        let ok =
-            parse(r#","proxies_mode":"proxy_fallback_direct","proxies":["http://127.0.0.1:7897"]"#)
-                .unwrap();
-        assert_eq!(ok.proxies_mode, ProxyMode::ProxyFallbackDirect);
-        assert!(
-            parse(r#","proxies_mode":"proxy""#)
-                .unwrap_err()
-                .contains("proxies_mode")
-        );
-        // 旧布尔键已移除,值写错类型直接拒绝。
-        assert!(serde_json::from_str::<ConfigFile>(r#"{"proxies_mode":true}"#).is_err());
+    fn legacy_proxy_configuration_is_ignored() {
+        let config = serde_json::from_str(r#"{"raycast_signature_secret":"s","api_key":"test-key","proxies_mode":"proxy","proxies":["http://127.0.0.1:7897"]}"#).unwrap();
+        assert!(Settings::from_config_file(config).is_ok());
     }
 }

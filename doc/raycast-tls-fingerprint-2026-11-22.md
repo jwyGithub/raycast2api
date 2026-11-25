@@ -90,7 +90,7 @@ TLS 之外的头层已按本次逆向结论对齐(`src/raycast/client.rs` 的 `T
 | presigned PUT(direct_upload 目标,非 backend 域) | got 裸实例(`tb`,无默认 UA/无 UA 头) | 无 | §2.2 |
 | `OAUTH_TOKEN_URL` `/oauth/token`(`$y` 实例,login/refresh/revoke 共用) | got(`$y`,prefixUrl=backend,UA=Wy) | `x-Windows-amd64` | §2.2 |
 
-网关现状(2026-11-23 方案 C 已落地):`RaycastClient` 持有双客户端池 —— chat 走 h2 能力组(ALPN `h2, http/1.1`,按服务端协商,实测对 backend.raycast.com 协商到 HTTP/2),其余端点走 `http1_only` 组(锁定 HTTP/1.1,reqwest 不发 ALPN 扩展);代理模式下两组各自成链,轮换/统计逻辑共用。已对齐 HTTP 版本维度;ClientHello 套件集/扩展序仍是 rustls 默认(与 OpenSSL 不同,见 §4 触发条件)。
+网关现状(2026-11-23 方案 C 已落地):`RaycastClient` 持有双客户端池 —— chat 走 h2 能力组(ALPN `h2, http/1.1`,按服务端协商,实测对 backend.raycast.com 协商到 HTTP/2),其余端点走 `http1_only` 组(锁定 HTTP/1.1,reqwest 不发 ALPN 扩展)。出口现由账号设置选择直连或单个代理；指定代理按 got/chat 分别缓存客户端，仅该账号勾选回退时追加直连，没有全局代理模式或多代理链。已对齐 HTTP 版本维度;ClientHello 套件集/扩展序仍是 rustls 默认(与 OpenSSL 不同,见 §4 触发条件)。
 
 ## 5. 若需对齐(方案备忘)
 

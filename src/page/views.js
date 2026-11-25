@@ -1,5 +1,6 @@
 import { LitElement, html } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
 import './views/accounts.js';
+import './views/proxies.js';
 import './views/api-keys.js';
 import './views/logs.js';
 import './views/models.js';
@@ -53,6 +54,8 @@ class AccountConsole extends LitElement {
         this.loginAttempt = null;
         this.sessionEpoch = {};
         this.querySelector('api-keys-panel')?.clear();
+        this.querySelector('proxies-panel')?.clear();
+        this.querySelector('accounts-panel')?.closeProxy();
         this.loggingIn = false;
         this.querySelector('logs-panel')?.closeDetail();
         this.querySelector('models-panel')?.closeDetail();
@@ -164,6 +167,7 @@ class AccountConsole extends LitElement {
         this.panel = panel;
         await this.updateComplete;
         if (!this.authenticated || this.panel !== panel) return;
+        if (panel === 'proxies') this.querySelector('proxies-panel')?.load();
         if (panel === 'api-keys') this.querySelector('api-keys-panel')?.load();
         if (panel === 'logs') this.querySelector('logs-panel').load();
         if (panel === 'models') this.querySelector('models-panel').load();
@@ -226,6 +230,7 @@ class AccountConsole extends LitElement {
                         ${[
                             ['accounts', '账号面板'],
                             ['models', '模型面板'],
+                            ['proxies', '代理管理'],
                             ['api-keys', 'API Key'],
                             ['statistics', '统计面板'],
                             ['logs', '日志面板']
@@ -249,7 +254,7 @@ class AccountConsole extends LitElement {
                 class="min-h-0 flex-1 flex-col ${this.panel === 'accounts' ? 'flex' : 'hidden'}"
                 ?inert=${this.panel !== 'accounts'}
                 .active=${this.panel === 'accounts'}
-                .request=${(path, body) => this.request(path, body)}
+                .request=${(path, body, resource) => this.request(path, body, resource)}
             ></accounts-panel>
             <logs-panel
                 class="min-h-0 flex-1 overflow-hidden ${this.panel === 'logs' ? 'block' : 'hidden'}"
@@ -261,6 +266,10 @@ class AccountConsole extends LitElement {
                 ?inert=${this.panel !== 'models'}
                 .request=${(path, body) => this.request(path, body, 'models')}
             ></models-panel>
+            ${this.panel === 'proxies' ? html`<proxies-panel
+                class="block min-h-0 flex-1 overflow-hidden"
+                .request=${(path, body) => this.request(path, body, 'proxies')}
+            ></proxies-panel>` : ''}
             ${this.panel === 'api-keys' ? html`<api-keys-panel
                 class="block min-h-0 flex-1 overflow-hidden"
                 .request=${(path, body) => this.request(path, body, 'api-keys')}

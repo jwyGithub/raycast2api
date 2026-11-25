@@ -4,7 +4,8 @@
 //! Responses `input_image`) or base64/url sources (Anthropic `image.source`).
 //! Everything funnels into [`resolve_data_url`] / [`resolve_url_part`], which
 //! produce canonical [`Attachment`]s with raw bytes. Remote `https://` URLs are
-//! fetched with a bounded shared client — a failed fetch drops the attachment
+//! fetched after account selection through that account's configured exit.
+//! A failed fetch drops the attachment
 //! (with a log line) rather than failing the request, mirroring how the real
 //! client degrades images it cannot attach.
 
@@ -16,7 +17,7 @@ use crate::util::unix_secs;
 
 /// Resolve one inbound image reference (OpenAI/Anthropic/Responses all funnel
 /// here): a `data:` URL decodes inline; an `https://` URL becomes a
-/// [`Attachment::Remote`] placeholder the handler layer fetches; anything else
+/// [`Attachment::Remote`] placeholder the account dispatcher fetches; anything else
 /// is unsupported and returns `None` (caller drops it).
 pub fn from_url_reference(url: &str) -> Option<Attachment> {
     if let Some(attachment) = resolve_data_url(url) {
@@ -73,63 +74,66 @@ pub fn from_base64(media_type: &str, data: &str) -> Option<Attachment> {
     })
 }
 
-/// Fetch a remote `https://` image URL. The shared client is process-wide
-/// (connection reuse); failures return `None` so the caller can degrade.
-pub async fn fetch_url(client: &reqwest::Client, url: &str) -> Option<Attachment> {
+/// 使用已选账号的客户端下载远程图片；仅账号允许回退时才包含直连客户端。
+/// 下载失败返回 None，由调度器添加图片省略占位文本。
+pub async fn fetch_url(clients: &[reqwest::Client], url: &str) -> Option<Attachment> {
     if !url.starts_with("https://") {
         return None;
     }
     let started = std::time::Instant::now();
-    let result = async {
-        let response = client
-            .get(url)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await?;
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let bytes = response.bytes().await?;
-        Ok::<_, reqwest::Error>((content_type, bytes))
+    for client in clients {
+        let result = async {
+            let response = client
+                .get(url)
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await?
+                .error_for_status()?;
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let bytes = response.bytes().await?;
+            Ok::<_, reqwest::Error>((content_type, bytes))
+        }
+        .await;
+        match result {
+            Ok((content_type, bytes)) if bytes.len() <= MAX_FETCH_BYTES => {
+                // Sniff the type when the server sends a generic/missing one; the
+                // magic-byte check doubles as validation that it is actually an image.
+                let media_type = sniff(&content_type, &bytes)?;
+                tracing::info!(
+                    bytes = bytes.len(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "fetched remote image attachment"
+                );
+                return Some(Attachment::Inline {
+                    media_type,
+                    data: bytes.to_vec(),
+                });
+            }
+            Ok((_, bytes)) => {
+                tracing::warn!(
+                    bytes = bytes.len(),
+                    "remote image exceeds fetch cap, dropped"
+                );
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "remote image fetch failed: {}",
+                    crate::error::error_chain(&error)
+                );
+            }
+        }
     }
-    .await;
-    match result {
-        Ok((content_type, bytes)) if bytes.len() <= MAX_FETCH_BYTES => {
-            // Sniff the type when the server sends a generic/missing one; the
-            // magic-byte check doubles as validation that it is actually an image.
-            let media_type = sniff(&content_type, &bytes)?;
-            tracing::info!(
-                bytes = bytes.len(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "fetched remote image attachment"
-            );
-            Some(Attachment::Inline {
-                media_type,
-                data: bytes.to_vec(),
-            })
-        }
-        Ok((_, bytes)) => {
-            tracing::warn!(
-                bytes = bytes.len(),
-                "remote image exceeds fetch cap, dropped"
-            );
-            None
-        }
-        Err(error) => {
-            tracing::warn!(
-                "remote image fetch failed, dropped: {}",
-                crate::error::error_chain(&error)
-            );
-            None
-        }
-    }
+    None
 }
 
 /// Resolve the media type from a Content-Type header with byte-sniffing

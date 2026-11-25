@@ -32,6 +32,7 @@ pub async fn auth(
 
     let is_management = [
         "/v1/accounts/",
+        "/v1/proxies/",
         "/v1/logs/",
         "/v1/models/",
         "/v1/statistics/",

@@ -20,7 +20,8 @@ pub async fn restore(
     // 实时验证:能查通则顺手更新额度信息;查不通不影响"已恢复"这个事实。
     let mut upstream_note: Option<String> = None;
     if let Some(row) = store.get(email)? {
-        match crate::account::quota_refresh::fetch_info(client, &row.access_token).await {
+        let selected = client.for_account(&row)?;
+        match crate::account::quota_refresh::fetch_info(&selected, &row.access_token).await {
             Ok(Some(info)) => {
                 store.update_info(email, &info)?;
             }

@@ -5,6 +5,7 @@ mod api_keys;
 pub mod login;
 pub mod logs;
 pub mod models;
+mod proxies;
 pub mod statistics;
 
 use axum::{
@@ -17,6 +18,14 @@ use crate::server::state::SharedState;
 /// Session/API-key-protected routes, relative to /v1; login is public.
 pub(crate) fn routes() -> Router<SharedState> {
     Router::new()
+        .route("/proxies/list", post(proxies::list))
+        .route("/proxies/create", post(proxies::create))
+        .route("/proxies/update", post(proxies::update))
+        .route("/proxies/delete", post(proxies::delete))
+        .route("/proxies/test", post(proxies::test))
+        .route("/proxies/test-config", post(proxies::test_config))
+        .route("/proxies/exit-details", post(proxies::exit_details))
+        .route("/accounts/settings", post(accounts::settings))
         .route("/accounts/list", post(accounts::list))
         .route("/accounts/detail", post(accounts::detail))
         .route("/accounts/create", post(accounts::create))

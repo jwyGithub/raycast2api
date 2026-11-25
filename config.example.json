@@ -5,8 +5,6 @@
     "raycast_signature_secret": "your-raycast-signature-secret",
     "dashboard_password": "your-dashboard-password-here",
     "dashboard_session_secret": "replace-with-a-random-secret-at-least-32-bytes",
-    "proxies": [],
-    "proxies_mode": "direct",
     "upstream_timeout_secs": 20
 }
 

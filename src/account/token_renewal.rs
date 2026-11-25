@@ -63,10 +63,11 @@ pub async fn auto_renew(
         .ok_or_else(|| GatewayError::TokenInvalid {
             message: "no refresh_token stored".into(),
         })?;
+    let client = client.for_account(&current)?;
     persist_outcome(
         store,
         &current.email,
-        renew_token_call(client, refresh).await,
+        renew_token_call(&client, refresh).await,
     )
 }
 

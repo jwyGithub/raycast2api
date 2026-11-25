@@ -178,21 +178,20 @@ pub struct RaycastChatRequest {
     /// `YYYY-MM-DD` the client believes it is. Omitted when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_date: Option<String>,
-    /// Attachment bytes awaiting upload — a serialization-invisible sidecar.
-    /// The builder fills it from the canonical request; the dispatcher
-    /// uploads after account selection (attachment ACLs are per-account) and
-    /// replaces each entry's target message `attachments` with the file ids.
+    /// 待上传图片（内联字节或远程 URL），不参与序列化。
+    /// 选号后按该账号的出口下载远程图片、上传并回填文件 ID。
     #[serde(skip)]
     pub pending_uploads: Vec<PendingUpload>,
+    /// 远程图片下载后按目标模型允许的格式校验，不参与上游请求体。
+    #[serde(skip)]
+    pub image_formats: Vec<String>,
 }
 
-/// One image the builder queued for upload: its target message index in
-/// `messages` plus the resolved media type and raw bytes.
+/// 待上传图片及其目标消息序号；远程 URL 保留到账号选定之后再下载。
 #[derive(Debug, Clone)]
 pub struct PendingUpload {
     pub message_index: usize,
-    pub media_type: String,
-    pub data: Vec<u8>,
+    pub attachment: crate::core::message::Attachment,
 }
 
 // --- Response (SSE) -----------------------------------------------------

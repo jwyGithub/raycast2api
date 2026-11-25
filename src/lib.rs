@@ -13,7 +13,7 @@
 //! * [`log`]       — request-log storage (inbound/upstream/response, 7-day retention).
 //! * [`model`]    — console-managed model aliases (client model id → gateway model id).
 //! * [`signature`] — the `X-Raycast-Signature-v2` computation.
-//! * [`proxies`]   — upstream proxy mode, startup validation and channel order.
+//! * [`proxies`]   — database-backed account proxies and upstream transport.
 //! * [`raycast`]   — the upstream provider (async client, wire types, SSE).
 //! * [`protocol`]  — the client-protocol adapters (OpenAI Chat Completions,
 //!   Anthropic Messages, OpenAI Responses).

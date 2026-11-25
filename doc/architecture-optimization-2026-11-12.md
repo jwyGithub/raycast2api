@@ -29,8 +29,8 @@ flowchart LR
 | src/core/ | 统一请求、消息、工具、事件、响应；暂保留分页 DTO |
 | src/protocol/ | Chat Completions、Messages、Responses 各自的 wire/inbound/outbound/error |
 | src/raycast/builder.rs | CanonicalRequest 到上游请求的纯转换 |
-| src/raycast/client.rs | 签名、账号轮换、401 恢复、账号级拒绝处理 |
-| src/raycast/transport.rs | 通道顺序、网络回退、响应头超时、OAuth 单次发送策略 |
+| src/raycast/client.rs | 签名、上游请求构造、按账号选择直连或单个代理 |
+| src/raycast/transport.rs | 账号出口发送、账号允许的直连回退、响应头超时、OAuth 续期发送策略 |
 | src/raycast/peek.rs | 有界读取完整首 payload，识别流内账号错误并保留剩余字节 |
 | src/raycast/stream.rs | SSE 事件解析、日志捕获、断流重试和前缀检查 |
 | src/raycast/models.rs | 唯一的模型纯匹配与默认规则 |
@@ -59,7 +59,7 @@ flowchart LR
 * [x] 07 同步 Store 进入生产 Tokio 阻塞区；维护任务使用 spawn_blocking；日志列表用 SQL 计算字节数。
 * [x] 08 模型缓存并发刷新串行化，失败使用旧值并退避 30 秒；无缓存时传播错误，不因网络故障改用默认模型。
 * [x] 09 下一账号查询和游标更新保持在同一连接临界区，最多两次单行查询，避免加载全部凭据。
-* [x] 10 GET 与聊天共享通道顺序和网络回退；OAuth 遵守首选通道但不重放可能已完成 rotation 的请求。
+* [x] 10 GET 与聊天按已选账号的出口发送，仅账号允许时回退直连；OAuth 不重放可能已完成 rotation 的请求。
 * [x] 11 删除无调用访问器、thinking 判断、协议 path 和旧事件入口；复用既有模型解析与摘要推理管线。
 * [x] 12 文件/环境共用配置构造；仅文件不存在才回退，格式与读取错误终止启动。
 * [x] 13 readiness 默认未就绪、检查可用账号；原子认领探测；真实推理 Finish/Error 更新状态。
@@ -73,7 +73,7 @@ flowchart LR
 
 401 进入统一 auto_renew。按邮箱取得异步锁后重新读库；token 已变则复用，否则才使用 refresh token 换新。成功需要数据库写回且更新行数大于零。无 refresh token、invalid_grant 是凭据失效；网络、5xx 和响应解析失败保留为临时错误。
 
-续期后的聊天继续执行首包分类，不再直接返回。OAuth 按配置选择首选 HTTP 通道，单次发送，不自动回退重放：请求失败不代表上游未完成 rotation。协调范围为同一个 AccountStore/进程。
+续期后的聊天继续执行首包分类，不再直接返回。OAuth 重新读取账号设置，选择直连或该账号指定的代理；仅账号勾选回退且代理连接建立失败时允许直连重试。已发出请求后的网络错误不重放，因为上游可能已完成 rotation。协调范围为同一个 AccountStore/进程。
 
 ### 模型与健康
 
@@ -103,7 +103,7 @@ SQLite 保持 WAL、busy_timeout=5000 和共享连接。生产二进制使用多
 | 响应日志 | 2 MiB 后附截断标记，不截断实际输出 |
 | 摘要缓存 | 30 分钟，每模型最多 128 条，最多 32 个模型键 |
 | 配置错误 | 损坏/不可读文件启动失败 |
-| 纯环境 PROXIES | 已取消；代理仅由配置文件的 proxies / proxies_mode（direct、proxy、proxy_fallback_direct）控制，默认 direct |
+| 账号代理 | 由控制台与 SQLite 管理；每个账号选择直连或一个代理，可单独勾选失败回退直连；配置文件和环境变量不控制出站代理 |
 | Rust 内部模块 | debug 迁至 log/context；删除仓库内无调用 API，仓库外调用方需调整 |
 
 超时统一由 config.json 的 upstream_timeout_secs 配置，正整数，默认 20 秒；修改后重启生效。其他限制暂为固定值。持续输出的长任务没有统一总时长硬截止。
