@@ -1,4 +1,5 @@
 /target
+/transport/node/node_modules/
 
 # Local secrets — keep .env out of version control (.env.example is committed)
 .env

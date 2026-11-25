@@ -164,6 +164,7 @@ curl http://localhost:8787/v1/responses \
 | `host` / `port` | `0.0.0.0` / `8787` | HTTP 监听地址和端口。 |
 | `accounts_db` | `store/store.db` | 账号、托管 API Key、请求日志和调用统计共用的 SQLite 文件。 |
 | `upstream_timeout_secs` | `20` | 转发请求的超时秒数，须为正整数。流式响应持续有输出时，总时长可超过此值。 |
+| `upstream_transport.backend` | `native` | 设置为 `node` 启用固定 Node 26.13.1 的双管道 TLS 指纹对齐；启动时校验实际握手，失败时拒绝启动。新构建的 Docker 镜像已包含运行时，本地部署需安装依赖，详见 [启用与验收说明](./doc/raycast-tls-alignment-validation-2026-11-25.md)。 |
 | `proxies` | `[]` | 代理 URL 列表，支持 HTTP、HTTPS 和 SOCKS5。 |
 | `proxies_mode` | `direct` | 上游通道模式：`direct` 只直连，失败即失败；`proxy` 只走代理（按序尝试），全部失败即失败，不回退直连；`proxy_fallback_direct` 先走代理，全部失败再回退直连。`proxy` 和 `proxy_fallback_direct` 要求 `proxies` 非空，否则启动失败。 |
 
@@ -212,7 +213,7 @@ src/
     storage/                      共享存储基础设施(SQLite 连接、diesel 表定义、Redis 连接)
     core/                         统一请求、响应与事件类型
     protocol/                     三种客户端协议的输入与输出适配
-    raycast/                      Raycast 客户端与模型解析
+    raycast/                      Raycast 客户端、模型解析与上游传输适配
     account/                      账号存储、续期与额度刷新
     model/                        模型别名存储
     server/                       HTTP 路由、中间件、推理流程与会话

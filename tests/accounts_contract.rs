@@ -23,6 +23,7 @@ fn app_with_api_key(api_key: &str) -> (axum::Router, Arc<AccountStore>) {
         db.clone(),
     ));
     let settings = Arc::new(Settings {
+        upstream_transport: Default::default(),
         raycast_signature_secret: "secret".into(),
         api_key: api_key.into(),
         dashboard_password: None,

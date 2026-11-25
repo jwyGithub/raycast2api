@@ -45,7 +45,7 @@ pub(crate) fn canonical_events_with_retry(
     response: reqwest::Response,
     log: Arc<RequestLogStore>,
     timeout: std::time::Duration,
-    fetch_clients: Vec<reqwest::Client>,
+    fetch_clients: Vec<super::upstream::UpstreamClient>,
     resend: impl FnOnce() -> BoxFuture<'static, Result<reqwest::Response, GatewayError>>
     + Send
     + 'static,
@@ -123,7 +123,7 @@ pub(crate) fn canonical_events_with_retry(
 /// Returns a `data:<mime>;base64,...` string; the caller falls back to the
 /// raw upstream URL on `Err`.
 async fn fetch_image_data_url(
-    fetch_clients: &[reqwest::Client],
+    fetch_clients: &[super::upstream::UpstreamClient],
     url: &str,
 ) -> Result<String, GatewayError> {
     // 60s / 20 MiB are deliberately independent of the upstream chat timeout:
@@ -133,7 +133,7 @@ async fn fetch_image_data_url(
     let mut last_error = GatewayError::Internal("no fetch channel configured".into());
     let mut response = None;
     for client in fetch_clients {
-        match client.get(url).timeout(IMAGE_FETCH_TIMEOUT).send().await {
+        match client.get(url, IMAGE_FETCH_TIMEOUT).await {
             Ok(r) if r.status().is_success() => {
                 response = Some(r);
                 break;
@@ -147,7 +147,7 @@ async fn fetch_image_data_url(
                     message: "image fetch failed".into(),
                 };
             }
-            Err(error) => last_error = GatewayError::from(error),
+            Err(error) => last_error = error,
         }
     }
     let response = response.ok_or(last_error)?.error_for_status()?;
@@ -193,7 +193,7 @@ fn decode_events(
     mut response: reqwest::Response,
     log: Arc<RequestLogStore>,
     timeout: std::time::Duration,
-    fetch_clients: Vec<reqwest::Client>,
+    fetch_clients: Vec<super::upstream::UpstreamClient>,
 ) -> impl Stream<Item = Result<CanonicalEvent, ()>> + Send + 'static {
     // Grab the correlation id *here*: the task-local REQUEST_ID scope is only
     // valid inside the handler, while the stream below is polled outside it.
@@ -379,7 +379,7 @@ mod tests {
             response(&[json!({"text":text})]),
             log(),
             std::time::Duration::from_secs(20),
-            vec![reqwest::Client::new()],
+            vec![reqwest::Client::new().into()],
             || panic!("oversized output must not be replayed"),
         )
         .collect()
@@ -437,7 +437,7 @@ mod tests {
             first_response,
             state.log.clone(),
             std::time::Duration::from_secs(1),
-            vec![reqwest::Client::new()],
+            vec![reqwest::Client::new().into()],
             move || Box::pin(async move { Ok(second_response) }),
         )
         .collect()
@@ -498,7 +498,7 @@ mod tests {
             stalled,
             state.log.clone(),
             std::time::Duration::from_millis(50),
-            vec![reqwest::Client::new()],
+            vec![reqwest::Client::new().into()],
             || Box::pin(async { Err(GatewayError::Internal("no retry".into())) }),
         )
         .collect()
@@ -520,7 +520,7 @@ mod tests {
             ]),
             log(),
             std::time::Duration::from_secs(20),
-            vec![reqwest::Client::new()],
+            vec![reqwest::Client::new().into()],
             move || {
                 Box::pin(async move {
                     retried.fetch_add(1, Ordering::SeqCst);
@@ -561,7 +561,7 @@ mod tests {
                 response(&payloads),
                 log(),
                 std::time::Duration::from_secs(20),
-                vec![reqwest::Client::new()],
+                vec![reqwest::Client::new().into()],
                 || panic!("must not retry explicit terminal events"),
             )
             .collect()
@@ -579,7 +579,7 @@ mod tests {
             response(&[]),
             log(),
             std::time::Duration::from_secs(20),
-            vec![reqwest::Client::new()],
+            vec![reqwest::Client::new().into()],
             || Box::pin(async { Ok(response(&[json!({"text":"AB"})])) }),
         )
         .collect()
@@ -616,7 +616,7 @@ mod tests {
                 response(&[payload]),
                 log(),
                 std::time::Duration::from_secs(20),
-                vec![reqwest::Client::new()],
+                vec![reqwest::Client::new().into()],
                 || panic!("delivered content must never be replayed"),
             )
             .collect()
@@ -636,7 +636,7 @@ mod tests {
                 response(&[]),
                 log(),
                 std::time::Duration::from_secs(20),
-                vec![reqwest::Client::new()],
+                vec![reqwest::Client::new().into()],
                 move || {
                     Box::pin(async move {
                         if connection_error {
@@ -680,7 +680,7 @@ mod tests {
                     first,
                     store.clone(),
                     std::time::Duration::from_secs(20),
-                    vec![reqwest::Client::new()],
+                    vec![reqwest::Client::new().into()],
                     || panic!("transport errors after output must not replay the request"),
                 )
             })
@@ -717,7 +717,7 @@ mod tests {
                         first,
                         store.clone(),
                         std::time::Duration::from_millis(5),
-                        vec![reqwest::Client::new()],
+                        vec![reqwest::Client::new().into()],
                         move || {
                             Box::pin(async move {
                                 assert!(!partial, "read timeout after output must not retry");
@@ -755,7 +755,7 @@ mod tests {
             response(&[json!({"text":"A"})]),
             log(),
             std::time::Duration::from_secs(20),
-            vec![reqwest::Client::new()],
+            vec![reqwest::Client::new().into()],
             || panic!("cancelled stream must not retry"),
         );
         let mut events = Box::pin(events);
@@ -775,7 +775,7 @@ mod tests {
                 }),
                 log(),
                 std::time::Duration::from_secs(20),
-                vec![reqwest::Client::new()],
+                vec![reqwest::Client::new().into()],
                 move || {
                     Box::pin(async move {
                         assert!(!partial, "partial output must not be replayed");

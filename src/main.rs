@@ -66,6 +66,8 @@ async fn run() -> Result<(), String> {
     }
 
     let client = RaycastClient::new(settings.clone(), statistics.clone());
+    client.start_upstream().await?;
+    let shutdown_client = client.clone();
     let redis = raycast2api::storage::redis_store::connect_from_env()
         .await
         .map_err(|error| format!("Redis configuration error: {error}"))?;
@@ -136,12 +138,21 @@ async fn run() -> Result<(), String> {
     let mut servers = tokio::task::JoinSet::new();
     for listener in listeners {
         let app = app.clone();
+        let shutdown_client = shutdown_client.clone();
         servers.spawn(async move {
             axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                // Stop admitting requests immediately, then cancel Node streams
+                // after a short drain window so an open SSE cannot hang shutdown.
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    shutdown_client.shutdown_upstream().await;
+                });
+            })
             .await
         });
     }
@@ -151,6 +162,7 @@ async fn run() -> Result<(), String> {
             .map_err(|err| format!("server task failed: {err}"))?
             .map_err(|err| format!("server error: {err}"))?;
     }
+    shutdown_client.shutdown_upstream().await;
     Ok(())
 }
 

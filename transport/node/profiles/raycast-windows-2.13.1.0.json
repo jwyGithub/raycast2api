@@ -1,0 +1,8 @@
+{
+  "id": "raycast-windows-2.13.1.0",
+  "runtime": { "node": "26.13.1", "openssl": "3.5.9", "undici": "8.12.4", "nghttp2": "1.70.0" },
+  "chat": { "ja3": "d67b094811e5145139d7cea5f014309f", "ja4": "t13d5212h1_b262b3658495_8e6e362c5eac", "alpn": ["http/1.1", "h2"], "akamai": "2:0;4:262144|458753|0|a,m,p,s" },
+  "got": { "ja3": "944d1e1858cd278718f8a46b65d3212f", "ja4": "t13d521100_b262b3658495_8e6e362c5eac", "alpn": [] },
+  "groups": [4588, 29, 23, 30, 24, 25, 256, 257],
+  "pointFormats": [0, 1, 2]
+}

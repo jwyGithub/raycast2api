@@ -64,8 +64,41 @@ pub const MIN_COOLDOWN_SECS: u64 = 60;
 pub const MAX_COOLDOWN_SECS: u64 = 24 * 60 * 60;
 
 /// JSON configuration file structure.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamBackend {
+    #[default]
+    Native,
+    Node,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpstreamTransport {
+    pub backend: UpstreamBackend,
+    pub profile: String,
+    pub node_path: String,
+    /// Directory containing main.mjs and the locked undici dependency.
+    pub transport_dir: String,
+    pub startup_timeout_secs: u64,
+}
+
+impl Default for UpstreamTransport {
+    fn default() -> Self {
+        Self {
+            backend: UpstreamBackend::Native,
+            profile: "raycast-windows-2.13.1.0".into(),
+            node_path: "node".into(),
+            transport_dir: "transport/node".into(),
+            startup_timeout_secs: 15,
+        }
+    }
+}
+
+/// JSON configuration file structure.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ConfigFile {
+    pub upstream_transport: Option<UpstreamTransport>,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub api_key: Option<String>,
@@ -87,6 +120,7 @@ pub struct ConfigFile {
 /// Runtime configuration, loaded once at startup via [`Settings::from_path`].
 #[derive(Clone, Debug)]
 pub struct Settings {
+    pub upstream_transport: UpstreamTransport,
     /// Signing secret for `X-Raycast-Signature-v2` (required, no built-in default).
     pub raycast_signature_secret: String,
     /// Required global gateway API key.
@@ -171,6 +205,15 @@ impl Settings {
 
         let (proxies_mode, proxies) =
             crate::proxies::validate(config.proxies_mode, config.proxies)?;
+        let upstream_transport = config.upstream_transport.unwrap_or_default();
+        if upstream_transport.backend == UpstreamBackend::Node
+            && (upstream_transport.profile != "raycast-windows-2.13.1.0"
+                || upstream_transport.node_path.is_empty()
+                || upstream_transport.transport_dir.is_empty()
+                || upstream_transport.startup_timeout_secs == 0)
+        {
+            return Err("invalid upstream_transport: node requires supported profile, node_path, transport_dir and positive startup_timeout_secs".into());
+        }
         let dashboard_password = non_empty(config.dashboard_password);
         let dashboard_session_secret = non_empty(config.dashboard_session_secret);
         if dashboard_password.is_some()
@@ -182,6 +225,7 @@ impl Settings {
         }
 
         Ok(Self {
+            upstream_transport,
             raycast_signature_secret,
             api_key,
             dashboard_password,
@@ -206,6 +250,45 @@ fn non_empty(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod proxy_tests {
     use super::*;
+
+    #[test]
+    fn upstream_backend_defaults_to_native_and_node_config_is_validated() {
+        let parse = |extra: &str| {
+            Settings::from_config_file(
+                serde_json::from_str(&format!(
+                    r#"{{"raycast_signature_secret":"s","api_key":"test-key"{extra}}}"#
+                ))
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            parse("").unwrap().upstream_transport.backend,
+            UpstreamBackend::Native
+        );
+        assert_eq!(
+            parse(r#", "upstream_transport":{"backend":"node"}"#)
+                .unwrap()
+                .upstream_transport
+                .backend,
+            UpstreamBackend::Node
+        );
+        for extra in [
+            r#", "upstream_transport":{"backend":"node","profile":"unknown"}"#,
+            r#", "upstream_transport":{"backend":"node","node_path":""}"#,
+            r#", "upstream_transport":{"backend":"node","transport_dir":""}"#,
+            r#", "upstream_transport":{"backend":"node","startup_timeout_secs":0}"#,
+        ] {
+            assert!(parse(extra).unwrap_err().contains("upstream_transport"));
+        }
+        assert!(
+            serde_json::from_str::<ConfigFile>(r#"{"upstream_transport":{"backend":"other"}}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ConfigFile>(r#"{"upstream_transport":{"nodePath":"node"}}"#)
+                .is_err()
+        );
+    }
 
     #[test]
     fn dashboard_sessions_require_a_secret_with_at_least_32_bytes() {

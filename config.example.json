@@ -7,6 +7,13 @@
     "dashboard_session_secret": "replace-with-a-random-secret-at-least-32-bytes",
     "proxies": [],
     "proxies_mode": "direct",
-    "upstream_timeout_secs": 20
+    "upstream_timeout_secs": 20,
+    "upstream_transport": {
+        "backend": "native",
+        "profile": "raycast-windows-2.13.1.0",
+        "node_path": "node",
+        "transport_dir": "transport/node",
+        "startup_timeout_secs": 15
+    }
 }
 

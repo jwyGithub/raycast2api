@@ -18,6 +18,13 @@ pub async fn health() -> Response {
 /// Readiness: report `ready` when the backend is believed to be working;
 /// otherwise probe upstream at most once per rate-limit window.
 pub async fn ready(State(state): State<SharedState>) -> Response {
+    if !state.dispatcher.client.upstream_ready().await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status":"not ready", "message":"Upstream transport unavailable"})),
+        )
+            .into_response();
+    }
     if state.accounts.count_available() == 0 {
         return (
             StatusCode::SERVICE_UNAVAILABLE,

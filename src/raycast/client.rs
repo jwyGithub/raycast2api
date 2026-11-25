@@ -35,6 +35,7 @@ pub use crate::proxies::Transport;
 /// All four are built internally from `settings` — callers cannot mix pools.
 #[derive(Clone)]
 pub struct RaycastClient {
+    pub(super) node: Option<Arc<super::node_transport::NodeTransport>>,
     pub(crate) http: Client,
     /// 代理客户端链,与 `settings.proxies` 一一对应;通道顺序由 `proxies_mode` 决定。
     pub(crate) proxies: Vec<(String, Client)>,
@@ -59,6 +60,14 @@ impl RaycastClient {
     pub fn new(settings: Arc<Settings>, statistics: Arc<StatisticsStore>) -> Self {
         let timeout = settings.upstream_timeout();
         Self {
+            node: (settings.upstream_transport.backend == crate::config::UpstreamBackend::Node)
+                .then(|| {
+                    super::node_transport::NodeTransport::new(
+                        settings.upstream_transport.clone(),
+                        settings.proxies.clone(),
+                        timeout,
+                    )
+                }),
             http: crate::proxies::direct_client(timeout),
             proxies: crate::proxies::build_clients(&settings.proxies, timeout),
             chat_http: crate::proxies::direct_chat_client(timeout),
@@ -80,14 +89,14 @@ impl RaycastClient {
     /// [`chat`](Self::chat) does: Proxy mode never direct, fallback orders
     /// proxies first. Uses the chat (h2-capable) pool — the real client
     /// downloads these through the same Node process as chat.
-    pub(crate) fn fetch_channels(&self) -> Vec<Client> {
+    pub(crate) fn fetch_channels(&self) -> Vec<super::upstream::UpstreamClient> {
         crate::proxies::channels(
             self.settings.proxies_mode,
             &self.chat_http,
             &self.chat_proxies,
         )
         .into_iter()
-        .map(|(_, client)| client.clone())
+        .map(|(_, client)| self.channel_client(client, Transport::ChatFetch))
         .collect()
     }
 
@@ -343,7 +352,9 @@ impl RaycastClient {
             .body(bytes.to_vec())
             .timeout(self.settings.upstream_timeout())
             .build()?;
-        self.http.execute(put_request).await?.error_for_status()?;
+        self.execute_got_once(put_request)
+            .await?
+            .error_for_status()?;
 
         Ok(registered.id)
     }

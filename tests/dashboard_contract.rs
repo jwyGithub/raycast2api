@@ -22,6 +22,7 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
     ));
     let log = Arc::new(RequestLogStore::new(db.clone()));
     let settings = Arc::new(Settings {
+        upstream_transport: Default::default(),
         raycast_signature_secret: "secret".into(),
         api_key: api_key.unwrap_or("fixture-global-key").into(),
         dashboard_password: password.map(str::to_owned),

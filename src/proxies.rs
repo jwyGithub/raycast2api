@@ -111,15 +111,15 @@ fn base_builder(timeout: std::time::Duration, transport: Transport) -> reqwest::
         .read_timeout(timeout)
         .pool_idle_timeout(crate::config::UPSTREAM_POOL_IDLE_TIMEOUT);
     match transport {
-        // chat:与 undici fetch 一致,ALPN 全量协商,服务端选 h2 即 h2。
+        // native chat 协商 h2/http1; TLS 指纹及 ALPN 顺序由 Node 后端对齐。
         Transport::ChatFetch => builder,
-        // got 系:真实客户端无 ALPN 扩展、纯 HTTP/1.1,锁定 http1。
+        // native got 锁定 HTTP/1.1,仍发送 http/1.1 ALPN。
         Transport::Got => builder.http1_only(),
     }
 }
 
-/// got 管道直连客户端(HTTP/1.1-only,ClientHello 无 ALPN 扩展,对齐真实
-/// 客户端的 got 实例)。显式 `no_proxy`:`direct` / 回退直连必须是真直连,
+/// got 管道原生直连客户端(HTTP/1.1-only,仍带 http/1.1 ALPN;
+/// 完整 TLS 对齐由可选 Node 后端提供)。显式 `no_proxy`:直连必须是真直连,
 /// 不能被 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 等环境变量悄悄接管。
 pub fn direct_client(timeout: std::time::Duration) -> Client {
     base_builder(timeout, Transport::Got)

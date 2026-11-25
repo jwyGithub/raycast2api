@@ -2,6 +2,65 @@
 use super::client::RaycastClient;
 use crate::{error::GatewayError, log::context as debug, proxies::ProxyMode};
 impl RaycastClient {
+    pub async fn start_upstream(&self) -> Result<(), String> {
+        if let Some(node) = &self.node {
+            node.start().await?;
+        }
+        Ok(())
+    }
+
+    pub async fn upstream_ready(&self) -> bool {
+        match &self.node {
+            Some(node) => node.ready().await,
+            None => true,
+        }
+    }
+
+    pub async fn shutdown_upstream(&self) {
+        if let Some(node) = &self.node {
+            node.shutdown().await;
+        }
+    }
+
+    pub(super) fn channel_client(
+        &self,
+        client: &reqwest::Client,
+        transport: super::client::Transport,
+    ) -> super::upstream::UpstreamClient {
+        let proxies = match transport {
+            super::client::Transport::ChatFetch => &self.chat_proxies,
+            super::client::Transport::Got => &self.proxies,
+        };
+        let channel = proxies
+            .iter()
+            .position(|(_, candidate)| std::ptr::eq(client, candidate))
+            .map_or(-1, |index| index as i32);
+        super::upstream::UpstreamClient {
+            native: client.clone(),
+            node: self.node.clone(),
+            channel,
+            transport,
+        }
+    }
+
+    pub(super) async fn execute_got_once(
+        &self,
+        request: reqwest::Request,
+    ) -> Result<reqwest::Response, GatewayError> {
+        let http = match self.settings.proxies_mode {
+            ProxyMode::Direct => &self.http,
+            _ => {
+                &self
+                    .proxies
+                    .first()
+                    .ok_or_else(|| GatewayError::Config("proxy channel missing".into()))?
+                    .1
+            }
+        };
+        self.channel_client(http, super::client::Transport::Got)
+            .execute(request)
+            .await
+    }
     /// 所有端点共享通道顺序；仅网络错误换通道，HTTP 业务错误不重放。
     ///
     /// `transport` 同时决定用哪组 HTTP 客户端:chat 请求走 h2 能力组
@@ -58,8 +117,11 @@ impl RaycastClient {
             // 请求后主动断开)是两种不同成因,排查 "connection closed before
             // message completed" 时靠它区分。
             let started = std::time::Instant::now();
-            match tokio::time::timeout(self.settings.upstream_timeout(), client.execute(replay))
-                .await
+            match tokio::time::timeout(
+                self.settings.upstream_timeout(),
+                self.channel_client(client, transport).execute(replay),
+            )
+            .await
             {
                 Ok(Ok(mut response)) => {
                     if let Some((log, id)) = log {
@@ -81,11 +143,16 @@ impl RaycastClient {
                         account,
                         elapsed_ms = started.elapsed().as_millis() as u64,
                         body_bytes,
-                        is_connect = error.is_connect(),
                         "→ upstream send failed: {}",
                         crate::error::error_chain(&error)
                     );
-                    last = Some(GatewayError::from(error));
+                    if matches!(error, GatewayError::Unavailable(_)) {
+                        if let Some(attempt) = attempt {
+                            attempt.fail(&error);
+                        }
+                        return Err(error);
+                    }
+                    last = Some(error);
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -133,7 +200,7 @@ impl RaycastClient {
             .timeout(self.settings.upstream_timeout())
             .build()?;
         // OAuth rotation cannot safely replay after an ambiguous transport failure.
-        Ok(http.execute(request).await?)
+        self.execute_got_once(request).await
     }
 
     /// All non-chat endpoints: got pipeline (HTTP/1.1-only clients).
