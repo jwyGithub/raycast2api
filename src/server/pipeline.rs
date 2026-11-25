@@ -244,7 +244,20 @@ pub(crate) async fn events(
     // client preset; the compaction/summarize call is a deliberately plain
     // completion and must not carry the remote tool.
     let image_gen = (call_type == "inference") && model_supports_image_generation(target);
-    let raycast_request = build_chat_request(request, provider, model, image_gen);
+    // 出口地区解析(经当前通道实测,mihomo 换节点后自动跟随);探测有
+    // TTL 缓存,常态零 IO。
+    let region = state
+        .regions
+        .resolve(primary_channel_key(&state.settings))
+        .await;
+    let raycast_request = build_chat_request(
+        request,
+        provider,
+        model,
+        &region.locale,
+        &region.timezone,
+        image_gen,
+    );
     let mut call = CallContext::new(request, provider, model, call_type);
     call.accounting = accounting;
     let usage_key = UsageKey::new(request);
@@ -333,6 +346,18 @@ async fn aggregate(
 
     Ok(response)
 }
+
+/// 出口探测的缓存键:direct 用固定键(出口=本机 IP,单条缓存足够);
+/// 代理模式按链首代理 URL 区分——mihomo 混合端口 URL 固定但出口随节点,
+/// 缓存按该键 TTL 轮换,节点切换后自动重新实测。
+fn primary_channel_key(settings: &crate::config::Settings) -> &'static str {
+    if settings.proxies_mode == crate::proxies::ProxyMode::Direct {
+        "direct"
+    } else {
+        "proxy"
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

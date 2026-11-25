@@ -162,7 +162,13 @@ mod tests {
                 }
                 let captured = received.try_recv().unwrap();
                 assert_eq!(captured["model"], "test");
-                assert_eq!(captured["additional_system_instructions"], "Be brief");
+                // user-preferences 块前置(真客户端恒发),调用方 prompt 保留在后。
+                let additional = captured["additional_system_instructions"]
+                    .as_str()
+                    .unwrap();
+                assert!(additional.starts_with("<user-preferences>"));
+                assert!(additional.contains("- Timezone: Asia/Shanghai"));
+                assert!(additional.ends_with("Be brief"));
                 assert_eq!(captured["reasoning_effort"], "high");
                 assert_eq!(captured["temperature"], 0.7);
                 assert_eq!(captured["tools"][0]["type"], "local_tool");

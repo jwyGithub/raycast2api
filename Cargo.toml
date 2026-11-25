@@ -49,6 +49,8 @@ rust-embed = { version = "8", features = ["mime-guess", "include-exclude"] }
 # Shared SQLite storage for the account store (and future modules).
 diesel = { version = "2.2", features = ["sqlite"] }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+sys-locale = "0.3.2"
+iana-time-zone = "0.1.65"
 
 [dev-dependencies]
 # Used by contract tests to drive the router in-process (`oneshot`).

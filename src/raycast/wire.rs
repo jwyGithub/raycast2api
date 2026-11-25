@@ -165,9 +165,17 @@ pub struct RaycastChatRequest {
     /// `low` | `medium` | `high` — present only for think models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    /// Tool-choice policy (`auto`, `none`, ...). Omitted when unset.
+    /// Tool-choice policy (`auto`, `none`, ...). Only sent when the caller
+    /// explicitly picked one — the real client omits the field whenever its
+    /// toolChoice preference is unset (capture 2026-11-25: 8 tools offered,
+    /// no `tool_choice` on the wire).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<String>,
+    /// Mid-conversation message capabilities. The real client sends
+    /// `{system_messages:true, tool_changes:true}` on chat requests whose
+    /// model supports both (capture 2026-11-25). Absent when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mid_conversation: Option<RaycastMidConversation>,
     /// UUID identifying the current user turn; stable across that turn's tool
     /// round-trips, rotates on each new user message (derived in the builder).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,6 +192,16 @@ pub struct RaycastChatRequest {
     /// replaces each entry's target message `attachments` with the file ids.
     #[serde(skip)]
     pub pending_uploads: Vec<PendingUpload>,
+}
+
+/// Mid-conversation capabilities advertised to the backend
+/// (`mid_conversation` request field).
+#[derive(Debug, Clone, Serialize)]
+pub struct RaycastMidConversation {
+    /// The model accepts system messages between turns.
+    pub system_messages: bool,
+    /// The model accepts tool-addition notices mid-conversation.
+    pub tool_changes: bool,
 }
 
 /// One image the builder queued for upload: its target message index in

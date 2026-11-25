@@ -592,8 +592,14 @@ mod tests {
                 crate::core::protocol::Protocol::Responses,
                 "client",
             );
-            let upstream =
-                crate::raycast::builder::build_chat_request(&request, "openai", "upstream", false);
+            let upstream = crate::raycast::builder::build_chat_request(
+                &request,
+                "openai",
+                "upstream",
+                "zh-CN",
+                "Asia/Shanghai",
+                false,
+            );
             let call = CallContext::new(&request, &upstream.provider, &upstream.model, "inference");
             let result = dispatcher.send_chat(&upstream, &call, None).await;
             if failure == "policy" {

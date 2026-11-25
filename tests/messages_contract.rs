@@ -615,6 +615,8 @@ fn tool_result_is_error_is_kept_and_marked_upstream() {
         &canonical,
         "anthropic",
         "claude-x",
+        "zh-CN",
+        "Asia/Shanghai",
         false,
     );
     let err_msg = built

@@ -74,6 +74,33 @@ async fn run() -> Result<(), String> {
     if settings.dashboard_password.is_some() && redis.is_none() {
         return Err("REDIS_HOST is required when dashboard_password is configured".into());
     }
+    // 出口地区解析器:显式配置齐 → 零探测;direct → 兜底为本机身份;
+    // 走代理 → 请求路径经当前通道实测(ip-api;mihomo 换节点自动跟随),
+    // 结果按通道缓存 10 分钟,失败负缓存 1 分钟,绝不阻塞推理。
+    let probe_client = if settings.proxies_mode == raycast2api::proxies::ProxyMode::Direct {
+        reqwest::Client::new()
+    } else {
+        reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::all(
+                    settings
+                        .proxies
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("http://127.0.0.1:1"),
+                )
+                .map_err(|error| format!("invalid first proxy for geo probe: {error}"))?,
+            )
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .map_err(|error| format!("geo probe client error: {error}"))?
+    };
+    let regions = Arc::new(raycast2api::geo::EgressResolver::new(
+        settings.raycast_locale.clone(),
+        settings.raycast_timezone.clone(),
+        probe_client,
+        raycast2api::geo::machine_region(),
+    ));
     let state = AppState::new(AppDeps {
         settings: settings.clone(),
         client: client.clone(),
@@ -81,6 +108,7 @@ async fn run() -> Result<(), String> {
         log: request_log,
         statistics,
         db,
+        regions,
     })
     .map_err(|error| format!("API key initialization error: {error}"))?
     .with_redis(redis);

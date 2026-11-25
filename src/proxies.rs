@@ -80,7 +80,8 @@ pub fn validate(
 pub enum Transport {
     /// AI 对话(`POST /ai/chat_completions`):内嵌 Node 的 undici `fetch`。
     /// UA 用 `x-Windows Version` 变体;undici 自动补 `accept-language: *`、
-    /// `sec-fetch-mode: cors`、`accept-encoding: br, gzip, deflate, zstd`;
+    /// `sec-fetch-mode: cors`、`accept-encoding: gzip, deflate`(Node
+    /// 26.13.1 实测);
     /// ALPN 全量协商,服务端选 h2 即 h2。
     ChatFetch,
     /// 其余 API(got 实例,`prefixUrl .../api/v1`):/me、/ai/credits、
@@ -92,10 +93,13 @@ pub enum Transport {
 }
 
 impl Transport {
-    /// got/undici 自动写入的 `accept-encoding`(实测,顺序即发包顺序)。
+    /// got/undici 自动写入的 `accept-encoding`。chat 值用 Raycast 自带的
+    /// Node 26.13.1 二进制实测(`fetch()` 全局 undici → `gzip, deflate`,
+    /// 2026-11-25);got 按 brotli+zstd 能力检测拼 `gzip, deflate, br, zstd`
+    /// (index.mjs `vVt`/`yVt`,Node 26 两者皆可用)。
     pub fn accept_encoding(self) -> &'static str {
         match self {
-            Self::ChatFetch => "br, gzip, deflate, zstd",
+            Self::ChatFetch => "gzip, deflate",
             Self::Got => "gzip, deflate, br, zstd",
         }
     }

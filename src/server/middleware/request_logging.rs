@@ -146,6 +146,11 @@ async fn run_with_request_id(id: String, request: Request, next: Next) -> Respon
 mod tests {
     use std::sync::Arc;
 
+    fn state_test_regions() -> Arc<crate::geo::EgressResolver> {
+        crate::server::state::test_regions()
+    }
+
+
     use axum::body::Bytes;
     use axum::extract::DefaultBodyLimit;
     use axum::routing::post;
@@ -244,6 +249,8 @@ mod tests {
             accounts_db: ":memory:".into(),
             proxies: Vec::new(),
             proxies_mode: crate::proxies::ProxyMode::Direct,
+            raycast_locale: Some("zh-CN".into()),
+            raycast_timezone: Some("Asia/Shanghai".into()),
         });
         let client = RaycastClient::new(settings.clone(), statistics.clone());
         let state = Arc::new(
@@ -254,6 +261,7 @@ mod tests {
                 log: log.clone(),
                 statistics,
                 db,
+            regions: state_test_regions(),
             })
             .unwrap(),
         );

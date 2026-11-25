@@ -1,19 +1,20 @@
 {
-    "host": "0.0.0.0",
-    "port": 8787,
-    "api_key": "replace-with-your-global-api-key",
-    "raycast_signature_secret": "your-raycast-signature-secret",
-    "dashboard_password": "your-dashboard-password-here",
-    "dashboard_session_secret": "replace-with-a-random-secret-at-least-32-bytes",
-    "proxies": [],
-    "proxies_mode": "direct",
-    "upstream_timeout_secs": 20,
-    "upstream_transport": {
-        "backend": "native",
-        "profile": "raycast-windows-2.13.1.0",
-        "node_path": "node",
-        "transport_dir": "transport/node",
-        "startup_timeout_secs": 15
-    }
+  "host": "0.0.0.0",
+  "port": 8787,
+  "api_key": "replace-with-your-global-api-key",
+  "raycast_signature_secret": "your-raycast-signature-secret",
+  "dashboard_password": "your-dashboard-password-here",
+  "dashboard_session_secret": "replace-with-a-random-secret-at-least-32-bytes",
+  "proxies": [],
+  "proxies_mode": "direct",
+  "raycast_locale": null,
+  "raycast_timezone": null,
+  "upstream_timeout_secs": 20,
+  "upstream_transport": {
+    "backend": "native",
+    "profile": "raycast-windows-2.13.1.0",
+    "node_path": "node",
+    "transport_dir": "transport/node",
+    "startup_timeout_secs": 15
+  }
 }
-

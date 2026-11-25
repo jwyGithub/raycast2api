@@ -242,7 +242,12 @@ impl RaycastClient {
         let url = self.models_url.as_deref().unwrap_or(RAYCAST_MODELS_URL);
         #[cfg(not(test))]
         let url = RAYCAST_MODELS_URL;
-        let mut parsed: RaycastModelsResponse = self.get_json(url, token).await?;
+        // The real client's `GET /ai/models` (Cjn in backend/index.mjs) carries
+        // `X-Raycast-Experimental: autoModels` on every call — omitting it is
+        // a fingerprint. Other GETs (`/me`, `/ai/credits`, ...) do not carry it.
+        let mut parsed: RaycastModelsResponse = self
+            .get_json_with_experimental(url, token, Some("autoModels"))
+            .await?;
         let is_id_part = |part: &str| {
             !part.is_empty()
                 && part
@@ -393,14 +398,23 @@ impl RaycastClient {
     }
 
     /// Shared bearer-only GET returning parsed JSON. The real client issues
-    /// these through the got instance (`Transport::Got`).
-    async fn get_json<T: serde::de::DeserializeOwned>(
+    /// these through the got instance (`Transport::Got`); no signature pair,
+    /// no DeviceId. `experimental` adds the `X-Raycast-Experimental` header —
+    /// only `/ai/models` sends it in the real client.
+    async fn get_json_with_experimental<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
         token: &str,
+        experimental: Option<&str>,
     ) -> Result<T, GatewayError> {
         let mut headers = self.base_headers(Transport::Got, token, None, None);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
+        if let Some(flag) = experimental {
+            headers.insert(
+                "X-Raycast-Experimental",
+                HeaderValue::from_str(flag).expect("valid experimental header"),
+            );
+        }
         let request = self
             .http
             .get(url)
@@ -410,6 +424,15 @@ impl RaycastClient {
         let response = self.send_got(request, None, None).await?;
         let response = ensure_success(response, None).await?;
         Ok(response.json().await?)
+    }
+
+    /// Bearer-only GET with no `X-Raycast-Experimental` header.
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        token: &str,
+    ) -> Result<T, GatewayError> {
+        self.get_json_with_experimental(url, token, None).await
     }
 }
 

@@ -25,11 +25,12 @@ fn preserves_system_developer_and_conversation_order() {
         canonical.system.as_deref(),
         Some("be terse\nbe accurate\nlater instruction")
     );
-    let upstream = serde_json::to_value(build_chat_request(&canonical, "p", "m", false)).unwrap();
-    assert_eq!(
-        upstream["additional_system_instructions"],
-        "be terse\nbe accurate\nlater instruction"
-    );
+    let upstream = serde_json::to_value(build_chat_request(&canonical, "p", "m", "zh-CN", "Asia/Shanghai", false)).unwrap();
+    let additional = upstream["additional_system_instructions"].as_str().unwrap();
+    // user-preferences 块前置(真客户端恒发),调用方 system 原样保留在后。
+    assert!(additional.starts_with("<user-preferences>"));
+    assert!(additional.contains("- Timezone: Asia/Shanghai"));
+    assert!(additional.ends_with("be terse\nbe accurate\nlater instruction"));
     let messages = upstream["messages"].as_array().unwrap();
     let roles: Vec<_> = messages
         .iter()
@@ -47,7 +48,7 @@ fn absent_system_retains_upstream_base_prompt() {
         parse(json!({"model":"m","messages":[{"role":"user","content":"hi"}]})).unwrap();
     assert!(canonical.system.is_none());
     assert_eq!(canonical.messages[0].role, Role::User);
-    let upstream = build_chat_request(&canonical, "p", "m", false);
+    let upstream = build_chat_request(&canonical, "p", "m", "zh-CN", "Asia/Shanghai", false);
     assert_eq!(upstream.system_instructions, "markdown");
     // The real client never sends `temperature`; an unset value must be absent
     // from the wire, not defaulted (fingerprint defense, 2026-11-20).
@@ -70,7 +71,7 @@ fn function_tools_and_parallel_results_round_trip_without_losing_text_or_argumen
                 {"role":"tool","tool_call_id":"call_1","name":"weather","content":"rainy"}
             ]})).unwrap();
         let upstream =
-            serde_json::to_value(build_chat_request(&canonical, "p", "m", false)).unwrap();
+            serde_json::to_value(build_chat_request(&canonical, "p", "m", "zh-CN", "Asia/Shanghai", false)).unwrap();
         assert_eq!(upstream["reasoning_effort"], "high");
         assert_eq!(upstream["tool_choice"], "weather");
         assert_eq!(upstream["tools"][0]["type"], "local_tool");
@@ -194,7 +195,7 @@ fn accepts_default_options_and_maps_stream_usage_and_effort() {
         .unwrap();
         assert!(canonical.include_usage);
         assert_eq!(
-            build_chat_request(&canonical, "p", "m", false)
+            build_chat_request(&canonical, "p", "m", "zh-CN", "Asia/Shanghai", false)
                 .reasoning_effort
                 .as_deref(),
             Some(effort)

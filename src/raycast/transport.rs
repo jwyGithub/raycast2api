@@ -194,9 +194,24 @@ impl RaycastClient {
             .unwrap_or(crate::config::OAUTH_TOKEN_URL);
         #[cfg(not(test))]
         let url = crate::config::OAUTH_TOKEN_URL;
+        // 真客户端的 refresh_token 换新走 form-urlencoded(URLSearchParams +
+        // content-type: application/x-www-form-urlencoded,backend/index.mjs
+        // #_()/#$());JSON 形态只用于 authorization_code 交换,网关不做该步。
+        // 用 form 发送以对齐 wire 形态。
+        let mut form = Vec::new();
+        if let Some(map) = body.as_object() {
+            for (key, value) in map {
+                let text = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                form.push((key.clone(), text));
+            }
+        }
         let request = http
             .post(url)
-            .json(body)
+            .header("Accept", "application/json")
+            .form(&form)
             .timeout(self.settings.upstream_timeout())
             .build()?;
         // OAuth rotation cannot safely replay after an ambiguous transport failure.

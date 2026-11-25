@@ -234,6 +234,61 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    /// 探针 body 解析:form-urlencoded(`a=b&c=d`)还原成 JSON 对象以便
+    /// 断言;其余(JSON/空)按 JSON 解,失败落 Null。
+    fn parse_body_for_probe(bytes: &[u8]) -> serde_json::Value {
+        let text = String::from_utf8_lossy(bytes);
+        if text.contains('=') && !text.trim_start().starts_with('{') {
+            let mut map = serde_json::Map::new();
+            let mut ok = true;
+            for pair in text.trim().split('&') {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                let decoded = urldecode_form(key).and_then(|k| {
+                    urldecode_form(value).map(|v| (k, serde_json::Value::String(v)))
+                });
+                match decoded {
+                    Some((k, v)) => {
+                        map.insert(k, v);
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok && !map.is_empty() {
+                return serde_json::Value::Object(map);
+            }
+        }
+        serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// 最小 `%XX`/`+` 解码;非法序列返回 None。
+    fn urldecode_form(input: &str) -> Option<String> {
+        let bytes = input.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'%' => {
+                    let hex = bytes.get(index + 1..index + 3)?;
+                    let value = u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+                    out.push(value);
+                    index += 3;
+                }
+                b'+' => {
+                    out.push(b' ');
+                    index += 1;
+                }
+                byte => {
+                    out.push(byte);
+                    index += 1;
+                }
+            }
+        }
+        String::from_utf8(out).ok()
+    }
+
     async fn oauth_probe(
         status: axum::http::StatusCode,
         response: serde_json::Value,
@@ -253,7 +308,9 @@ mod tests {
                 let bytes = axum::body::to_bytes(request.into_body(), 4096)
                     .await
                     .unwrap();
-                let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                // 网关 refresh 用 form-urlencoded(与真客户端一致);探针把
+                // form 键值对还原成 JSON 以便断言,兼容遗留 JSON 形态。
+                let body = parse_body_for_probe(&bytes);
                 calls.lock().unwrap().push((method, path, body));
                 (status, axum::Json(response))
             }

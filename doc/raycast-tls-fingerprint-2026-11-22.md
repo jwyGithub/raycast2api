@@ -71,7 +71,7 @@ Node `https` 模块与 undici fetch 共用 OpenSSL,但 **ClientHello 不带 ALPN
 
 TLS 之外的头层已按本次逆向结论对齐(`src/raycast/client.rs` 的 `Transport`):
 
-- chat(`ai/chat_completions`,undici fetch 实测自动头):`accept-encoding: br, gzip, deflate, zstd`、`accept-language: *`、`sec-fetch-mode: cors`,UA 用 `x-Windows Version` 变体。
+- chat(`ai/chat_completions`,undici fetch 实测自动头):`accept-encoding: gzip, deflate`、`accept-language: *`、`sec-fetch-mode: cors`,UA 用 `x-Windows Version` 变体。(2026-11-25 修正:用 Raycast 自带 Node 26.13.1 实测全局 `fetch()`,undici 不带 br/zstd;初版记录的 `br, gzip, deflate, zstd` 是当时未实测的误判。)
 - 其余 API(/me、credits、models、`ai/files` 注册,内部走 got):`accept-encoding: gzip, deflate, br, zstd`,UA 用 `x-Windows-amd64` 变体,无 sec-fetch-mode / Experimental。
 - presigned PUT(got 裸实例):仅服务端下发头 + got 自动 `accept-encoding`,无默认 UA。
 - reqwest 开启 gzip/brotli/deflate/zstd 特性仅为响应自动解压;tower-http 解压层在请求已带 `accept-encoding` 时不覆盖(`Entry::Vacant` 语义),显式头原样发出。

@@ -33,6 +33,8 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
         accounts_db: ":memory:".into(),
         proxies: Vec::new(),
         proxies_mode: raycast2api::proxies::ProxyMode::Direct,
+        raycast_locale: Some("zh-CN".into()),
+            raycast_timezone: Some("Asia/Shanghai".into()),
     });
     let client = RaycastClient::new(settings.clone(), statistics.clone());
     AppState::new(raycast2api::server::state::AppDeps {
@@ -42,6 +44,12 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
         log,
         statistics,
         db,
+    regions: Arc::new(raycast2api::geo::EgressResolver::new(
+    Some("zh-CN".into()),
+    Some("Asia/Shanghai".into()),
+    reqwest::Client::new(),
+    raycast2api::geo::machine_region(),
+)),
     })
     .unwrap()
 }

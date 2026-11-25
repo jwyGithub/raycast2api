@@ -115,6 +115,16 @@ pub struct ConfigFile {
     /// 语义与校验见 [`crate::proxies`]。
     #[serde(default, alias = "proxiesMode")]
     pub proxies_mode: Option<ProxyMode>,
+    /// 发给上游的 `locale`(BCP47,如 `zh-CN` / `en-US`)。真客户端取运行
+    /// 机器的系统区域;网关按代理出口地区配置以避免"locale 与 IP 地理
+    /// 位置交叉异常"。缺省 `zh-CN`。
+    #[serde(default, alias = "raycastLocale")]
+    pub raycast_locale: Option<String>,
+    /// `<user-preferences>` 系统块里的 `Timezone`(IANA 名,如
+    /// `Asia/Shanghai` / `America/New_York`)。真客户端取运行机器时区;
+    /// 网关应与代理出口地区(及 `raycast_locale`)一致。缺省 `Asia/Shanghai`。
+    #[serde(default, alias = "raycastTimezone")]
+    pub raycast_timezone: Option<String>,
 }
 
 /// Runtime configuration, loaded once at startup via [`Settings::from_path`].
@@ -142,6 +152,14 @@ pub struct Settings {
     pub proxies: Vec<String>,
     /// 代理模式;`proxy` / `proxy_fallback_direct` 保证 `proxies` 非空。
     pub proxies_mode: ProxyMode,
+    /// chat 请求的 `locale`(BCP47)。真客户端发运行机器的系统区域
+    /// (`navigator.language`);网关应与代理出口地区一致。
+    /// `None` = 自动:direct 读本机,走代理经出口探测(`src/geo.rs`)。
+    pub raycast_locale: Option<String>,
+    /// `<user-preferences>` 系统块的 `Timezone`(IANA 名)。与
+    /// `raycast_locale` 配套,共同声明"运行机器"的地理身份。
+    /// `None` = 自动,语义同上。
+    pub raycast_timezone: Option<String>,
 }
 
 impl Settings {
@@ -216,6 +234,33 @@ impl Settings {
         }
         let dashboard_password = non_empty(config.dashboard_password);
         let dashboard_session_secret = non_empty(config.dashboard_session_secret);
+        // 显式值仍在配置层校验形态;空串视为未配置(走自动探测)。
+        let raycast_locale = config
+            .raycast_locale
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(locale) = &raycast_locale
+            && !locale
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(format!(
+                "raycast_locale must be a BCP47 tag like 'zh-CN' or 'en-US' (got {locale})"
+            ));
+        }
+        let raycast_timezone = config
+            .raycast_timezone
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(timezone) = &raycast_timezone
+            && !timezone
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'/')
+        {
+            return Err(format!(
+                "raycast_timezone must be an IANA name like 'Asia/Shanghai' or 'America/New_York' (got {timezone})"
+            ));
+        }
         if dashboard_password.is_some()
             && dashboard_session_secret
                 .as_ref()
@@ -238,6 +283,8 @@ impl Settings {
             accounts_db,
             proxies,
             proxies_mode,
+            raycast_locale,
+            raycast_timezone,
         })
     }
 }
@@ -357,6 +404,63 @@ mod proxy_tests {
                 ))
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn raycast_locale_defaults_to_zh_cn_and_validates_shape() {
+        let parse = |extra: &str| {
+            Settings::from_config_file(
+                serde_json::from_str(&format!(
+                    r#"{{"raycast_signature_secret":"s","api_key":"test-key"{extra}}}"#
+                ))
+                .unwrap(),
+            )
+        };
+        // 缺省 zh-CN。
+        assert_eq!(parse("").unwrap().raycast_locale, None);
+        // camelCase 别名 + 自定义值。
+        assert_eq!(
+            parse(r#", "raycastLocale":"en-US""#).unwrap().raycast_locale,
+            Some("en-US".to_string())
+        );
+        assert_eq!(
+            parse(r#", "raycast_locale":"en-US""#).unwrap().raycast_locale,
+            Some("en-US".to_string())
+        );
+        // 空白容忍、空串回落缺省。
+        assert_eq!(
+            parse(r#", "raycast_locale":" en-US ""#).unwrap().raycast_locale,
+            Some("en-US".to_string())
+        );
+        assert_eq!(
+            parse(r#", "raycast_locale":" ""#).unwrap().raycast_locale,
+            None
+        );
+        // 非法字符拒绝。
+        for bad in ["zh CN", "zh;CN"] {
+            assert!(parse(&format!(r#", "raycast_locale":"{bad}""#)).is_err());
+        }
+        // timezone:缺省 Asia/Shanghai,camelCase 别名,空白容忍,非法拒绝。
+        assert_eq!(parse("").unwrap().raycast_timezone, None);
+        assert_eq!(
+            parse(r#", "raycastTimezone":"America/New_York""#)
+                .unwrap()
+                .raycast_timezone,
+            Some("America/New_York".to_string())
+        );
+        assert_eq!(
+            parse(r#", "raycast_timezone":" Europe/Berlin ""#)
+                .unwrap()
+                .raycast_timezone,
+            Some("Europe/Berlin".to_string())
+        );
+        assert_eq!(
+            parse(r#", "raycast_timezone":" ""#).unwrap().raycast_timezone,
+            None
+        );
+        for bad in ["Asia Shanghai", "Asia;Shanghai"] {
+            assert!(parse(&format!(r#", "raycast_timezone":"{bad}""#)).is_err());
         }
     }
 

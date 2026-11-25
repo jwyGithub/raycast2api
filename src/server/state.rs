@@ -29,6 +29,8 @@ pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
     pub settings: Arc<Settings>,
+    /// 出口地区解析器:请求体的 locale / `<user-preferences>` 来源。
+    pub regions: Arc<crate::geo::EgressResolver>,
     /// Redis 句柄(会话撤销使用);compact 缓存持有它的另一份克隆。
     pub redis: Option<RedisKv>,
     /// 账号调度 + 上游传输(`dispatcher.client` 是纯传输层)。
@@ -70,6 +72,8 @@ pub struct AppDeps {
     pub statistics: Arc<crate::statistics::store::StatisticsStore>,
     /// 与上面各 store 共用的 SQLite 连接,用于创建别名与 API Key store。
     pub db: crate::storage::db::Db,
+    /// 出口地区解析器(请求体 locale/user-preferences 的来源);main 构造。
+    pub regions: Arc<crate::geo::EgressResolver>,
 }
 
 impl AppState {
@@ -81,12 +85,14 @@ impl AppState {
             log,
             statistics,
             db,
+            regions,
         } = deps;
         let aliases = ModelAliasStore::new(db.clone());
         let api_keys = Arc::new(crate::key::ApiKeyStore::new(db.clone(), &settings.api_key)?);
         Ok(Self {
             statistics,
             settings,
+            regions,
             redis: None,
             dispatcher: AccountDispatcher::new(accounts.clone(), client).with_log(log.clone()),
             health: BackendHealth::default(),
@@ -243,6 +249,16 @@ impl AppState {
 }
 
 #[cfg(test)]
+pub fn test_regions() -> Arc<crate::geo::EgressResolver> {
+    Arc::new(crate::geo::EgressResolver::new(
+        Some("zh-CN".into()),
+        Some("Asia/Shanghai".into()),
+        reqwest::Client::new(),
+        crate::geo::machine_region(),
+    ))
+}
+
+#[cfg(test)]
 pub(crate) fn compact_test_state() -> SharedState {
     let db = crate::storage::db::Db::open(":memory:").unwrap();
     let accounts = Arc::new(AccountStore::new(db.clone()).unwrap());
@@ -260,6 +276,8 @@ pub(crate) fn compact_test_state() -> SharedState {
         accounts_db: ":memory:".into(),
         proxies: Vec::new(),
         proxies_mode: crate::proxies::ProxyMode::Direct,
+        raycast_locale: Some("zh-CN".into()),
+        raycast_timezone: Some("Asia/Shanghai".into()),
     });
     let client = RaycastClient::new(settings.clone(), statistics.clone());
     let mut state = AppState::new(AppDeps {
@@ -269,6 +287,7 @@ pub(crate) fn compact_test_state() -> SharedState {
         log,
         statistics,
         db,
+        regions: test_regions(),
     })
     .unwrap();
     state.models_cache = RwLock::new(Some(ModelsCache {
