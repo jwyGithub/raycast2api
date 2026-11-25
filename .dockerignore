@@ -6,7 +6,7 @@
 .claude
 .codegraph
 doc
-tests
+# Keep tests/ in the context for builder-stage cargo test and #[path] modules.
 protocol
 charles
 config.json
