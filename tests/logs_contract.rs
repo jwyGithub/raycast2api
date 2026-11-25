@@ -34,7 +34,7 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
         proxies: Vec::new(),
         proxies_mode: raycast2api::proxies::ProxyMode::Direct,
         raycast_locale: Some("zh-CN".into()),
-            raycast_timezone: Some("Asia/Shanghai".into()),
+        raycast_timezone: Some("Asia/Shanghai".into()),
     });
     let client =
         raycast2api::raycast::client::RaycastClient::new(settings.clone(), statistics.clone());
@@ -46,12 +46,12 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
             log: log_store.clone(),
             statistics,
             db,
-        regions: Arc::new(raycast2api::geo::EgressResolver::new(
-    Some("zh-CN".into()),
-    Some("Asia/Shanghai".into()),
-    reqwest::Client::new(),
-    raycast2api::geo::machine_region(),
-)),
+            regions: Arc::new(raycast2api::geo::EgressResolver::new(
+                Some("zh-CN".into()),
+                Some("Asia/Shanghai".into()),
+                reqwest::Client::new(),
+                raycast2api::geo::machine_region(),
+            )),
         })
         .unwrap(),
     );

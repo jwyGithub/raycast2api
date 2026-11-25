@@ -30,8 +30,22 @@ fn thread_id_is_stable_across_turns() {
         Message::text(Role::User, "what's the weather?"),
     ]);
 
-    let a = build_chat_request(&turn1, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
-    let b = build_chat_request(&turn2, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
+    let a = build_chat_request(
+        &turn1,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
+    let b = build_chat_request(
+        &turn2,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
     assert_eq!(
         a.thread_id, b.thread_id,
         "same conversation must map to the same thread_id"
@@ -93,14 +107,28 @@ fn message_id_is_stable_within_a_user_turn() {
         Message::text(Role::Assistant, "calling..."),
         Message::text(Role::Tool, "tool result"),
     ]);
-    let a = build_chat_request(&start, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
+    let a = build_chat_request(
+        &start,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
     let b = build_chat_request(&mid, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
     assert_eq!(
         a.message_id, b.message_id,
         "message_id must be stable across tool round-trips of one user turn"
     );
     // It is also deterministic: rebuilding the same input reproduces it.
-    let a2 = build_chat_request(&start, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
+    let a2 = build_chat_request(
+        &start,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
     assert_eq!(a.message_id, a2.message_id);
 }
 
@@ -112,8 +140,22 @@ fn message_id_rotates_on_new_user_turn() {
         Message::text(Role::Assistant, "done"),
         Message::text(Role::User, "now do something else"),
     ]);
-    let a = build_chat_request(&turn2, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
-    let b = build_chat_request(&turn3, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
+    let a = build_chat_request(
+        &turn2,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
+    let b = build_chat_request(
+        &turn3,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
     assert_ne!(
         a.message_id, b.message_id,
         "a new user message must start a new message_id"

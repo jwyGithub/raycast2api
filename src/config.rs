@@ -421,16 +421,22 @@ mod proxy_tests {
         assert_eq!(parse("").unwrap().raycast_locale, None);
         // camelCase 别名 + 自定义值。
         assert_eq!(
-            parse(r#", "raycastLocale":"en-US""#).unwrap().raycast_locale,
+            parse(r#", "raycastLocale":"en-US""#)
+                .unwrap()
+                .raycast_locale,
             Some("en-US".to_string())
         );
         assert_eq!(
-            parse(r#", "raycast_locale":"en-US""#).unwrap().raycast_locale,
+            parse(r#", "raycast_locale":"en-US""#)
+                .unwrap()
+                .raycast_locale,
             Some("en-US".to_string())
         );
         // 空白容忍、空串回落缺省。
         assert_eq!(
-            parse(r#", "raycast_locale":" en-US ""#).unwrap().raycast_locale,
+            parse(r#", "raycast_locale":" en-US ""#)
+                .unwrap()
+                .raycast_locale,
             Some("en-US".to_string())
         );
         assert_eq!(
@@ -456,7 +462,9 @@ mod proxy_tests {
             Some("Europe/Berlin".to_string())
         );
         assert_eq!(
-            parse(r#", "raycast_timezone":" ""#).unwrap().raycast_timezone,
+            parse(r#", "raycast_timezone":" ""#)
+                .unwrap()
+                .raycast_timezone,
             None
         );
         for bad in ["Asia Shanghai", "Asia;Shanghai"] {

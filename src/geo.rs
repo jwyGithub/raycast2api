@@ -106,23 +106,20 @@ impl EgressResolver {
                     locale: self.explicit_locale.clone().unwrap_or(region.locale),
                     timezone: self.explicit_timezone.clone().unwrap_or(region.timezone),
                 };
-                self.cache
-                    .lock()
-                    .expect("geo cache poisoned")
-                    .insert(
-                        cache_key.to_string(),
-                        CacheEntry::Hit {
-                            region: merged.clone(),
-                            at: Instant::now(),
-                        },
-                    );
+                self.cache.lock().expect("geo cache poisoned").insert(
+                    cache_key.to_string(),
+                    CacheEntry::Hit {
+                        region: merged.clone(),
+                        at: Instant::now(),
+                    },
+                );
                 merged
             }
             None => {
-                self.cache
-                    .lock()
-                    .expect("geo cache poisoned")
-                    .insert(cache_key.to_string(), CacheEntry::Miss { at: Instant::now() });
+                self.cache.lock().expect("geo cache poisoned").insert(
+                    cache_key.to_string(),
+                    CacheEntry::Miss { at: Instant::now() },
+                );
                 tracing::warn!("egress geo probe failed; using fallback identity");
                 self.fallback()
             }

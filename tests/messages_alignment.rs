@@ -78,7 +78,14 @@ fn client_system_prompt_rides_as_additional_instructions() {
         "messages": [ { "role": "user", "content": "hi" } ]
     }));
 
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
     // Base prompt stays "markdown"; the client's system becomes the addendum,
     // prefixed with the always-present user-preferences block (2026-11-25 capture).
     assert_eq!(raycast.system_instructions, "markdown");
@@ -95,7 +102,14 @@ fn absent_system_still_carries_user_preferences_block() {
         "messages": [ { "role": "user", "content": "hi" } ]
     }));
 
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
     assert_eq!(raycast.system_instructions, "markdown");
     // No client system → the addendum is exactly the user-preferences block:
     // the real client always sends it (capture 2026-11-25), omitting it is
@@ -122,7 +136,14 @@ fn adaptive_thinking_enables_reasoning() {
         Some(ReasoningEffort::High)
     ));
 
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
     assert_eq!(raycast.reasoning_effort.as_deref(), Some("high"));
 }
 
@@ -168,7 +189,14 @@ fn tool_result_is_labelled_with_its_tool_name() {
     assert_eq!(tool.tool_name.as_deref(), Some("Read"));
 
     // And it survives to the Raycast wire as `name`.
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
     let wire_tool = raycast
         .messages
         .iter()
@@ -194,7 +222,14 @@ fn tool_choice_not_injected_when_tools_present() {
     // ...and the builder leaves it unset: the real client omits the field
     // whenever its toolChoice preference is unset (capture 2026-11-25:
     // 8 tools on the wire, no `tool_choice`). Auto-injecting was a fingerprint.
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
     assert_eq!(raycast.tool_choice, None);
     // The capability negotiation, however, is always advertised on chat.
     assert!(raycast.mid_conversation.is_some());
@@ -206,7 +241,14 @@ fn tool_choice_stays_unset_without_tools() {
         "model": "claude-x",
         "messages": [ { "role": "user", "content": "hi" } ]
     }));
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", "zh-CN", "Asia/Shanghai", false);
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    );
     assert!(raycast.tool_choice.is_none());
 }
 

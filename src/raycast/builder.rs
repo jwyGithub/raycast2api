@@ -497,7 +497,10 @@ fn with_user_preferences(system: Option<&str>, locale: &str, timezone: &str) -> 
     let Some(system) = system.filter(|s| !s.trim().is_empty()) else {
         return Some(block);
     };
-    match (system.find(USER_PREFERENCES_OPEN), system.find(USER_PREFERENCES_CLOSE)) {
+    match (
+        system.find(USER_PREFERENCES_OPEN),
+        system.find(USER_PREFERENCES_CLOSE),
+    ) {
         (Some(start), Some(close_start)) if close_start > start => {
             let after = &system[close_start + USER_PREFERENCES_CLOSE.len()..];
             let rest = after.strip_prefix('\n').unwrap_or(after);
@@ -530,7 +533,14 @@ mod image_tests {
             "m",
         );
         canonical.messages = messages;
-        build_chat_request(&canonical, "openai", "test", "zh-CN", "Asia/Shanghai", false)
+        build_chat_request(
+            &canonical,
+            "openai",
+            "test",
+            "zh-CN",
+            "Asia/Shanghai",
+            false,
+        )
     }
 
     /// 指纹回归:无图请求的 wire 字节必须与加图功能之前完全一致。
@@ -546,7 +556,14 @@ mod image_tests {
             Message::text(Role::User, "hello"),
         ];
         canonical.system = Some("Be brief".into());
-        let request = build_chat_request(&canonical, "openai", "test", "zh-CN", "Asia/Shanghai", false);
+        let request = build_chat_request(
+            &canonical,
+            "openai",
+            "test",
+            "zh-CN",
+            "Asia/Shanghai",
+            false,
+        );
         let json = serde_json::to_value(&request).unwrap();
         let messages = json["messages"].as_array().unwrap();
         // 每条消息只有 role/content,content 只有 text — 没有 attachments 字段。
@@ -574,8 +591,17 @@ mod image_tests {
             "m",
         );
         canonical.messages = vec![Message::text(Role::User, "hi")];
-        canonical.tools = vec![crate::core::tools::ToolDef::Remote { name: "web_search".into() }];
-        let request = build_chat_request(&canonical, "openai", "test", "zh-CN", "Asia/Shanghai", false);
+        canonical.tools = vec![crate::core::tools::ToolDef::Remote {
+            name: "web_search".into(),
+        }];
+        let request = build_chat_request(
+            &canonical,
+            "openai",
+            "test",
+            "zh-CN",
+            "Asia/Shanghai",
+            false,
+        );
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(
             json["mid_conversation"],
@@ -585,7 +611,14 @@ mod image_tests {
 
         // 显式选择时照发。
         canonical.tool_choice = Some(crate::core::tools::ToolChoice::Required);
-        let request = build_chat_request(&canonical, "openai", "test", "zh-CN", "Asia/Shanghai", false);
+        let request = build_chat_request(
+            &canonical,
+            "openai",
+            "test",
+            "zh-CN",
+            "Asia/Shanghai",
+            false,
+        );
         assert_eq!(request.tool_choice.as_deref(), Some("required"));
     }
 
@@ -668,14 +701,28 @@ mod image_tests {
             c.messages = vec![Message::text(Role::User, "draw a cat")];
             c
         };
-        let without = build_chat_request(&canonical(), "openai", "test", "zh-CN", "Asia/Shanghai", false);
+        let without = build_chat_request(
+            &canonical(),
+            "openai",
+            "test",
+            "zh-CN",
+            "Asia/Shanghai",
+            false,
+        );
         assert!(
             !serde_json::to_string(&without.tools)
                 .unwrap()
                 .contains("gpt_image"),
             "no ability → no gpt_image remote tool"
         );
-        let with = build_chat_request(&canonical(), "openai", "test", "zh-CN", "Asia/Shanghai", true);
+        let with = build_chat_request(
+            &canonical(),
+            "openai",
+            "test",
+            "zh-CN",
+            "Asia/Shanghai",
+            true,
+        );
         assert_eq!(
             serde_json::to_value(&with.tools).unwrap(),
             serde_json::json!([
@@ -696,7 +743,8 @@ mod image_tests {
                 name: "web_search".into(),
             },
         ];
-        let request = build_chat_request(&explicit, "openai", "test", "zh-CN", "Asia/Shanghai", true);
+        let request =
+            build_chat_request(&explicit, "openai", "test", "zh-CN", "Asia/Shanghai", true);
         assert_eq!(
             request.tools.len(),
             3,
@@ -770,7 +818,14 @@ mod image_tests {
         );
         canonical.messages = vec![Message::text(Role::User, "hi")];
         canonical.system = Some("Be brief".into());
-        let request = build_chat_request(&canonical, "openai", "test", "en-US", "Europe/Berlin", false);
+        let request = build_chat_request(
+            &canonical,
+            "openai",
+            "test",
+            "en-US",
+            "Europe/Berlin",
+            false,
+        );
         let additional = request.additional_system_instructions.unwrap();
         assert!(additional.contains("- Locale: en-US"));
         assert!(additional.contains("- Timezone: Europe/Berlin"));
@@ -786,7 +841,14 @@ mod image_tests {
             "m",
         );
         canonical.messages = vec![Message::text(Role::User, "hi")];
-        let request = build_chat_request(&canonical, "openai", "test", "zh-CN", "Asia/Shanghai", false);
+        let request = build_chat_request(
+            &canonical,
+            "openai",
+            "test",
+            "zh-CN",
+            "Asia/Shanghai",
+            false,
+        );
         assert_eq!(
             serde_json::to_value(&request.tools).unwrap(),
             serde_json::json!([
@@ -801,7 +863,14 @@ mod image_tests {
             description: None,
             parameters: serde_json::json!({"type":"object","properties":{}}),
         }];
-        let request = build_chat_request(&canonical, "openai", "test", "zh-CN", "Asia/Shanghai", false);
+        let request = build_chat_request(
+            &canonical,
+            "openai",
+            "test",
+            "zh-CN",
+            "Asia/Shanghai",
+            false,
+        );
         assert_eq!(
             serde_json::to_value(&request.tools).unwrap(),
             serde_json::json!([

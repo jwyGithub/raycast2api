@@ -25,7 +25,15 @@ fn preserves_system_developer_and_conversation_order() {
         canonical.system.as_deref(),
         Some("be terse\nbe accurate\nlater instruction")
     );
-    let upstream = serde_json::to_value(build_chat_request(&canonical, "p", "m", "zh-CN", "Asia/Shanghai", false)).unwrap();
+    let upstream = serde_json::to_value(build_chat_request(
+        &canonical,
+        "p",
+        "m",
+        "zh-CN",
+        "Asia/Shanghai",
+        false,
+    ))
+    .unwrap();
     let additional = upstream["additional_system_instructions"].as_str().unwrap();
     // user-preferences 块前置(真客户端恒发),调用方 system 原样保留在后。
     assert!(additional.starts_with("<user-preferences>"));
@@ -70,8 +78,15 @@ fn function_tools_and_parallel_results_round_trip_without_losing_text_or_argumen
                 {"role":"tool","tool_call_id":"call_2","content":[{"type":"text","text":"sunny"}]},
                 {"role":"tool","tool_call_id":"call_1","name":"weather","content":"rainy"}
             ]})).unwrap();
-        let upstream =
-            serde_json::to_value(build_chat_request(&canonical, "p", "m", "zh-CN", "Asia/Shanghai", false)).unwrap();
+        let upstream = serde_json::to_value(build_chat_request(
+            &canonical,
+            "p",
+            "m",
+            "zh-CN",
+            "Asia/Shanghai",
+            false,
+        ))
+        .unwrap();
         assert_eq!(upstream["reasoning_effort"], "high");
         assert_eq!(upstream["tool_choice"], "weather");
         assert_eq!(upstream["tools"][0]["type"], "local_tool");

@@ -358,7 +358,6 @@ fn primary_channel_key(settings: &crate::config::Settings) -> &'static str {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

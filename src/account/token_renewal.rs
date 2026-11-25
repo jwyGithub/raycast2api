@@ -243,9 +243,8 @@ mod tests {
             let mut ok = true;
             for pair in text.trim().split('&') {
                 let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-                let decoded = urldecode_form(key).and_then(|k| {
-                    urldecode_form(value).map(|v| (k, serde_json::Value::String(v)))
-                });
+                let decoded = urldecode_form(key)
+                    .and_then(|k| urldecode_form(value).map(|v| (k, serde_json::Value::String(v))));
                 match decoded {
                     Some((k, v)) => {
                         map.insert(k, v);

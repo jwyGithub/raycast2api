@@ -150,7 +150,6 @@ mod tests {
         crate::server::state::test_regions()
     }
 
-
     use axum::body::Bytes;
     use axum::extract::DefaultBodyLimit;
     use axum::routing::post;
@@ -261,7 +260,7 @@ mod tests {
                 log: log.clone(),
                 statistics,
                 db,
-            regions: state_test_regions(),
+                regions: state_test_regions(),
             })
             .unwrap(),
         );

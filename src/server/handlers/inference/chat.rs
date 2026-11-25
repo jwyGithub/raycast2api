@@ -163,9 +163,7 @@ mod tests {
                 let captured = received.try_recv().unwrap();
                 assert_eq!(captured["model"], "test");
                 // user-preferences 块前置(真客户端恒发),调用方 prompt 保留在后。
-                let additional = captured["additional_system_instructions"]
-                    .as_str()
-                    .unwrap();
+                let additional = captured["additional_system_instructions"].as_str().unwrap();
                 assert!(additional.starts_with("<user-preferences>"));
                 assert!(additional.contains("- Timezone: Asia/Shanghai"));
                 assert!(additional.ends_with("Be brief"));
