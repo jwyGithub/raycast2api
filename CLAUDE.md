@@ -1,4 +1,4 @@
-# connect-rust — Claude Code Instructions
+# raycast2api — Claude Code Instructions
 
 ## Pre-Commit Code Review
 
