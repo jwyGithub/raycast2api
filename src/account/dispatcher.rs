@@ -143,6 +143,11 @@ impl AccountDispatcher {
 
     /// 用当前账号的 refresh_token 换新并写回 `account.access_token`。
     async fn renew(&self, account: &mut AccountRow) -> Result<(), GatewayError> {
+        crate::trace_info!(
+            "renewal",
+            "{} -> token expired, renewing via refresh_token",
+            account.email
+        );
         account.access_token =
             crate::account::token_renewal::auto_renew(&self.accounts, &self.client, account)
                 .await?;
@@ -175,11 +180,16 @@ impl AccountDispatcher {
                     );
                 }
             };
-            tracing::info!(
-                account = %account.email,
-                tag = ?account.tag,
-                device_id = ?account.device_id,
-                "→ using account"
+            crate::trace_info!(
+                "dispatcher",
+                "using account={} tag={} device={}",
+                account.email,
+                account.tag.as_deref().unwrap_or("-"),
+                account
+                    .device_id
+                    .as_deref()
+                    .map(|d| &d[..8.min(d.len())])
+                    .unwrap_or("-"),
             );
             // device_id 是账号必填字段(导入时校验),这里直接取;None 只
             // 可能来自配置文件遗留的旧行,标记摘除而不是静默回落。
@@ -206,17 +216,21 @@ impl AccountDispatcher {
             if let Some(regions) = &self.regions {
                 let (cache_key, proxy_client) = client.geo_probe_channel()?;
                 let region = regions.resolve_for(&cache_key, proxy_client).await;
+                crate::trace_info!(
+                    "geo",
+                    "egress identity locale={} tz={} channel={}",
+                    region.locale,
+                    region.timezone,
+                    cache_key,
+                );
                 crate::raycast::builder::apply_region(&mut request, &region);
             } else {
                 // 忘接解析器的 dispatcher 会静默发出与本机身份绑定的
                 // locale/user-preferences——恰是出口对齐要消除的交叉信号。
-                // 每进程只警告一次,提示构造方补 with_regions。
-                static WARNED: std::sync::Once = std::sync::Once::new();
-                WARNED.call_once(|| {
-                    tracing::warn!(
-                        "dispatcher has no egress region resolver; upstream requests will carry the machine locale (call with_regions at construction)"
-                    );
-                });
+                crate::log::trace::warn_once(
+                    "dispatcher-regions-missing",
+                    "dispatcher has no egress region resolver; upstream requests will carry the machine locale (call with_regions at construction)",
+                );
             }
             if !request.pending_uploads.is_empty() {
                 self.upload_attachments(&client, &mut request, &account, &device_id)
@@ -277,7 +291,13 @@ impl AccountDispatcher {
                     };
                     match classify(&err.parsed, &message) {
                         StreamReaction::Abort { note } => {
-                            tracing::warn!(account = %account.email, "→ {note}: {message}");
+                            crate::trace_warn!(
+                                "dispatcher",
+                                "{} -> {}: {}",
+                                account.email,
+                                note,
+                                message
+                            );
                             return Err(GatewayError::Upstream {
                                 status,
                                 message: format!(
@@ -287,10 +307,13 @@ impl AccountDispatcher {
                             });
                         }
                         StreamReaction::Cooldown { secs, reason, note } => {
-                            tracing::warn!(
-                                account = %account.email,
-                                cooldown_secs = secs,
-                                "→ {note}: {message}"
+                            crate::trace_warn!(
+                                "dispatcher",
+                                "{} -> {} (cooldown {}s): {}",
+                                account.email,
+                                note,
+                                secs,
+                                message
                             );
                             self.accounts.mark_cooldown(
                                 &account.email,
@@ -300,14 +323,22 @@ impl AccountDispatcher {
                             last_error = Some(GatewayError::Upstream { status, message });
                         }
                         StreamReaction::Remove { reason, note } => {
-                            tracing::warn!(account = %account.email, "→ {note}: {message}");
+                            crate::trace_warn!(
+                                "dispatcher",
+                                "{} -> {}: {}",
+                                account.email,
+                                note,
+                                message
+                            );
                             self.accounts.mark_unavailable(&account.email, &reason);
                             last_error = Some(GatewayError::Upstream { status, message });
                         }
                         StreamReaction::PassThrough => {
-                            tracing::warn!(
-                                account = %account.email,
-                                "→ upstream in-stream error (not rate-limit): {message}"
+                            crate::trace_warn!(
+                                "dispatcher",
+                                "{} -> upstream in-stream error (not rate-limit): {}",
+                                account.email,
+                                message
                             );
                             // 其他流内错误:还原 payload,交由解析层上报。
                             return Ok(restore_payload(response, &err.raw));
@@ -323,25 +354,33 @@ impl AccountDispatcher {
                     // HTTP 层错误(非流内):账号本身不可用(风控 403 / 订阅
                     // 缺失 402)则摘号换下一个,否则透传终止。
                     if err.is_account_dead() {
-                        tracing::warn!(
-                            account = %account.email,
-                            "→ account unusable upstream (HTTP error), removing from pool: {err}"
+                        crate::trace_warn!(
+                            "dispatcher",
+                            "{} -> account unusable upstream (HTTP error), removing from pool: {}",
+                            account.email,
+                            err
                         );
                         self.accounts
                             .mark_unavailable(&account.email, &format!("账号不可用 ({err})"));
                         last_error = Some(err);
                         continue;
                     }
-                    tracing::error!(account = %account.email, "→ upstream request failed: {err}");
+                    crate::trace_error!(
+                        "dispatcher",
+                        "{} -> upstream request failed: {}",
+                        account.email,
+                        err
+                    );
                     return Err(err);
                 }
             }
         }
 
         // 池内账号全部 401 / 限额:透传最后一个真实错误。
-        tracing::error!(
-            attempts,
-            "all available accounts failed; surfacing last error to client"
+        crate::trace_error!(
+            "dispatcher",
+            "all {} available accounts failed; surfacing last error to client",
+            attempts
         );
         Err(last_error.unwrap_or_else(|| {
             enrich_no_account(
@@ -405,12 +444,13 @@ impl AccountDispatcher {
             .await;
             match result {
                 Ok((id, media_type, bytes)) => {
-                    tracing::info!(
-                        account = %account.email,
-                        file_id = %id,
+                    crate::trace_info!(
+                        "dispatcher",
+                        "{} -> attachment uploaded file={} type={} bytes={}",
+                        account.email,
+                        id,
                         media_type,
-                        bytes,
-                        "→ attachment uploaded"
+                        bytes
                     );
                     if let Some(message) = request.messages.get_mut(upload.message_index) {
                         message
@@ -421,9 +461,11 @@ impl AccountDispatcher {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        account = %account.email,
-                        "attachment download or upload failed, dropping image: {error}"
+                    crate::trace_warn!(
+                        "dispatcher",
+                        "{} -> attachment download or upload failed, dropping image: {}",
+                        account.email,
+                        error
                     );
                     if let Some(message) = request.messages.get_mut(upload.message_index) {
                         message.content.text.push(' ');
@@ -483,9 +525,11 @@ impl AccountDispatcher {
                     last_error = Some(err);
                 }
                 Err(err) if err.is_account_dead() => {
-                    tracing::warn!(
-                        account = %account.email,
-                        "→ account unusable upstream (models), removing from pool: {err}"
+                    crate::trace_warn!(
+                        "dispatcher",
+                        "{} -> account unusable upstream (models), removing from pool: {}",
+                        account.email,
+                        err
                     );
                     self.accounts
                         .mark_unavailable(&account.email, &format!("账号不可用 ({err})"));

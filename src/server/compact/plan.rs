@@ -70,12 +70,13 @@ pub(crate) async fn apply(
         Compaction::Summarize(messages) => {
             let summary_text = summarize_messages(&request, messages, send).await?;
             let messages = rebuild(&request.messages, &summary_text);
-            tracing::info!(
-                model = %request.model,
-                summary_chars = summary_text.len(),
-                original_messages = request.messages.len(),
-                compacted_messages = messages.len(),
-                "compact: summary completed — history rewritten"
+            crate::trace_info!(
+                "compact",
+                "summary completed — history rewritten model={} summary_chars={} original_messages={} compacted_messages={}",
+                request.model,
+                summary_text.len(),
+                request.messages.len(),
+                messages.len()
             );
 
             cache.record_summary(&request, summary_text).await;

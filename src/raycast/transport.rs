@@ -59,6 +59,14 @@ impl RaycastClient {
                 .await
             {
                 Ok(Ok(mut response)) => {
+                    crate::trace_info!(
+                        "upstream",
+                        "sent via channel={} account={} status={} elapsed={}ms",
+                        channel,
+                        account.unwrap_or("-"),
+                        response.status().as_u16(),
+                        started.elapsed().as_millis(),
+                    );
                     if let Some((log, id)) = log {
                         log.record_response_headers(id, response.headers());
                     }
@@ -89,24 +97,26 @@ impl RaycastClient {
                     return Ok(response);
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!(
+                    crate::trace_warn!(
+                        "upstream",
+                        "send failed via channel={} account={} elapsed={}ms body_bytes={:?} is_connect={} error={}",
                         channel,
-                        account,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        account.unwrap_or("-"),
+                        started.elapsed().as_millis(),
                         body_bytes,
-                        is_connect = error.is_connect(),
-                        "→ upstream send failed: {}",
+                        error.is_connect(),
                         crate::error::error_chain(&error)
                     );
                     last = Some(GatewayError::from(error));
                 }
                 Err(_) => {
-                    tracing::warn!(
+                    crate::trace_warn!(
+                        "upstream",
+                        "send failed via channel={} account={} elapsed={}ms body_bytes={:?} (response header timeout)",
                         channel,
-                        account,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        body_bytes,
-                        "→ upstream send failed: response header timeout"
+                        account.unwrap_or("-"),
+                        started.elapsed().as_millis(),
+                        body_bytes
                     );
                     last = Some(GatewayError::Upstream {
                         status: 504,

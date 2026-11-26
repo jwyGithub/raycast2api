@@ -118,7 +118,16 @@ impl Attempt {
     ) -> Option<Self> {
         let id = new_ulid();
         if let Err(error) = store.start(&id, call, email) {
-            tracing::error!(%error, managed_key_id = call.request.managed_key_id.as_ref().map(|id| id.0.as_str()), "statistics insert failed");
+            crate::trace_error!(
+                "statistics",
+                "insert failed key={:?} error={}",
+                call.request
+                    .managed_key_id
+                    .as_ref()
+                    .map(|id| id.0.as_str())
+                    .unwrap_or("-"),
+                error
+            );
             return None;
         }
         Some(Self(Arc::new(AttemptInner {
@@ -136,10 +145,18 @@ impl Attempt {
     }
 
     pub fn bind_account(&self, email: &str) -> Result<(), crate::error::GatewayError> {
-        self.0.store.bind_account(&self.0.id, email).map_err(|error| {
-            tracing::error!(%error, id = %self.0.id, "failed to activate reserved statistics record");
-            crate::error::GatewayError::UsageTrackingUnavailable
-        })?;
+        self.0
+            .store
+            .bind_account(&self.0.id, email)
+            .map_err(|error| {
+                crate::trace_error!(
+                    "statistics",
+                    "failed to activate reserved record id={} error={}",
+                    self.0.id,
+                    error
+                );
+                crate::error::GatewayError::UsageTrackingUnavailable
+            })?;
         self.0.state.lock().unwrap().reserved = false;
         Ok(())
     }
@@ -175,10 +192,19 @@ impl AttemptInner {
             let usage = state.usage.take();
             let amounts = (status == "completed" && self.accounting.is_some()).then(|| {
                 let amount = |field| {
-                    usage.as_ref().and_then(|usage| usage.get(field)).and_then(usage_units).unwrap_or_else(|| {
-                        tracing::warn!(id = %self.id, field, "missing or invalid managed API key usage");
-                        0
-                    })
+                    usage
+                        .as_ref()
+                        .and_then(|usage| usage.get(field))
+                        .and_then(usage_units)
+                        .unwrap_or_else(|| {
+                            crate::trace_warn!(
+                                "statistics",
+                                "missing or invalid managed API key usage id={} field={}",
+                                self.id,
+                                field
+                            );
+                            0
+                        })
                 };
                 (amount("total_credits"), amount("total_cost"))
             });
@@ -194,7 +220,9 @@ impl AttemptInner {
         let settlement = self.accounting.as_ref().zip(terminal.amounts);
         match self.store.finish(&self.id, terminal, settlement) {
             Ok(_) => state.finished = true,
-            Err(error) => tracing::error!(%error, id = %self.id, "statistics finish failed"),
+            Err(error) => {
+                crate::trace_error!("statistics", "finish failed id={} error={}", self.id, error)
+            }
         }
     }
 }
@@ -203,7 +231,12 @@ impl Drop for AttemptInner {
     fn drop(&mut self) {
         if self.state.get_mut().unwrap().reserved {
             if let Err(error) = self.store.discard_reservation(&self.id) {
-                tracing::error!(%error, id = %self.id, "could not discard unused statistics reservation");
+                crate::trace_error!(
+                    "statistics",
+                    "could not discard unused reservation id={} error={}",
+                    self.id,
+                    error
+                );
             }
             return;
         }

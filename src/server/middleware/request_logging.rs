@@ -132,33 +132,53 @@ async fn log_completion(id: String, request: Request, next: Next) -> Response {
     // handler 的 Err(GatewayError) 已由 axum 渲染为错误响应,这里只看状态码。
     let response = REQUEST_ID.scope(id.clone(), next.run(request)).await;
 
-    // 请求/响应配对的完成日志:状态码 + 耗时,与 stream 层的 `[id]` 前缀
-    // 和 client 层的账号日志对得上。上游客户端登记实际使用的账号出口
-    // ("direct" 或指定的代理 ID)，这里一并输出；未发送上游请求时没有登记。
+    // 请求/响应配对的完成日志:状态码 + 耗时,统一 trace 格式。
+    // 上游客户端登记实际使用的账号出口("direct" 或指定的代理 ID),这里一并
+    // 输出;未发送上游请求时没有登记。
     let status = response.status();
-    let elapsed = started.elapsed();
+    let elapsed_ms = started.elapsed().as_millis();
     match debug::take_channel(&id) {
         Some(channel) if status.is_success() => {
-            tracing::info!(
-                request_id = %id,
-                method = %method,
-                path = %path,
-                "← {status} [{id}] via {channel} in {elapsed:?}"
+            crate::trace_info!(
+                "http",
+                "{} {} completed status={} via={} elapsed={}ms",
+                method,
+                path,
+                status.as_u16(),
+                channel,
+                elapsed_ms,
             );
         }
         Some(channel) => {
-            tracing::warn!(
-                request_id = %id,
-                method = %method,
-                path = %path,
-                "← {status} [{id}] via {channel} in {elapsed:?}"
+            crate::trace_warn!(
+                "http",
+                "{} {} completed status={} via={} elapsed={}ms",
+                method,
+                path,
+                status.as_u16(),
+                channel,
+                elapsed_ms,
             );
         }
         None if status.is_success() => {
-            tracing::info!(request_id = %id, method = %method, path = %path, "← {status} [{id}] in {elapsed:?}");
+            crate::trace_info!(
+                "http",
+                "{} {} completed status={} elapsed={}ms",
+                method,
+                path,
+                status.as_u16(),
+                elapsed_ms,
+            );
         }
         None => {
-            tracing::warn!(request_id = %id, method = %method, path = %path, "← {status} [{id}] in {elapsed:?}");
+            crate::trace_warn!(
+                "http",
+                "{} {} completed status={} elapsed={}ms",
+                method,
+                path,
+                status.as_u16(),
+                elapsed_ms,
+            );
         }
     }
     response

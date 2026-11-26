@@ -52,8 +52,9 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
     // function_call the server already settled — drop it here, log it.
     if data.notification_type.as_deref() == Some("tool_calls") {
         for call in &data.tool_calls {
-            tracing::info!(
-                "⇈ remote tool executed server-side: {} ({})",
+            crate::trace_info!(
+                "parser",
+                "remote tool executed server-side: {} ({})",
                 call.name,
                 call.id
             );
@@ -105,7 +106,12 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
         } else {
             502
         };
-        tracing::warn!(status, %message, "upstream in-stream error");
+        crate::trace_warn!(
+            "parser",
+            "upstream in-stream error status={} message={}",
+            status,
+            message
+        );
         return vec![CanonicalEvent::Error { status, message }];
     }
 
@@ -123,7 +129,7 @@ pub fn parse_events(payload: &str, notifications: &mut Vec<String>) -> Vec<Canon
     if let Some(url) = data.image.as_deref()
         && !url.is_empty()
     {
-        tracing::info!("→ image generated: {url}");
+        crate::trace_info!("parser", "image generated: {}", url);
         events.push(CanonicalEvent::ImageGenerated {
             url: url.to_string(),
         });

@@ -66,9 +66,9 @@ pub(crate) async fn run<O: OutboundAdapter>(
                     .text
                     .push_str(crate::core::message::IMAGE_OMITTED_PLACEHOLDER);
             }
-            tracing::info!(
-                dropped,
-                "image attachments dropped: model lacks vision support"
+            crate::trace_info!(
+                "inference",
+                "image attachments dropped: model lacks vision support (dropped={dropped})"
             );
         }
     }
@@ -193,13 +193,17 @@ pub(crate) async fn events(
     reserved: Option<Attempt>,
 ) -> Result<impl Stream<Item = CanonicalEvent> + Send + 'static, GatewayError> {
     let (provider, model) = (&target.provider, &target.model);
-    tracing::info!(
-        client_model = %request.model,
-        upstream = %format!("{provider}/{model}"),
-        stream = request.stream,
-        messages = request.messages.len(),
-        effort = ?request.reasoning_effort.map(|e| e.as_str()),
-        "inference request"
+    crate::trace_info!(
+        "inference",
+        "request mapped client_model={} upstream={provider}/{model} messages={} stream={} effort={}",
+        request.model,
+        request.messages.len(),
+        request.stream,
+        request
+            .reasoning_effort
+            .as_ref()
+            .map(|e| e.as_str())
+            .unwrap_or("-"),
     );
     // Image-generation tool injection is an inference-time mirror of the
     // client preset; the compaction/summarize call is a deliberately plain

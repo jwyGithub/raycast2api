@@ -7,6 +7,7 @@
 
 pub mod format;
 pub mod store;
+pub mod trace;
 pub mod wire;
 
 pub mod context;

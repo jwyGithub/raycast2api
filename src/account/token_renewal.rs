@@ -77,6 +77,17 @@ fn persist_outcome(
     outcome: TokenRenewalOutcome,
 ) -> Result<String, crate::error::GatewayError> {
     use crate::error::GatewayError;
+    match &outcome {
+        TokenRenewalOutcome::Renewed { .. } => {
+            crate::trace_info!("renewal", "{} -> token renewed", email);
+        }
+        TokenRenewalOutcome::InvalidGrant => {
+            crate::trace_warn!("renewal", "{} -> refresh_token invalid_grant (dead)", email);
+        }
+        TokenRenewalOutcome::Failed(reason) => {
+            crate::trace_warn!("renewal", "{} -> renewal failed: {}", email, reason);
+        }
+    }
     match outcome {
         TokenRenewalOutcome::Renewed {
             access_token,

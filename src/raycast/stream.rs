@@ -67,11 +67,11 @@ pub(crate) fn canonical_events_with_retry(
         if !truncated { return; }
         // Replaying generation cannot reliably reproduce text, reasoning, signatures or tool calls.
         if output_started {
-            tracing::warn!("upstream SSE truncated after output started [{id}] — preserving partial output, not retrying");
+            crate::trace_warn!("stream", "upstream SSE truncated after output started — preserving partial output, not retrying");
             yield premature_error();
             return;
         }
-        tracing::warn!("upstream SSE truncated before output [{id}] — retrying identical request once");
+        crate::trace_warn!("stream", "upstream SSE truncated before output — retrying identical request once");
         let retry_started = std::time::Instant::now();
         tracing::trace!(request_id = %id, attempt = 1, max_retries = 1, "SSE retry: sending identical request before any output");
         let response = match resend().await {
@@ -93,7 +93,7 @@ pub(crate) fn canonical_events_with_retry(
                 Ok(event) => event,
                 Err(()) => {
                     tracing::trace!(request_id = %id, attempt = 1, elapsed_ms = retry_started.elapsed().as_millis(), "SSE retry: stream truncated again, no retries remaining");
-                    tracing::error!("upstream SSE retry also truncated [{id}] — request failed");
+                    crate::trace_error!("stream", "upstream SSE retry also truncated — request failed");
                     yield premature_error();
                     return;
                 }
@@ -231,9 +231,10 @@ fn decode_events(
                 // 没有 finish 就直接没了。必须留痕,否则排查时终端日志
                 // 看起来像"正常结束但没内容"。
                 let err = crate::error::error_chain(&chunk.unwrap_err());
-                tracing::error!(
-                    "⇈ upstream transport error [{id}]: {err} — stream ended \
-                     prematurely after {} payloads (no finish_reason seen)",
+                crate::trace_error!(
+                    "stream",
+                    "upstream transport error: {} — stream ended prematurely after {} payloads (no finish_reason seen)",
+                    err,
                     payloads.len()
                 );
                 exit_reason = format!("transport error: {err}");
@@ -250,7 +251,7 @@ fn decode_events(
                 // 否则"账号被降级到 luna"这种关键信息终端上完全不可见。
                 if notifications.len() > seen_notifications {
                     for n in &notifications[seen_notifications..] {
-                        tracing::warn!("⇈ upstream notification [{id}]: {n}");
+                        crate::trace_warn!("stream", "upstream notification: {}", n);
                     }
                     seen_notifications = notifications.len();
                 }
@@ -286,20 +287,18 @@ fn decode_events(
                         }
                         CanonicalEvent::ThoughtSignature(sig) => {
                             text_log.flush(&id);
-                            tracing::info!("→ thought_signature [{id}]: {}", truncate_for_log(sig));
+                            crate::trace_info!("stream", "thought_signature: {}", truncate_for_log(sig));
                         }
                         CanonicalEvent::ToolCall(call) => {
                             text_log.flush(&id);
-                            tracing::info!("→ tool_call [{id}]: {} (id: {})", call.name, call.id);
+                            crate::trace_info!("stream", "tool_call: {} (id: {})", call.name, call.id);
                         }
                         CanonicalEvent::ImageGenerationStarted { size, count } => {
-                            tracing::info!(
-                                "→ image_generation [{id}]: started (size={size:?}, count={count:?})"
-                            );
+                            crate::trace_info!("stream", "image_generation started size={:?} count={:?}", size, count);
                         }
                         CanonicalEvent::ImageGenerated { url } => {
                             text_log.flush(&id);
-                            tracing::info!("→ image generated [{id}]: {url}");
+                            crate::trace_info!("stream", "image generated: {}", url);
                             // 客户端常无法直接访问 ai-images.raycast.com(境外
                             // S3/CloudFront):下载转 data URL 内联进 markdown,
                             // 客户端无需再发请求。失败时退回原始 URL,图链仍在。
@@ -310,9 +309,7 @@ fn decode_events(
                                     )));
                                 }
                                 Err(error) => {
-                                    tracing::warn!(
-                                        "→ image fetch failed [{id}], falling back to raw URL: {error}"
-                                    );
+                                    crate::trace_warn!("stream", "image fetch failed, falling back to raw URL: {}", error);
                                     // Angle-bracket link form: survives `)` and
                                     // spaces in URLs (S3 keys can carry both).
                                     yield Ok(CanonicalEvent::TextDelta(format!(
@@ -324,12 +321,11 @@ fn decode_events(
                         }
                         CanonicalEvent::Finish { reason, usage } => {
                             text_log.flush(&id);
-                            tracing::info!("→ finish [{id}]: reason={:?}, tokens={{input: {}, output: {}, cached: {}}}",
-                                reason, usage.input_tokens, usage.output_tokens, usage.cached_tokens);
+                            crate::trace_info!("stream", "finish reason={:?} tokens={{input: {}, output: {}, cached: {}}}", reason, usage.input_tokens, usage.output_tokens, usage.cached_tokens);
                         }
                         CanonicalEvent::Error { status, message } => {
                             text_log.flush(&id);
-                            tracing::error!("→ upstream error [{id}]: status={status}, message={message}");
+                            crate::trace_error!("stream", "upstream error status={} message={}", status, message);
                         }
                     }
                     yield Ok(event);
@@ -351,9 +347,10 @@ fn decode_events(
                     Some(&format!("upstream stream ended without a terminal event: {exit_reason}")),
                 );
             }
-            tracing::error!(
-                "⇈ upstream stream ended without finish [{id}]: {exit_reason} — \
-                 synthesizing error event (payloads={})",
+            crate::trace_error!(
+                "stream",
+                "upstream stream ended without finish: {} — synthesizing error event (payloads={})",
+                exit_reason,
                 payloads.len()
             );
             log.update_response(&id, &payloads.join("\n"));

@@ -32,7 +32,8 @@ pub struct DeltaLogBuffer {
 }
 
 impl DeltaLogBuffer {
-    /// 追加一个 delta;事件类型切换时先刷出前一段。
+    /// 追加一个 delta;事件类型切换时先刷出前一段。`_id` 仅保留调用形状
+    /// (request_id 由 trace 宏从 task-local 自取)。
     pub fn push(&mut self, kind: &'static str, text: &str, id: &str) {
         if self.kind != Some(kind) {
             self.flush(id);
@@ -47,10 +48,10 @@ impl DeltaLogBuffer {
 
     /// 刷出当前缓冲为一行(换行转义为 `\n` 字面量保证物理单行);空则不动。
     /// 无论刷没刷,kind 都归位 —— 缓冲空时 kind 也必须是无主状态。
-    pub fn flush(&mut self, id: &str) {
+    pub fn flush(&mut self, _id: &str) {
         if !self.buf.is_empty() {
             let label = self.kind.unwrap_or("text");
-            tracing::info!("→ {label} [{id}]: {}", self.buf.escape_debug());
+            crate::trace_info!("stream", "{}: {}", label, self.buf.escape_debug());
             self.buf.clear();
         }
         self.kind = None;

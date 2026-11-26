@@ -108,10 +108,11 @@ pub async fn fetch_url(clients: &[reqwest::Client], url: &str) -> Option<Attachm
                 // Sniff the type when the server sends a generic/missing one; the
                 // magic-byte check doubles as validation that it is actually an image.
                 let media_type = sniff(&content_type, &bytes)?;
-                tracing::info!(
-                    bytes = bytes.len(),
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "fetched remote image attachment"
+                crate::trace_info!(
+                    "attachment",
+                    "remote image fetched bytes={} elapsed={}ms",
+                    bytes.len(),
+                    started.elapsed().as_millis()
                 );
                 return Some(Attachment::Inline {
                     media_type,
@@ -119,14 +120,16 @@ pub async fn fetch_url(clients: &[reqwest::Client], url: &str) -> Option<Attachm
                 });
             }
             Ok((_, bytes)) => {
-                tracing::warn!(
-                    bytes = bytes.len(),
-                    "remote image exceeds fetch cap, dropped"
+                crate::trace_warn!(
+                    "attachment",
+                    "remote image exceeds fetch cap, dropped bytes={}",
+                    bytes.len()
                 );
                 return None;
             }
             Err(error) => {
-                tracing::warn!(
+                crate::trace_warn!(
+                    "attachment",
                     "remote image fetch failed: {}",
                     crate::error::error_chain(&error)
                 );

@@ -117,8 +117,17 @@ impl EgressResolver {
         }
 
         // 实测出口。
+        let started = Instant::now();
         match self.probe(proxy_client).await {
             Some(region) => {
+                crate::trace_info!(
+                    "geo",
+                    "egress probed channel={} locale={} tz={} elapsed={}ms",
+                    cache_key,
+                    region.locale,
+                    region.timezone,
+                    started.elapsed().as_millis(),
+                );
                 self.lock_cache().insert(
                     cache_key.to_string(),
                     CacheEntry::Hit {
@@ -133,9 +142,11 @@ impl EgressResolver {
                     cache_key.to_string(),
                     CacheEntry::Miss { at: Instant::now() },
                 );
-                tracing::warn!(
-                    channel = cache_key,
-                    "egress geo probe failed; using fallback identity"
+                crate::trace_warn!(
+                    "geo",
+                    "egress probe failed channel={} elapsed={}ms; using machine fallback",
+                    cache_key,
+                    started.elapsed().as_millis(),
                 );
                 self.fallback()
             }
