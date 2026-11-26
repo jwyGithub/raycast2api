@@ -485,7 +485,6 @@ impl ProxyStore {
         let row = self.get(id)?;
         let result = Self::probe_url(&row.input(), id, timeout, url, exit_url).await;
         let tested_at = unix_secs() as i64;
-        let request_id = crate::log::context::current_request_id();
         let exit_details = result
             .as_ref()
             .ok()
@@ -511,21 +510,25 @@ impl ProxyStore {
                     .execute(&mut *conn),
             }.map_err(sql_error)
         }).inspect_err(|error| {
-            tracing::warn!(request_id = %request_id, proxy_id = id, error = %error, "代理测试结果保存失败");
+            crate::trace_warn!("proxy-test", "测试结果保存失败 proxy={} error={}", id, error);
         })?;
         if n == 0 {
-            tracing::warn!(request_id = %request_id, proxy_id = id, "代理测试期间配置已修改或删除，未保存结果");
+            crate::trace_warn!(
+                "proxy-test",
+                "测试期间配置已修改或删除，未保存结果 proxy={}",
+                id
+            );
             return Err(GatewayError::BadRequest(
                 "测试期间代理已修改或删除，请重新测试".into(),
             ));
         }
         let probe = result?;
-        tracing::info!(
-            request_id = %request_id,
-            proxy_id = id,
-            latency_ms = probe.latency_ms,
-            tested_at = tested_at,
-            "代理测试完成，延迟、出口及测试时间已保存"
+        crate::trace_info!(
+            "proxy-test",
+            "测试完成，延迟、出口及测试时间已保存 proxy={} latency={}ms tested_at={}",
+            id,
+            probe.latency_ms,
+            tested_at
         );
         Ok(ProxyTestResult { probe, tested_at })
     }
@@ -539,19 +542,25 @@ impl ProxyStore {
         exit_url: &str,
     ) -> Result<ProxyProbeResult, GatewayError> {
         let request_id = crate::log::context::current_request_id();
-        tracing::info!(
-            request_id = %request_id,
-            proxy_id = id,
-            proxy_type = %input.kind,
-            proxy_host = %input.host,
-            proxy_port = input.port,
-            upstream_url = url,
-            timeout_ms = timeout.as_millis() as u64,
-            "代理测试开始"
+        crate::trace_info!(
+            "proxy-test",
+            "测试开始 proxy={} type={} host={}:{} upstream={} timeout={}ms",
+            id,
+            input.kind,
+            input.host,
+            input.port,
+            url,
+            timeout.as_millis()
         );
-        let client = input.client(timeout, super::Transport::ChatFetch)
+        let client = input
+            .client(timeout, super::Transport::ChatFetch)
             .inspect_err(|error| {
-                tracing::warn!(request_id = %request_id, proxy_id = id, error = %error, "代理测试客户端构造失败");
+                crate::trace_warn!(
+                    "proxy-test",
+                    "测试客户端构造失败 proxy={} error={}",
+                    id,
+                    error
+                );
             })?;
         let started = std::time::Instant::now();
         let response = client
@@ -562,14 +571,14 @@ impl ProxyStore {
             .send()
             .await
             .map_err(|error| {
-                tracing::warn!(
-                    request_id = %request_id,
-                    proxy_id = id,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    is_timeout = error.is_timeout(),
-                    is_connect = error.is_connect(),
-                    error = %crate::error::error_chain(&error),
-                    "代理测试请求失败"
+                crate::trace_warn!(
+                    "proxy-test",
+                    "测试请求失败 proxy={} elapsed={}ms is_timeout={} is_connect={} error={}",
+                    id,
+                    started.elapsed().as_millis(),
+                    error.is_timeout(),
+                    error.is_connect(),
+                    crate::error::error_chain(&error)
                 );
                 GatewayError::Upstream {
                     status: 502,
@@ -581,20 +590,20 @@ impl ProxyStore {
         if request_id != "-" {
             crate::log::context::record_channel(&request_id, id);
         }
-        tracing::info!(
-            request_id = %request_id,
-            proxy_id = id,
-            http_status = status,
-            latency_ms = latency_ms,
-            "代理测试收到上游响应"
+        crate::trace_info!(
+            "proxy-test",
+            "收到上游响应 proxy={} status={} latency={}ms",
+            id,
+            status,
+            latency_ms
         );
         // 未提供账号凭据，400/401/405/422 属于预期响应。
         if !(response.status().is_success() || matches!(status, 400 | 401 | 405 | 422)) {
-            tracing::warn!(
-                request_id = %request_id,
-                proxy_id = id,
-                http_status = status,
-                "代理测试响应状态不符合预期"
+            crate::trace_warn!(
+                "proxy-test",
+                "响应状态不符合预期 proxy={} status={}",
+                id,
+                status
             );
             return Err(GatewayError::Upstream {
                 status: 502,
@@ -602,17 +611,19 @@ impl ProxyStore {
             });
         }
         drop(response);
-        let (exit_ip, exit_location, exit_details, exit_error) = match Self::query_exit(
-            &client, id, timeout, exit_url,
-        )
-        .await
-        {
-            Ok(exit) => (Some(exit.ip), Some(exit.location), Some(exit.details), None),
-            Err(error) => {
-                tracing::warn!(request_id = %request_id, proxy_id = id, error = %error, "代理出口查询失败");
-                (None, None, None, Some(error.to_string()))
-            }
-        };
+        let (exit_ip, exit_location, exit_details, exit_error) =
+            match Self::query_exit(&client, id, timeout, exit_url).await {
+                Ok(exit) => (Some(exit.ip), Some(exit.location), Some(exit.details), None),
+                Err(error) => {
+                    crate::trace_warn!(
+                        "proxy-test",
+                        "代理出口查询失败 proxy={} error={}",
+                        id,
+                        error
+                    );
+                    (None, None, None, Some(error.to_string()))
+                }
+            };
         Ok(ProxyProbeResult {
             latency_ms,
             exit_ip,
@@ -628,8 +639,12 @@ impl ProxyStore {
         timeout: Duration,
         url: &str,
     ) -> Result<ProxyExit, GatewayError> {
-        let request_id = crate::log::context::current_request_id();
-        tracing::info!(request_id = %request_id, proxy_id = id, exit_api_url = url, "代理出口查询开始");
+        crate::trace_info!(
+            "proxy-test",
+            "代理出口查询开始 proxy={} exit_api={}",
+            id,
+            url
+        );
         let response = client
             .get(url)
             .query(&[("lang", "zh-CN")])
@@ -702,7 +717,13 @@ impl ProxyStore {
         } else {
             parts.join(" / ")
         };
-        tracing::info!(request_id = %request_id, proxy_id = id, exit_ip = %ip, exit_location = %location, "代理出口查询完成");
+        crate::trace_info!(
+            "proxy-test",
+            "代理出口查询完成 proxy={} exit_ip={} exit_location={}",
+            id,
+            ip,
+            location
+        );
         Ok(ProxyExit {
             ip,
             location,

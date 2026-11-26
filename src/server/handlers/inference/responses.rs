@@ -215,9 +215,10 @@ impl RequestChannel {
 impl Drop for RequestChannel {
     fn drop(&mut self) {
         if let Some(channel) = debug::take_channel(&self.0) {
-            tracing::info!(
-                "← stream done [{}] via {channel} in {:?}",
-                self.0,
+            crate::trace_info!(
+                "http",
+                "stream done via={} elapsed={:?}",
+                channel,
                 self.1.elapsed()
             );
         }

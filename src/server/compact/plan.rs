@@ -117,11 +117,12 @@ pub(crate) async fn summarize_messages(
         ..CanonicalRequest::new(request.protocol, request.model.clone())
     };
     let summary = send(summary_request).await.map_err(|error| {
-        tracing::error!(
-            model = %request.model,
-            messages = request.messages.len(),
-            %error,
-            "compact: summarization call failed — request aborted"
+        crate::trace_error!(
+            "compact",
+            "summarization call failed — request aborted model={} messages={} error={}",
+            request.model,
+            request.messages.len(),
+            error
         );
         error
     })?;
@@ -160,13 +161,18 @@ pub(crate) async fn plan(
     if request_tokens < threshold {
         return Compaction::NotNeeded;
     }
-    tracing::info!(
-        model = %request.model,
-        estimated_tokens = request_tokens,
-        token_source = if measured_tokens.is_some() { "usage+estimate" } else { "estimate" },
+    crate::trace_info!(
+        "compact",
+        "threshold reached, evaluating turn boundary model={} estimated_tokens={} token_source={} threshold={} window={}",
+        request.model,
+        request_tokens,
+        if measured_tokens.is_some() {
+            "usage+estimate"
+        } else {
+            "estimate"
+        },
         threshold,
-        window,
-        "compact: threshold reached, evaluating turn boundary"
+        window
     );
 
     // Only compact at a turn boundary: the trailing message must be the new
@@ -175,9 +181,10 @@ pub(crate) async fn plan(
         return Compaction::NotNeeded;
     };
     if last.role != Role::User || is_summary(last) {
-        tracing::debug!(
-            last_role = ?last.role,
-            "compact: skipped — not at a user turn boundary"
+        crate::trace_debug!(
+            "compact",
+            "skipped — not at a user turn boundary last_role={:?}",
+            last.role
         );
         return Compaction::NotNeeded;
     }
@@ -188,12 +195,13 @@ pub(crate) async fn plan(
     let droppable = request.messages.len() - 1;
     let cache_hit = cache.cached_summary(request).await;
     let (covered, previous_summary) = cache_hit.unwrap_or((0, String::new()));
-    tracing::info!(
-        model = %request.model,
-        messages = request.messages.len(),
-        cache_hit_messages = covered,
-        incremental = !previous_summary.is_empty(),
-        "compact: TRIGGERED — summarizing conversation prefix"
+    crate::trace_info!(
+        "compact",
+        "TRIGGERED — summarizing conversation prefix model={} messages={} cache_hit_messages={} incremental={}",
+        request.model,
+        request.messages.len(),
+        covered,
+        !previous_summary.is_empty()
     );
 
     if covered == droppable && !previous_summary.is_empty() {

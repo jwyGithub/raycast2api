@@ -146,7 +146,11 @@ impl AppState {
             Ok(models) if !models.is_empty() => Some(models),
             Ok(_) => None,
             Err(error) => {
-                tracing::warn!(%error, "ignoring undecodable model list in Redis");
+                crate::trace_warn!(
+                    "models",
+                    "ignoring undecodable model list in Redis: {}",
+                    error
+                );
                 None
             }
         }
@@ -162,13 +166,17 @@ impl AppState {
         let stored = match serde_json::to_vec(models) {
             Ok(bytes) => redis.set_ex(key, bytes, MODELS_REDIS_TTL).await,
             Err(error) => {
-                tracing::warn!(%error, "failed to serialize model list for Redis");
+                crate::trace_warn!(
+                    "models",
+                    "failed to serialize model list for Redis: {}",
+                    error
+                );
                 false
             }
         };
         self.models_redis_stale.store(!stored, Ordering::Relaxed);
         if !stored {
-            tracing::warn!("failed to cache model list in Redis");
+            crate::trace_warn!("models", "failed to cache model list in Redis");
         }
     }
 
@@ -222,7 +230,7 @@ impl AppState {
             Err(err) => {
                 *self.models_failed_at.lock().await = Some(Instant::now());
                 if let Some(cache) = self.models_cache.read().await.as_ref() {
-                    tracing::warn!(%err, "using stale model cache");
+                    crate::trace_warn!("models", "using stale model cache: {}", err);
                     return Ok(cache.models.clone());
                 }
                 Err(err)

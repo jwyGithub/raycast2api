@@ -68,6 +68,22 @@ macro_rules! trace_error {
     };
 }
 
+/// 统一格式的 debug 日志(细粒度流程,默认过滤级别下不显示)。
+#[macro_export]
+macro_rules! trace_debug {
+    ($module:expr, $($args:tt)*) => {
+        $crate::emit_inner!(@debug $module, $($args)*)
+    };
+}
+
+/// 统一格式的 trace 日志(最细粒度,需要 RUST_LOG=trace 才显示)。
+#[macro_export]
+macro_rules! trace_trace {
+    ($module:expr, $($args:tt)*) => {
+        $crate::emit_inner!(@trace $module, $($args)*)
+    };
+}
+
 /// 统一格式化并输出。宏规则无法按 level 分发 `tracing::$level!`,
 /// 所以直接在展开处 match 一次。
 #[doc(hidden)]

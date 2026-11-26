@@ -70,7 +70,7 @@ pub fn cookie_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn unavailable(error: redis::RedisError) -> GatewayError {
-    tracing::error!(%error, "dashboard session Redis operation failed");
+    crate::trace_error!("dashboard", "session Redis operation failed: {}", error);
     GatewayError::Unavailable("登录会话存储暂不可用，请稍后重试。".into())
 }
 

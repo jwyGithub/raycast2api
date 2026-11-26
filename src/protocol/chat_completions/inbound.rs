@@ -151,7 +151,9 @@ fn content_with_images(content: Option<Content>) -> (String, Vec<Attachment>) {
                             .unwrap_or_default();
                         match from_url_reference(url) {
                             Some(attachment) => attachments.push(attachment),
-                            None => tracing::warn!("unsupported image_url part, dropped"),
+                            None => {
+                                crate::trace_warn!("inbound", "unsupported image_url part, dropped")
+                            }
                         }
                     }
                     _ => {}

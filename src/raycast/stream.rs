@@ -73,14 +73,14 @@ pub(crate) fn canonical_events_with_retry(
         }
         crate::trace_warn!("stream", "upstream SSE truncated before output — retrying identical request once");
         let retry_started = std::time::Instant::now();
-        tracing::trace!(request_id = %id, attempt = 1, max_retries = 1, "SSE retry: sending identical request before any output");
+        crate::trace_trace!("stream", "SSE retry: sending identical request before any output (attempt=1 max=1)");
         let response = match resend().await {
             Ok(response) => {
-                tracing::trace!(request_id = %id, attempt = 1, status = %response.status(), elapsed_ms = retry_started.elapsed().as_millis(), "SSE retry: response received");
+                crate::trace_trace!("stream", "SSE retry: response received attempt=1 status={} elapsed={}ms", response.status(), retry_started.elapsed().as_millis());
                 response
             }
             Err(error) => {
-                tracing::trace!(request_id = %id, attempt = 1, elapsed_ms = retry_started.elapsed().as_millis(), %error, "SSE retry: request failed, no retries remaining");
+                crate::trace_trace!("stream", "SSE retry: request failed attempt=1 elapsed={}ms error={} — no retries remaining", retry_started.elapsed().as_millis(), error);
                 let (status, message) = error.status_and_message();
                 yield CanonicalEvent::Error { status: status.as_u16(), message };
                 return;
@@ -92,20 +92,20 @@ pub(crate) fn canonical_events_with_retry(
             let event = match result {
                 Ok(event) => event,
                 Err(()) => {
-                    tracing::trace!(request_id = %id, attempt = 1, elapsed_ms = retry_started.elapsed().as_millis(), "SSE retry: stream truncated again, no retries remaining");
+                    crate::trace_trace!("stream", "SSE retry: stream truncated again attempt=1 elapsed={}ms — no retries remaining", retry_started.elapsed().as_millis());
                     crate::trace_error!("stream", "upstream SSE retry also truncated — request failed");
                     yield premature_error();
                     return;
                 }
             };
             if let CanonicalEvent::Error { status, message } = &event {
-                tracing::trace!(request_id = %id, attempt = 1, status, %message, elapsed_ms = retry_started.elapsed().as_millis(), "SSE retry: upstream reported failure, no retries remaining");
+                crate::trace_trace!("stream", "SSE retry: upstream reported failure attempt=1 status={} message={} elapsed={}ms — no retries remaining", status, message, retry_started.elapsed().as_millis());
                 yield event;
                 return;
             }
             let terminal = matches!(event, CanonicalEvent::Finish { .. });
             if terminal {
-                tracing::trace!(request_id = %id, attempt = 1, elapsed_ms = retry_started.elapsed().as_millis(), "SSE retry: completed successfully");
+                crate::trace_trace!("stream", "SSE retry: completed successfully attempt=1 elapsed={}ms", retry_started.elapsed().as_millis());
             }
             yield event;
             if terminal { return; }
@@ -243,7 +243,7 @@ fn decode_events(
             for payload in decoder.push_bytes(&chunk) {
                 payloads.push(payload.clone());
                 // ponytail: 打印原始 SSE 数据用于调试
-                tracing::debug!("upstream SSE payload: {}", payload);
+                crate::trace_debug!("stream", "upstream SSE payload: {}", payload);
                 if let Some(attempt) = &attempt { attempt.observe_payload(&payload); }
 
                 // 上游通知(降级/限额提示等)挂在 notifications 里,只在

@@ -177,7 +177,13 @@ impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let (status, kind, message) = self.parts();
         if status.is_server_error() {
-            tracing::error!(status = %status, kind, %message, "gateway error");
+            crate::trace_error!(
+                "error",
+                "gateway error status={} kind={} message={}",
+                status,
+                kind,
+                message
+            );
         }
         let body = ErrorBody {
             error: ErrorDetail {

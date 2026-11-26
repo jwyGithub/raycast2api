@@ -55,7 +55,7 @@ async fn run() -> Result<(), String> {
                 {
                     let log = request_log.clone();
                     if let Err(error) = tokio::task::spawn_blocking(move || log.vacuum()).await {
-                        tracing::warn!(%error, "log maintenance failed");
+                        raycast2api::trace_warn!("log-store", "log maintenance failed: {}", error);
                     }
                     last_vacuum = std::time::Instant::now();
                 }
@@ -113,7 +113,8 @@ async fn run() -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(settings.bind_addr)
         .await
         .map_err(|err| format!("failed to bind {}: {err}", settings.bind_addr))?;
-    tracing::info!(
+    raycast2api::trace_info!(
+        "startup",
         "raycast2api gateway listening on http://{}",
         settings.bind_addr
     );
@@ -123,10 +124,19 @@ async fn run() -> Result<(), String> {
     if let Some(dual_addr) = settings.bind_addr_dual {
         match tokio::net::TcpListener::bind(dual_addr).await {
             Ok(listener) => {
-                tracing::info!("raycast2api gateway listening on http://{dual_addr}");
+                raycast2api::trace_info!(
+                    "startup",
+                    "raycast2api gateway listening on http://{}",
+                    dual_addr
+                );
                 listeners.push(listener);
             }
-            Err(err) => tracing::warn!("failed to bind dual-stack {dual_addr}: {err}"),
+            Err(err) => raycast2api::trace_warn!(
+                "startup",
+                "failed to bind dual-stack {}: {}",
+                dual_addr,
+                err
+            ),
         }
     }
 
@@ -188,5 +198,5 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 
-    tracing::info!("shutdown signal received");
+    raycast2api::trace_info!("startup", "shutdown signal received");
 }

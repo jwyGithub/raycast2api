@@ -124,7 +124,10 @@ impl ItemContent {
                     if let Some(url) = &part.image_url {
                         match crate::core::attachment::from_url_reference(url) {
                             Some(attachment) => attachments.push(attachment),
-                            None => tracing::warn!("unsupported input_image part, dropped"),
+                            None => crate::trace_warn!(
+                                "inbound",
+                                "unsupported input_image part, dropped"
+                            ),
                         }
                     }
                     text.push_str(&part.text);

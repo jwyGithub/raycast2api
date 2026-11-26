@@ -61,7 +61,7 @@ pub async fn refresh_all(store: &Arc<AccountStore>, client: &RaycastClient) {
     let accounts = match store.list_all() {
         Ok(accounts) => accounts,
         Err(err) => {
-            tracing::error!("account refresh: list failed: {err}");
+            crate::trace_error!("quota", "account refresh: list failed: {}", err);
             return;
         }
     };
@@ -70,10 +70,19 @@ pub async fn refresh_all(store: &Arc<AccountStore>, client: &RaycastClient) {
         .filter(|account| account.use_status == "enable")
     {
         if let Err(err) = refresh_account(store, client, account).await {
-            tracing::warn!("account refresh: {} failed: {err}", account.email);
+            crate::trace_warn!(
+                "quota",
+                "account refresh: {} failed: {}",
+                account.email,
+                err
+            );
         }
     }
-    tracing::info!("account refresh: {} accounts processed", accounts.len());
+    crate::trace_info!(
+        "quota",
+        "account refresh: {} accounts processed",
+        accounts.len()
+    );
 }
 
 /// 刷新指定账号,供管理接口调用。
@@ -111,7 +120,8 @@ async fn refresh_account(
                         Ok(Some(info)) => {
                             store.update_info(&account.email, &info)?;
                             apply_decision(store, &account.email, &info);
-                            tracing::info!(
+                            crate::trace_info!(
+                                "quota",
                                 "account refresh: {} auto-renewed (available={})",
                                 account.email,
                                 store
@@ -178,7 +188,7 @@ pub async fn fetch_info(
         Ok(me) => me,
         Err(GatewayError::TokenInvalid { .. }) => return Ok(None),
         Err(err) => {
-            tracing::warn!("account refresh: /me failed: {err}");
+            crate::trace_warn!("quota", "account refresh: /me failed: {}", err);
             return Err(err);
         }
     };
@@ -186,7 +196,7 @@ pub async fn fetch_info(
         Ok(credits) => credits,
         Err(GatewayError::TokenInvalid { .. }) => return Ok(None),
         Err(err) => {
-            tracing::warn!("account refresh: /ai/credits failed: {err}");
+            crate::trace_warn!("quota", "account refresh: /ai/credits failed: {}", err);
             return Err(err);
         }
     };
@@ -202,12 +212,14 @@ pub async fn fetch_info(
             Err(GatewayError::TokenInvalid { .. }) => return Ok(None),
             Err(err) if err.is_account_dead() => return Err(err),
             Err(GatewayError::Upstream { status, .. }) => {
-                tracing::debug!(
-                    "account refresh: /me/trial_status returned {status} (非试用号属正常)"
+                crate::trace_debug!(
+                    "quota",
+                    "account refresh: /me/trial_status returned {} (非试用号属正常)",
+                    status
                 );
             }
             Err(err) => {
-                tracing::debug!("account refresh: /me/trial_status failed: {err}");
+                crate::trace_debug!("quota", "account refresh: /me/trial_status failed: {}", err);
             }
         }
     }

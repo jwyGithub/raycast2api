@@ -565,6 +565,6 @@ fn conflict() -> GatewayError {
     GatewayError::Conflict("该 API Key 已存在。".into())
 }
 fn db_error(error: diesel::result::Error) -> GatewayError {
-    tracing::error!(%error, "managed API key storage operation failed");
+    crate::trace_error!("key", "managed API key storage operation failed: {}", error);
     GatewayError::Internal("无法保存托管 API Key。".into())
 }

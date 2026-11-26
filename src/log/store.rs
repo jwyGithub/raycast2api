@@ -113,7 +113,7 @@ impl RequestLogStore {
                 Ok::<_, diesel::result::Error>(())
             });
             if let Err(e) = migration {
-                tracing::error!("request log schema: {e}");
+                crate::trace_error!("log-store", "request log schema: {}", e);
             }
             let store = Self { db };
             if store.cleanup_expired() > 0 {
@@ -167,7 +167,7 @@ impl RequestLogStore {
                 .do_nothing()
                 .execute(&mut *c)
             {
-                tracing::warn!("request log insert ({id}): {e}");
+                crate::trace_warn!("log-store", "request log insert ({}): {}", id, e);
             }
         })
     }
@@ -223,7 +223,7 @@ impl RequestLogStore {
                     ))
                     .execute(&mut *c)
             {
-                tracing::warn!("request log upstream ({id}): {e}");
+                crate::trace_warn!("log-store", "request log upstream ({}): {}", id, e);
             }
         })
     }
@@ -236,7 +236,7 @@ impl RequestLogStore {
                     .set(request_logs::response_headers.eq(Some(headers)))
                     .execute(&mut *conn)
             {
-                tracing::warn!("request log response headers ({id}): {e}");
+                crate::trace_warn!("log-store", "request log response headers ({}): {}", id, e);
             }
         })
     }
@@ -248,7 +248,7 @@ impl RequestLogStore {
                     .set(request_logs::response_text.eq(Some(body)))
                     .execute(&mut *c)
             {
-                tracing::warn!("request log response ({id}): {e}");
+                crate::trace_warn!("log-store", "request log response ({}): {}", id, e);
             }
         })
     }
@@ -368,7 +368,7 @@ impl RequestLogStore {
             {
                 Ok(n) => n,
                 Err(e) => {
-                    tracing::warn!("request log cleanup: {e}");
+                    crate::trace_warn!("log-store", "request log cleanup: {}", e);
                     0
                 }
             }
@@ -381,7 +381,7 @@ impl RequestLogStore {
                 .lock()
                 .batch_execute("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
             {
-                tracing::warn!("request log vacuum: {e}");
+                crate::trace_warn!("log-store", "request log vacuum: {}", e);
             }
         })
     }

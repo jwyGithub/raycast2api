@@ -128,9 +128,10 @@ impl CompactCache {
             .map(|hash| redis_cache_key(redis, kind, hash))
             .collect();
         redis.mget(keys).await.unwrap_or_else(|| {
-            tracing::warn!(
-                kind,
-                "compact: Redis cache read unavailable; using local estimate/cache"
+            crate::trace_warn!(
+                "compact",
+                "Redis cache read unavailable; using local estimate/cache kind={}",
+                kind
             );
             Vec::new()
         })
@@ -150,9 +151,10 @@ impl CompactCache {
             .set_ex(redis_cache_key(redis, kind, hash), value, ttl)
             .await
         {
-            tracing::warn!(
-                kind,
-                "compact: Redis cache write unavailable; kept local entry"
+            crate::trace_warn!(
+                "compact",
+                "Redis cache write unavailable; kept local entry kind={}",
+                kind
             );
         }
     }

@@ -56,7 +56,7 @@ async fn format_response(request: Request, next: Next, api_keys: bool) -> Respon
         let bytes = match to_bytes(body, MAX_ERROR_RESPONSE_BYTES).await {
             Ok(bytes) => bytes,
             Err(error) => {
-                tracing::error!(%error, "API error response exceeded size limit");
+                crate::trace_error!("http", "API error response exceeded size limit: {}", error);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     axum::Json(json!({
