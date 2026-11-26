@@ -510,12 +510,12 @@ impl ProxyStore {
                     .execute(&mut *conn),
             }.map_err(sql_error)
         }).inspect_err(|error| {
-            crate::trace_warn!("proxy-test", "测试结果保存失败 proxy={} error={}", id, error);
+            crate::trace_warn!("proxy-test", "test result save failed proxy={} error={}", id, error);
         })?;
         if n == 0 {
             crate::trace_warn!(
                 "proxy-test",
-                "测试期间配置已修改或删除，未保存结果 proxy={}",
+                "proxy modified or deleted during test, result not saved proxy={}",
                 id
             );
             return Err(GatewayError::BadRequest(
@@ -525,7 +525,7 @@ impl ProxyStore {
         let probe = result?;
         crate::trace_info!(
             "proxy-test",
-            "测试完成，延迟、出口及测试时间已保存 proxy={} latency={}ms tested_at={}",
+            "test completed, latency, exit and tested_at saved proxy={} latency={}ms tested_at={}",
             id,
             probe.latency_ms,
             tested_at
@@ -544,7 +544,7 @@ impl ProxyStore {
         let request_id = crate::log::context::current_request_id();
         crate::trace_info!(
             "proxy-test",
-            "测试开始 proxy={} type={} host={}:{} upstream={} timeout={}ms",
+            "test started proxy={} type={} host={}:{} upstream={} timeout={}ms",
             id,
             input.kind,
             input.host,
@@ -557,7 +557,7 @@ impl ProxyStore {
             .inspect_err(|error| {
                 crate::trace_warn!(
                     "proxy-test",
-                    "测试客户端构造失败 proxy={} error={}",
+                    "test client build failed proxy={} error={}",
                     id,
                     error
                 );
@@ -573,7 +573,7 @@ impl ProxyStore {
             .map_err(|error| {
                 crate::trace_warn!(
                     "proxy-test",
-                    "测试请求失败 proxy={} elapsed={}ms is_timeout={} is_connect={} error={}",
+                    "test request failed proxy={} elapsed={}ms is_timeout={} is_connect={} error={}",
                     id,
                     started.elapsed().as_millis(),
                     error.is_timeout(),
@@ -592,7 +592,7 @@ impl ProxyStore {
         }
         crate::trace_info!(
             "proxy-test",
-            "收到上游响应 proxy={} status={} latency={}ms",
+            "upstream response received proxy={} status={} latency={}ms",
             id,
             status,
             latency_ms
@@ -601,7 +601,7 @@ impl ProxyStore {
         if !(response.status().is_success() || matches!(status, 400 | 401 | 405 | 422)) {
             crate::trace_warn!(
                 "proxy-test",
-                "响应状态不符合预期 proxy={} status={}",
+                "unexpected response status proxy={} status={}",
                 id,
                 status
             );
@@ -617,7 +617,7 @@ impl ProxyStore {
                 Err(error) => {
                     crate::trace_warn!(
                         "proxy-test",
-                        "代理出口查询失败 proxy={} error={}",
+                        "exit query failed proxy={} error={}",
                         id,
                         error
                     );
@@ -641,7 +641,7 @@ impl ProxyStore {
     ) -> Result<ProxyExit, GatewayError> {
         crate::trace_info!(
             "proxy-test",
-            "代理出口查询开始 proxy={} exit_api={}",
+            "exit query started proxy={} exit_api={}",
             id,
             url
         );
@@ -719,7 +719,7 @@ impl ProxyStore {
         };
         crate::trace_info!(
             "proxy-test",
-            "代理出口查询完成 proxy={} exit_ip={} exit_location={}",
+            "exit query completed proxy={} exit_ip={} exit_location={}",
             id,
             ip,
             location

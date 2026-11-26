@@ -214,7 +214,7 @@ pub async fn fetch_info(
             Err(GatewayError::Upstream { status, .. }) => {
                 crate::trace_debug!(
                     "quota",
-                    "account refresh: /me/trial_status returned {} (非试用号属正常)",
+                    "account refresh: /me/trial_status returned {} (normal for non-trial accounts)",
                     status
                 );
             }
