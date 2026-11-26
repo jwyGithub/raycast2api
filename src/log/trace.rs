@@ -11,7 +11,8 @@
 //! ```
 //!
 //! request_id 由中间件的 [`REQUEST_ID`](super::context::REQUEST_ID) task-local
-//! 提供;后台任务(额度刷新、模型缓存等)不在请求作用域内,统一显示 `-`。
+//! 提供;后台任务(额度刷新、模型缓存等)不在请求作用域内,省略该段只输出
+//! `[模块] - 信息`(无需无意义的 `[-]` 占位)。
 //! `request_id` / `module` 同时以结构化 tracing 字段输出,JSON subscriber 可
 //! 直接按字段过滤。
 
@@ -84,8 +85,9 @@ macro_rules! trace_trace {
     };
 }
 
-/// 统一格式化并输出。宏规则无法按 level 分发 `tracing::$level!`,
-/// 所以直接在展开处 match 一次。
+/// 统一格式化并输出。请求路径带 request_id 前缀;后台任务(`-`)省略该段,
+/// 只显示 `[模块] - 信息`。宏规则无法按 level 分发 `tracing::$level!`,
+/// 所以直接在展开处 format 后按级输出。
 #[doc(hidden)]
 #[macro_export]
 macro_rules! emit_inner {
@@ -93,14 +95,23 @@ macro_rules! emit_inner {
         let request_id = $crate::log::context::current_request_id();
         let module: &'static str = $module;
         let message = format!($($args)*);
-        tracing::$level!(
-            request_id = %request_id,
-            module = module,
-            "[{}] - [{}] - {}",
-            request_id,
-            module,
-            message
-        );
+        if request_id == "-" {
+            tracing::$level!(
+                module = module,
+                "[{}] - {}",
+                module,
+                message
+            );
+        } else {
+            tracing::$level!(
+                request_id = %request_id,
+                module = module,
+                "[{}] - [{}] - {}",
+                request_id,
+                module,
+                message
+            );
+        }
     }};
 }
 
