@@ -205,7 +205,11 @@ pub(crate) async fn events(
     // client preset; the compaction/summarize call is a deliberately plain
     // completion and must not carry the remote tool.
     let image_gen = (call_type == "inference") && model_supports_image_generation(target);
-    let mut raycast_request = build_chat_request(request, provider, model, image_gen);
+    // locale/timezone 先用本机身份占位;dev 网关按账号选代理,真实出口在
+    // dispatcher 选号后才知道——send_chat 会按账号出口探测并幂等改写
+    // (builder::apply_region),此处不探测。
+    let region = state.machine_identity();
+    let mut raycast_request = build_chat_request(request, provider, model, &region, image_gen);
     raycast_request.image_formats = model_vision_formats(target)
         .into_iter()
         .map(str::to_owned)

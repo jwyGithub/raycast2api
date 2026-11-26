@@ -39,6 +39,10 @@ fn state(password: Option<&str>, api_key: Option<&str>) -> AppState {
         log,
         statistics,
         db,
+        regions: Arc::new(raycast2api::geo::EgressResolver::new(
+            reqwest::Client::new(),
+            raycast2api::geo::machine_region(),
+        )),
     })
     .unwrap()
 }

@@ -615,6 +615,7 @@ fn tool_result_is_error_is_kept_and_marked_upstream() {
         &canonical,
         "anthropic",
         "claude-x",
+        &raycast2api::geo::test_region(),
         false,
     );
     let err_msg = built

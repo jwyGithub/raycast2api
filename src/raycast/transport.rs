@@ -128,9 +128,24 @@ impl RaycastClient {
         // OAuth 按账号选择直连或其指定代理；不重放可能已完成令牌轮换的请求。
         let channels = self.request_channels(super::client::Transport::Got)?;
         let (_, http) = channels[0];
+        // 真客户端的 refresh_token 换新走 form-urlencoded(URLSearchParams +
+        // content-type: application/x-www-form-urlencoded,backend/index.mjs
+        // #_()/#$());JSON 形态只用于 authorization_code 交换,网关不做该步。
+        // 用 form 发送以对齐 wire 形态。
+        let mut form = Vec::new();
+        if let Some(map) = body.as_object() {
+            for (key, value) in map {
+                let text = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                form.push((key.clone(), text));
+            }
+        }
         let request = http
             .post(crate::config::OAUTH_TOKEN_URL)
-            .json(body)
+            .header("Accept", "application/json")
+            .form(&form)
             .timeout(self.settings.upstream_timeout())
             .build()?;
         // OAuth rotates tokens: only connection establishment failure is safe to replay.
@@ -139,7 +154,8 @@ impl RaycastClient {
                 let direct_request = self
                     .http
                     .post(crate::config::OAUTH_TOKEN_URL)
-                    .json(body)
+                    .header("Accept", "application/json")
+                    .form(&form)
                     .timeout(self.settings.upstream_timeout())
                     .build()?;
                 Ok(self.http.execute(direct_request).await?)

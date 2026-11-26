@@ -11,7 +11,8 @@
 //! 3. `thinking.type == "adaptive"` turns reasoning on (→ `reasoning_effort`).
 //! 4. a `tool_result` message carries the tool `name`, resolved from the
 //!    matching earlier `tool_use`.
-//! 5. `tool_choice` defaults to `"auto"` when tools are offered but unspecified.
+//! 5. `tool_choice` stays unset when tools are offered but unspecified
+//!    (2026-11-25 capture: the real client omits the field).
 //! 6. multiple `text` blocks in one message join with `"\n"`.
 //!
 //! Pure serde + the pure builder — no network.
@@ -77,28 +78,45 @@ fn client_system_prompt_rides_as_additional_instructions() {
         "messages": [ { "role": "user", "content": "hi" } ]
     }));
 
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
-    // Base prompt stays "markdown"; the client's system becomes the addendum.
-    assert_eq!(raycast.system_instructions, "markdown");
-    assert_eq!(
-        raycast.additional_system_instructions.as_deref(),
-        Some("You are Claude Code.")
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        &raycast2api::geo::test_region(),
+        false,
     );
+    // Base prompt stays "markdown"; the client's system becomes the addendum,
+    // prefixed with the always-present user-preferences block (2026-11-25 capture).
+    assert_eq!(raycast.system_instructions, "markdown");
+    let additional = raycast.additional_system_instructions.as_deref().unwrap();
+    assert!(additional.starts_with("<user-preferences>"));
+    assert!(additional.contains("- Timezone: Asia/Shanghai"));
+    assert!(additional.ends_with("You are Claude Code."));
 }
 
 #[test]
-fn absent_system_leaves_additional_unset() {
+fn absent_system_still_carries_user_preferences_block() {
     let canonical = parse(json!({
         "model": "claude-x",
         "messages": [ { "role": "user", "content": "hi" } ]
     }));
 
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        &raycast2api::geo::test_region(),
+        false,
+    );
     assert_eq!(raycast.system_instructions, "markdown");
-    // No client system → the addendum is omitted entirely (serde skips None).
-    assert!(raycast.additional_system_instructions.is_none());
+    // No client system → the addendum is exactly the user-preferences block:
+    // the real client always sends it (capture 2026-11-25), omitting it is
+    // a fingerprint.
+    let additional = raycast.additional_system_instructions.as_deref().unwrap();
+    assert!(additional.starts_with("<user-preferences>"));
+    assert!(additional.ends_with("</user-preferences>"));
     let value = serde_json::to_value(&raycast).unwrap();
-    assert!(value.get("additional_system_instructions").is_none());
+    assert!(value["additional_system_instructions"].is_string());
 }
 
 // --- Fix #3: adaptive thinking enables reasoning -----------------------------
@@ -116,7 +134,13 @@ fn adaptive_thinking_enables_reasoning() {
         Some(ReasoningEffort::High)
     ));
 
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        &raycast2api::geo::test_region(),
+        false,
+    );
     assert_eq!(raycast.reasoning_effort.as_deref(), Some("high"));
 }
 
@@ -162,7 +186,13 @@ fn tool_result_is_labelled_with_its_tool_name() {
     assert_eq!(tool.tool_name.as_deref(), Some("Read"));
 
     // And it survives to the Raycast wire as `name`.
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        &raycast2api::geo::test_region(),
+        false,
+    );
     let wire_tool = raycast
         .messages
         .iter()
@@ -172,10 +202,10 @@ fn tool_result_is_labelled_with_its_tool_name() {
     assert_eq!(wire_tool.tool_call_id.as_deref(), Some("call_1"));
 }
 
-// --- Fix #5: tool_choice defaults to auto when tools are present -------------
+// --- Fix #5: tool_choice is NOT auto-injected when tools are present --------
 
 #[test]
-fn tool_choice_defaults_to_auto_when_tools_present() {
+fn tool_choice_not_injected_when_tools_present() {
     let canonical = parse(json!({
         "model": "claude-x",
         "messages": [ { "role": "user", "content": "hi" } ],
@@ -185,9 +215,19 @@ fn tool_choice_defaults_to_auto_when_tools_present() {
     // The client sent none...
     assert!(canonical.tool_choice.is_none());
 
-    // ...but the builder defaults it to "auto" because tools are offered.
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
-    assert_eq!(raycast.tool_choice.as_deref(), Some("auto"));
+    // ...and the builder leaves it unset: the real client omits the field
+    // whenever its toolChoice preference is unset (capture 2026-11-25:
+    // 8 tools on the wire, no `tool_choice`). Auto-injecting was a fingerprint.
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        &raycast2api::geo::test_region(),
+        false,
+    );
+    assert_eq!(raycast.tool_choice, None);
+    // The capability negotiation, however, is always advertised on chat.
+    assert!(raycast.mid_conversation.is_some());
 }
 
 #[test]
@@ -196,7 +236,13 @@ fn tool_choice_stays_unset_without_tools() {
         "model": "claude-x",
         "messages": [ { "role": "user", "content": "hi" } ]
     }));
-    let raycast = build_chat_request(&canonical, "anthropic", "claude", false);
+    let raycast = build_chat_request(
+        &canonical,
+        "anthropic",
+        "claude",
+        &raycast2api::geo::test_region(),
+        false,
+    );
     assert!(raycast.tool_choice.is_none());
 }
 

@@ -115,16 +115,29 @@ pub struct AccountDispatcher {
     accounts: Arc<AccountStore>,
     /// 传输层;额度刷新、token 换新等需要显式 token 的调用直接用它。
     pub(crate) client: RaycastClient,
+    /// 出口地区解析器:选号后按账号出口(direct / 账号代理)解析
+    /// locale + timezone,写回请求体。`None` 时保持请求体原样(测试)。
+    regions: Option<Arc<crate::geo::EgressResolver>>,
 }
 
 impl AccountDispatcher {
     pub fn new(accounts: Arc<AccountStore>, client: RaycastClient) -> Self {
-        Self { accounts, client }
+        Self {
+            accounts,
+            client,
+            regions: None,
+        }
     }
 
     /// Attach the request-log store (called at startup, after construction).
     pub fn with_log(mut self, log: Arc<RequestLogStore>) -> Self {
         self.client.log = Some(log);
+        self
+    }
+
+    /// Attach the egress region resolver (called at startup).
+    pub fn with_regions(mut self, regions: Arc<crate::geo::EgressResolver>) -> Self {
+        self.regions = Some(regions);
         self
     }
 
@@ -186,6 +199,25 @@ impl AccountDispatcher {
             // 剥附件、文本加占位,请求照发,不让一张图废掉整个推理。
             let client = self.client.for_account(&account)?;
             let mut request = request.clone();
+            // geo 出口对齐:选号后按该账号的出口(direct / 账号代理)解析
+            // locale + timezone,写回请求体(幂等替换 user-preferences 块)。
+            // 真客户端的 locale/timezone 来自运行机器,必须与实际出口 IP 的
+            // 地理一致;解析有 TTL 缓存,常态零 IO,失败回落本机身份不阻塞。
+            if let Some(regions) = &self.regions {
+                let (cache_key, proxy_client) = client.geo_probe_channel()?;
+                let region = regions.resolve_for(&cache_key, proxy_client).await;
+                crate::raycast::builder::apply_region(&mut request, &region);
+            } else {
+                // 忘接解析器的 dispatcher 会静默发出与本机身份绑定的
+                // locale/user-preferences——恰是出口对齐要消除的交叉信号。
+                // 每进程只警告一次,提示构造方补 with_regions。
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        "dispatcher has no egress region resolver; upstream requests will carry the machine locale (call with_regions at construction)"
+                    );
+                });
+            }
             if !request.pending_uploads.is_empty() {
                 self.upload_attachments(&client, &mut request, &account, &device_id)
                     .await;
@@ -597,8 +629,16 @@ mod tests {
                 crate::core::protocol::Protocol::Responses,
                 "client",
             );
-            let upstream =
-                crate::raycast::builder::build_chat_request(&request, "openai", "upstream", false);
+            let upstream = crate::raycast::builder::build_chat_request(
+                &request,
+                "openai",
+                "upstream",
+                &crate::geo::Region {
+                    locale: "zh-CN".to_string(),
+                    timezone: "Asia/Shanghai".to_string(),
+                },
+                false,
+            );
             let call = CallContext::new(&request, &upstream.provider, &upstream.model, "inference");
             let result = dispatcher.send_chat(&upstream, &call, None).await;
             if failure == "policy" {

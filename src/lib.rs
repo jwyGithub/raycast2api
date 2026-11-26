@@ -24,6 +24,7 @@ pub mod account;
 pub mod config;
 pub mod core;
 pub mod error;
+pub mod geo;
 mod key;
 pub mod log;
 pub mod model;

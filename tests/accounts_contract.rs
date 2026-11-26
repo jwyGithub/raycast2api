@@ -43,6 +43,10 @@ fn app_with_api_key(api_key: &str) -> (axum::Router, Arc<AccountStore>) {
             log: log_store,
             statistics,
             db,
+            regions: Arc::new(raycast2api::geo::EgressResolver::new(
+                reqwest::Client::new(),
+                raycast2api::geo::machine_region(),
+            )),
         })
         .unwrap(),
     );

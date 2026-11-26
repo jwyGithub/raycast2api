@@ -41,6 +41,10 @@ fn app() -> (axum::Router, Arc<RequestLogStore>) {
             log: log_store.clone(),
             statistics,
             db,
+            regions: Arc::new(raycast2api::geo::EgressResolver::new(
+                reqwest::Client::new(),
+                raycast2api::geo::machine_region(),
+            )),
         })
         .unwrap(),
     );

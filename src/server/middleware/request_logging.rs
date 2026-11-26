@@ -168,6 +168,10 @@ async fn log_completion(id: String, request: Request, next: Next) -> Response {
 mod tests {
     use std::sync::Arc;
 
+    fn state_test_regions() -> Arc<crate::geo::EgressResolver> {
+        crate::server::state::test_regions()
+    }
+
     use axum::body::Bytes;
     use axum::extract::DefaultBodyLimit;
     use axum::routing::post;
@@ -273,6 +277,7 @@ mod tests {
                 log: log.clone(),
                 statistics,
                 db,
+                regions: state_test_regions(),
             })
             .unwrap(),
         );

@@ -144,6 +144,20 @@ impl RaycastClient {
         matches!(&self.account_route, AccountRoute::Proxy(proxy) if proxy.fallback_direct)
     }
 
+    /// geo 出口探测入口(选号后调用):`(缓存键, 可选代理 got 客户端)`。
+    /// direct 账号 → `("direct", None)`(resolver 用自己的直连客户端);
+    /// 代理账号 → `(proxy_id, Some(该代理的 got 客户端))`——探测请求走
+    /// 账号同一条代理,出口与 chat 一致。未选号返回错误。
+    pub(crate) fn geo_probe_channel(&self) -> Result<(String, Option<&Client>), GatewayError> {
+        match &self.account_route {
+            AccountRoute::Unselected => Err(GatewayError::Internal(
+                "upstream account must be selected before geo probe".into(),
+            )),
+            AccountRoute::Direct => Ok(("direct".to_string(), None)),
+            AccountRoute::Proxy(proxy) => Ok((proxy.id.clone(), Some(&proxy.http))),
+        }
+    }
+
     /// 下载客户端也由已选账号生成。生成图片使用 chat 池，输入图片使用 got 池。
     pub(crate) fn fetch_clients(&self, transport: Transport) -> Result<Vec<Client>, GatewayError> {
         Ok(self
@@ -295,7 +309,12 @@ impl RaycastClient {
         let url = self.models_url.as_deref().unwrap_or(RAYCAST_MODELS_URL);
         #[cfg(not(test))]
         let url = RAYCAST_MODELS_URL;
-        let mut parsed: RaycastModelsResponse = self.get_json(url, token).await?;
+        // The real client's `GET /ai/models` (Cjn in backend/index.mjs) carries
+        // `X-Raycast-Experimental: autoModels` on every call — omitting it is
+        // a fingerprint. Other GETs (`/me`, `/ai/credits`, ...) do not carry it.
+        let mut parsed: RaycastModelsResponse = self
+            .get_json_with_experimental(url, token, Some("autoModels"))
+            .await?;
         let is_id_part = |part: &str| {
             !part.is_empty()
                 && part
@@ -446,14 +465,23 @@ impl RaycastClient {
     }
 
     /// Shared bearer-only GET returning parsed JSON. The real client issues
-    /// these through the got instance (`Transport::Got`).
-    async fn get_json<T: serde::de::DeserializeOwned>(
+    /// these through the got instance (`Transport::Got`); no signature pair,
+    /// no DeviceId. `experimental` adds the `X-Raycast-Experimental` header —
+    /// only `/ai/models` sends it in the real client.
+    async fn get_json_with_experimental<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
         token: &str,
+        experimental: Option<&str>,
     ) -> Result<T, GatewayError> {
         let mut headers = self.base_headers(Transport::Got, token, None, None);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
+        if let Some(flag) = experimental {
+            headers.insert(
+                "X-Raycast-Experimental",
+                HeaderValue::from_str(flag).expect("valid experimental header"),
+            );
+        }
         let request = self
             .http
             .get(url)
@@ -463,6 +491,15 @@ impl RaycastClient {
         let response = self.send_got(request, None, None).await?;
         let response = ensure_success(response, None).await?;
         Ok(response.json().await?)
+    }
+
+    /// Bearer-only GET with no `X-Raycast-Experimental` header.
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        token: &str,
+    ) -> Result<T, GatewayError> {
+        self.get_json_with_experimental(url, token, None).await
     }
 }
 

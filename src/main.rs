@@ -70,6 +70,17 @@ async fn run() -> Result<(), String> {
     if settings.dashboard_password.is_some() && redis.is_none() {
         return Err("REDIS_HOST is required when dashboard_password is configured".into());
     }
+    // 出口地区解析器:纯自动,不提供配置。direct 账号按运行环境(本机
+    // 身份兜底),代理账号按该账号出口实测(ip-api,选号后探测);结果按
+    // 出口缓存 10 分钟,失败负缓存 1 分钟,绝不阻塞推理。
+    // 探测客户端用显式 no_proxy 的直连客户端——不能被 HTTP_PROXY 等环境
+    // 变量悄悄接管,否则"直连探测"报告的是代理出口,恰是要防的交叉信号。
+    let regions = Arc::new(raycast2api::geo::EgressResolver::new(
+        raycast2api::proxies::direct_client(std::time::Duration::from_secs(
+            raycast2api::geo::PROBE_TIMEOUT_SECS,
+        )),
+        raycast2api::geo::machine_region(),
+    ));
     let state = AppState::new(AppDeps {
         settings: settings.clone(),
         client: client.clone(),
@@ -77,6 +88,7 @@ async fn run() -> Result<(), String> {
         log: request_log,
         statistics,
         db,
+        regions,
     })
     .map_err(|error| format!("API key initialization error: {error}"))?
     .with_redis(redis);

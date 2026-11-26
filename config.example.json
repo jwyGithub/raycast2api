@@ -7,4 +7,3 @@
     "dashboard_session_secret": "replace-with-a-random-secret-at-least-32-bytes",
     "upstream_timeout_secs": 20
 }
-

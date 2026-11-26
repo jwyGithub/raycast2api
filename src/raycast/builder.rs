@@ -4,8 +4,10 @@
 //! [`RaycastChatRequest`] the backend expects, applying every Raycast-specific
 //! rule in one place: wrapping message bodies in `{text}`, emitting thinking as
 //! a standalone `<think>...</think>` assistant turn, nesting tool calls in the
-//! OpenAI request shape, rendering tool/`tool_choice` definitions, injecting
-//! the `image_generation` remote tool for image-capable models (mirroring the
+//! OpenAI request shape, rendering tool definitions (forwarding `tool_choice`
+//! only when the caller picked one — the client omits it otherwise),
+//! advertising `mid_conversation` capabilities, injecting the
+//! `image_generation` remote tool for image-capable models (mirroring the
 //! real client's preset behavior), and carrying `reasoning_effort` for think
 //! models.
 //!
@@ -29,7 +31,10 @@ use crate::core::request::CanonicalRequest;
 use crate::core::tools::{ToolChoice, ToolDef};
 use crate::util::{current_timestamp, derive_ulid, derive_uuid, new_ulid, new_uuid};
 
-use super::wire::{PendingUpload, RaycastChatRequest, RaycastMessage, RaycastRequestToolCall};
+use super::wire::{
+    PendingUpload, RaycastChatRequest, RaycastMessage, RaycastMidConversation,
+    RaycastRequestToolCall,
+};
 
 /// Raycast's base system prompt. The real client always sends this as
 /// `system_instructions` and forwards any client-supplied system prompt as
@@ -37,6 +42,14 @@ use super::wire::{PendingUpload, RaycastChatRequest, RaycastMessage, RaycastRequ
 /// always this constant, never the caller's prompt. Matches the reference
 /// implementation (and the previous OpenAI behavior) exactly.
 const DEFAULT_SYSTEM_INSTRUCTIONS: &str = "markdown";
+
+/// The `<user-preferences>` block the real client prepends to
+/// `additional_system_instructions` (frontend `vQi`, capture 2026-11-25):
+/// machine locale + timezone, telling the model how to format dates/numbers.
+/// The gateway injects it with configured values so the declared geography
+/// matches the proxy egress region.
+const USER_PREFERENCES_OPEN: &str = "<user-preferences>";
+const USER_PREFERENCES_CLOSE: &str = "</user-preferences>";
 
 /// Whether the model advertises server-side image generation
 /// (`abilities.image_generation` in the raw model extra from `GET /ai/models`).
@@ -87,25 +100,48 @@ pub fn model_supports_image_generation(model: &crate::raycast::wire::RaycastRawM
 /// The two can diverge in both directions — this is the closest available
 /// signal, not an exact replica.
 ///
-/// Side effect to know when passing `true` on a tool-less request: the flag
-/// also defaults `tool_choice` to `"auto"` (the client sends it whenever its
-/// tools array is non-empty), so a flag-less text-only request and a
-/// flag-true one differ in two wire fields, not one. Pass `false` on any
-/// non-inference call path (compaction/summarize) — the client never carries
-/// this tool on a plain completion.
+/// Side effect to know when passing `true` on a tool-less request: none for
+/// `tool_choice` — the field is only sent when the caller explicitly picked a
+/// policy (capture 2026-11-25). Pass `false` on any non-inference call path
+/// (compaction/summarize) — the client never carries this tool on a plain
+/// completion.
+///
+/// Remote-tool injection: subscription-routed models (the `local-subscription`
+/// catalog: claude / openai / gpt / grok …) always carry the server-executed
+/// remote tools from the `web` built-in extension (`web_search`,
+/// `search_images`) plus `gpt_image` when the model advertises image
+/// generation. The backend runs these inside the stream (`notification_type:
+/// "tool_calls"` — the parser already drops those); each `web_search` call
+/// costs the account ~0.01 credit. Omitting them is a fingerprint — the real
+/// client has the web extension on by default, so a gateway request without
+/// them reads as "web extension disabled on every turn".
 pub fn build_chat_request(
     canonical: &CanonicalRequest,
     provider: &str,
     model: &str,
+    region: &crate::geo::Region,
     model_supports_image_generation: bool,
 ) -> RaycastChatRequest {
+    let locale = &region.locale;
+    let timezone = &region.timezone;
     let mut tools = build_tools(&canonical.tools);
-    if model_supports_image_generation
-        && canonical
+    let offered = |name: &str| {
+        canonical
             .tools
             .iter()
-            .all(|t| t.name() != IMAGE_GENERATION_TOOL)
-    {
+            .any(|t| t.name().eq_ignore_ascii_case(name))
+    };
+    // Web remote tools ride unconditionally (the client's web built-in is on
+    // by default); gpt_image additionally requires the model ability.
+    for name in WEB_REMOTE_TOOLS {
+        if !offered(name) {
+            tools.push(json!({
+                "type": "remote_tool",
+                "name": name,
+            }));
+        }
+    }
+    if model_supports_image_generation && !offered(IMAGE_GENERATION_TOOL) {
         tools.push(json!({
             "type": "remote_tool",
             "name": IMAGE_GENERATION_TOOL,
@@ -123,21 +159,29 @@ pub fn build_chat_request(
         // forwarded only when the caller explicitly set one.
         temperature: canonical.temperature,
         source: "ai_chat".to_string(),
-        locale: "zh-CN".to_string(),
+        // The real client sends its machine's UI language (`navigator.language`,
+        // Node 26 global, from the OS locale). Configurable so the gateway can
+        // match the proxy egress region and avoid a locale/IP mismatch.
+        locale: locale.to_string(),
         thread_id: derive_thread_id(&canonical.messages),
         tools,
-        additional_system_instructions: canonical.system.clone(),
+        additional_system_instructions: with_user_preferences(
+            canonical.system.as_deref(),
+            locale,
+            timezone,
+        ),
         reasoning_effort: canonical.reasoning_effort.map(|e| e.as_str().to_string()),
-        // Mirror the real client: when tools are offered but the caller didn't
-        // pick a policy, default to `auto` rather than omitting the field.
-        tool_choice: canonical
-            .tool_choice
-            .as_ref()
-            .map(tool_choice_wire)
-            .or_else(|| {
-                (!canonical.tools.is_empty() || model_supports_image_generation)
-                    .then(|| "auto".to_string())
-            }),
+        // The real client only sends `tool_choice` when the caller explicitly
+        // picked a policy (capture 2026-11-25: 8 tools on the wire, no
+        // `tool_choice` field). Auto-injecting a default was a fingerprint.
+        tool_choice: canonical.tool_choice.as_ref().map(tool_choice_wire),
+        // Capability negotiation the client sends on chat requests whose
+        // model supports mid-conversation system messages + tool changes
+        // (capture 2026-11-25). All catalog models currently do.
+        mid_conversation: Some(RaycastMidConversation {
+            system_messages: true,
+            tool_changes: true,
+        }),
         // The real client prefixes the turn uuid with `run-` (captures
         // 2026-11-13/20: `run-97c33d75-...`).
         message_id: Some(format!("run-{}", derive_message_id(&canonical.messages))),
@@ -353,6 +397,14 @@ const IMAGE_REPLAY_LIMIT: usize = 20;
 /// does not know and silently drops.
 const IMAGE_GENERATION_TOOL: &str = "gpt_image";
 
+/// Remote tools from the built-in `web` extension (`remote_package_web`).
+/// The real client has this extension active by default and — on
+/// subscription-routed models — always lists them as
+/// `{type:'remote_tool', name}` (capture 2026-11-25). The backend executes
+/// them inside the stream; `web_search` costs the account ~0.01 credit per
+/// call (upstream pricing table `web_search:.01`).
+const WEB_REMOTE_TOOLS: [&str; 2] = ["web_search", "search_images"];
+
 /// Render canonical tool definitions into Raycast's `tools[]` JSON.
 fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
     tools
@@ -426,11 +478,83 @@ fn tool_choice_wire(choice: &ToolChoice) -> String {
     }
 }
 
+/// Patch an already-built request with the resolved region of the selected
+/// account's egress. Called by the dispatcher after account selection (dev
+/// gateway routes per account, so the region is only known then) — the
+/// pipeline builds the request with the machine identity as a placeholder,
+/// and this rewrites `locale` and the `<user-preferences>` block in place.
+/// Byte-idempotent: applying twice yields the same wire as applying once
+/// (`with_user_preferences` normalizes the separator to a single blank line
+/// on every pass).
+pub fn apply_region(request: &mut RaycastChatRequest, region: &crate::geo::Region) {
+    request.locale = region.locale.clone();
+    request.additional_system_instructions = with_user_preferences(
+        request.additional_system_instructions.as_deref(),
+        &region.locale,
+        &region.timezone,
+    );
+}
+
+/// Ensure `additional_system_instructions` carries the real client's
+/// `<user-preferences>` block (frontend `vQi`) with the gateway-configured
+/// locale + timezone. The real client always emits this block — its absence
+/// is a fingerprint, and a block whose timezone contradicts the proxy egress
+/// region is a cross-signal.
+///
+/// - Caller text containing an existing block → that block is replaced
+///   (harnesses reuse a Raycast-shaped prompt); text before and after the
+///   block is kept verbatim, with the post-block separator normalized to a
+///   single blank line so repeated application is byte-stable.
+/// - Caller text without one → the block is prepended, mirroring the real
+///   client where user-preferences is the FIRST block of the suffix.
+/// - No caller text → the block becomes the whole value.
+fn with_user_preferences(system: Option<&str>, locale: &str, timezone: &str) -> Option<String> {
+    let block = format!(
+        "{USER_PREFERENCES_OPEN}\n  The user has the following system preferences:\n  - Locale: {locale}\n  - Timezone: {timezone}\n  - Use these preferences only to format dates, times, numbers, units, and currencies in your answers. They do not indicate which language to respond in.\n{USER_PREFERENCES_CLOSE}"
+    );
+    let Some(system) = system.filter(|s| !s.trim().is_empty()) else {
+        return Some(block);
+    };
+    match (
+        system.find(USER_PREFERENCES_OPEN),
+        system.find(USER_PREFERENCES_CLOSE),
+    ) {
+        (Some(start), Some(close_start)) if close_start > start => {
+            let before = system[..start].trim_end();
+            let after = &system[close_start + USER_PREFERENCES_CLOSE.len()..];
+            let rest = after.trim_start();
+            let joined = match (before.is_empty(), rest.is_empty()) {
+                (false, false) => format!("{before}\n\n{block}\n\n{rest}"),
+                (false, true) => format!("{before}\n\n{block}"),
+                (true, false) => format!("{block}\n\n{rest}"),
+                (true, true) => block,
+            };
+            Some(joined)
+        }
+        _ => Some(format!("{block}\n\n{system}")),
+    }
+}
+
 #[cfg(test)]
 mod image_tests {
     use super::*;
     use crate::core::message::Attachment;
     use base64::Engine;
+
+    /// 测试用固定地区身份;`with_user_preferences` 断言以其字段为准。
+    fn test_region() -> crate::geo::Region {
+        crate::geo::Region {
+            locale: "zh-CN".to_string(),
+            timezone: "Asia/Shanghai".to_string(),
+        }
+    }
+
+    fn test_region_en() -> crate::geo::Region {
+        crate::geo::Region {
+            locale: "en-US".to_string(),
+            timezone: "Europe/Berlin".to_string(),
+        }
+    }
 
     fn sample_png() -> Attachment {
         // 1x1 PNG bytes.
@@ -449,7 +573,7 @@ mod image_tests {
             "m",
         );
         canonical.messages = messages;
-        build_chat_request(&canonical, "openai", "test", false)
+        build_chat_request(&canonical, "openai", "test", &test_region(), false)
     }
 
     /// 指纹回归:无图请求的 wire 字节必须与加图功能之前完全一致。
@@ -465,7 +589,7 @@ mod image_tests {
             Message::text(Role::User, "hello"),
         ];
         canonical.system = Some("Be brief".into());
-        let request = build_chat_request(&canonical, "openai", "test", false);
+        let request = build_chat_request(&canonical, "openai", "test", &test_region(), false);
         let json = serde_json::to_value(&request).unwrap();
         let messages = json["messages"].as_array().unwrap();
         // 每条消息只有 role/content,content 只有 text — 没有 attachments 字段。
@@ -481,6 +605,33 @@ mod image_tests {
             );
         }
         assert!(request.pending_uploads.is_empty());
+    }
+
+    /// 指纹回归(2026-11-25 抓包对齐):
+    /// - `mid_conversation` 恒为 `{system_messages:true, tool_changes:true}`;
+    /// - `tool_choice` 仅在调用方显式选择时出现,带工具也不默认注入。
+    #[test]
+    fn mid_conversation_advertised_and_tool_choice_not_auto_injected() {
+        let mut canonical = crate::core::request::CanonicalRequest::new(
+            crate::core::protocol::Protocol::ChatCompletions,
+            "m",
+        );
+        canonical.messages = vec![Message::text(Role::User, "hi")];
+        canonical.tools = vec![crate::core::tools::ToolDef::Remote {
+            name: "web_search".into(),
+        }];
+        let request = build_chat_request(&canonical, "openai", "test", &test_region(), false);
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json["mid_conversation"],
+            serde_json::json!({"system_messages": true, "tool_changes": true})
+        );
+        assert!(json.get("tool_choice").is_none(), "no default tool_choice");
+
+        // 显式选择时照发。
+        canonical.tool_choice = Some(crate::core::tools::ToolChoice::Required);
+        let request = build_chat_request(&canonical, "openai", "test", &test_region(), false);
+        assert_eq!(request.tool_choice.as_deref(), Some("required"));
     }
 
     /// 带图用户消息:pending_uploads 按消息序号排队,序列化时不出现
@@ -553,8 +704,8 @@ mod image_tests {
 
     /// 带生图能力的模型:自动注入 gpt_image remote tool(catalog 当前主推的
     /// 生图工具名;官方 preset 的 "image_generation" 是 type 不是名字);
-    /// 不带能力的不注入,已有同名 local tool 也不注入。注入后
-    /// tool_choice 默认 auto(与客户端 tools 非空时的行为一致)。
+    /// 不带能力的不注入,已有同名 local tool 也不注入。tool_choice 不被
+    /// 默认注入(2026-11-25 抓包:客户端 tools 非空也不发该字段)。
     #[test]
     fn image_generation_remote_tool_injection_follows_model_ability() {
         let canonical = || {
@@ -565,27 +716,48 @@ mod image_tests {
             c.messages = vec![Message::text(Role::User, "draw a cat")];
             c
         };
-        let without = build_chat_request(&canonical(), "openai", "test", false);
+        let without = build_chat_request(&canonical(), "openai", "test", &test_region(), false);
         assert!(
             !serde_json::to_string(&without.tools)
                 .unwrap()
                 .contains("gpt_image"),
-            "no ability → no remote tool"
+            "no ability → no gpt_image remote tool"
         );
-        let with = build_chat_request(&canonical(), "openai", "test", true);
+        let with = build_chat_request(&canonical(), "openai", "test", &test_region(), true);
         assert_eq!(
             serde_json::to_value(&with.tools).unwrap(),
-            serde_json::json!([{"type": "remote_tool", "name": "gpt_image"}])
+            serde_json::json!([
+                {"type": "remote_tool", "name": "web_search"},
+                {"type": "remote_tool", "name": "search_images"},
+                {"type": "remote_tool", "name": "gpt_image"}
+            ])
         );
-        assert_eq!(with.tool_choice.as_deref(), Some("auto"));
+        assert_eq!(with.tool_choice, None, "no auto-injected tool_choice");
 
-        // 客户端自己带来了同名工具 → 不重复注入。
+        // 客户端自己带来了同名工具 → 不重复注入;缺的 search_images 照补。
         let mut explicit = canonical();
-        explicit.tools = vec![crate::core::tools::ToolDef::Remote {
-            name: "gpt_image".into(),
-        }];
-        let request = build_chat_request(&explicit, "openai", "test", true);
-        assert_eq!(request.tools.len(), 1);
+        explicit.tools = vec![
+            crate::core::tools::ToolDef::Remote {
+                name: "gpt_image".into(),
+            },
+            crate::core::tools::ToolDef::Remote {
+                name: "web_search".into(),
+            },
+        ];
+        let request = build_chat_request(&explicit, "openai", "test", &test_region(), true);
+        assert_eq!(
+            request.tools.len(),
+            3,
+            "own gpt_image + own web_search + injected search_images"
+        );
+        assert!(
+            serde_json::to_string(&request.tools)
+                .unwrap()
+                .matches("web_search")
+                .count()
+                == 1,
+            "no duplicate web_search"
+        );
 
         // 同名的 Local 工具(客户端自定义实现)同样抑制注入 —— 去重按
         // 名字,不分种类,避免上游同时看到 local 和 remote 两个同名工具。
@@ -595,11 +767,123 @@ mod image_tests {
             description: None,
             parameters: serde_json::json!({"type":"object","properties":{}}),
         }];
-        let request = build_chat_request(&local, "openai", "test", true);
-        assert_eq!(request.tools.len(), 1);
+        let request = build_chat_request(&local, "openai", "test", &test_region(), true);
+        assert_eq!(request.tools.len(), 3, "gpt_image local + 2 web remote");
         assert_eq!(
             request.tools[0]["type"], "local_tool",
             "client-owned tool wins over injection"
+        );
+    }
+
+    /// `<user-preferences>` 块注入/替换:无调用方 system → 整块;有块 →
+    /// 原位替换(其余保留);无块 → 前置。
+    #[test]
+    fn user_preferences_block_injected_and_replaced() {
+        const EXPECTED: &str = "<user-preferences>\n  The user has the following system preferences:\n  - Locale: en-US\n  - Timezone: America/New_York\n  - Use these preferences only to format dates, times, numbers, units, and currencies in your answers. They do not indicate which language to respond in.\n</user-preferences>";
+        // 无 system:块即全部。
+        assert_eq!(
+            with_user_preferences(None, "en-US", "America/New_York").as_deref(),
+            Some(EXPECTED)
+        );
+
+        // 有旧块:替换,timezone 跟新配置,块前文本保留。
+        let existing = "<user-preferences>\n  The user has the following system preferences:\n  - Locale: zh-CN\n  - Timezone: Asia/Shanghai\n  - Use these preferences only to format dates, times, numbers, units, and currencies in your answers. They do not indicate which language to respond in.\n</user-preferences>\n\n<memory_system>keep</memory_system>";
+        let replaced = with_user_preferences(Some(existing), "en-US", "America/New_York").unwrap();
+        assert!(replaced.starts_with("<user-preferences>"));
+        assert!(replaced.contains("- Locale: en-US"));
+        assert!(replaced.contains("- Timezone: America/New_York"));
+        assert!(!replaced.contains("Asia/Shanghai"));
+        assert!(replaced.ends_with("<memory_system>keep</memory_system>"));
+
+        // 无块:前置。
+        let plain = with_user_preferences(Some("Be brief"), "en-US", "America/New_York").unwrap();
+        assert!(plain.starts_with("<user-preferences>"));
+        assert!(plain.ends_with("Be brief"));
+        assert!(plain.contains("</user-preferences>\n\nBe brief"));
+
+        // 空 system 同 None。
+        assert_eq!(
+            with_user_preferences(Some("  "), "en-US", "America/New_York").as_deref(),
+            Some(EXPECTED)
+        );
+
+        // 块前有文本(奇偶形状/残留分隔符):前文 verbatim 保留。
+        let with_prefix = "<memory>recall</memory>\n\n<user-preferences>\n  The user has the following system preferences:\n  - Locale: zh-CN\n  - Timezone: Asia/Shanghai\n  - Use these preferences only to format dates, times, numbers, units, and currencies in your answers. They do not indicate which language to respond in.\n</user-preferences>\nBe brief";
+        let replaced =
+            with_user_preferences(Some(with_prefix), "en-US", "America/New_York").unwrap();
+        assert!(replaced.starts_with("<memory>recall</memory>"));
+        assert!(replaced.contains("- Timezone: America/New_York"));
+        assert!(replaced.ends_with("Be brief"));
+    }
+
+    /// apply_region 字节幂等:两次应用与一次应用逐字节一致(分隔符归一为
+    /// 单个空行;衰减会让线上 wire 漂移出 builder 断言的形状)。
+    /// with_user_preferences 是 apply_region 的全部内容,直接对它断言。
+    #[test]
+    fn apply_region_is_byte_idempotent() {
+        for system in [
+            None,
+            Some("Be brief"),
+            Some(
+                "<user-preferences>\n  The user has the following system preferences:\n  - Locale: zh-CN\n  - Timezone: Asia/Shanghai\n  - Use these preferences only to format dates, times, numbers, units, and currencies in your answers. They do not indicate which language to respond in.\n</user-preferences>\n\nBe brief",
+            ),
+        ] {
+            let once = with_user_preferences(system, "en-US", "America/New_York").unwrap();
+            let twice = with_user_preferences(Some(&once), "en-US", "America/New_York").unwrap();
+            let thrice = with_user_preferences(Some(&twice), "en-US", "America/New_York").unwrap();
+            assert_eq!(once, twice, "second application must be byte-identical");
+            assert_eq!(twice, thrice, "third application must be byte-identical");
+        }
+    }
+
+    /// Wire 上 additional_system_instructions 恒带 user-preferences 块
+    /// (真客户端恒发;缺块是指纹)。
+    #[test]
+    fn chat_request_carries_user_preferences_block() {
+        let mut canonical = crate::core::request::CanonicalRequest::new(
+            crate::core::protocol::Protocol::ChatCompletions,
+            "m",
+        );
+        canonical.messages = vec![Message::text(Role::User, "hi")];
+        canonical.system = Some("Be brief".into());
+        let request = build_chat_request(&canonical, "openai", "test", &test_region_en(), false);
+        let additional = request.additional_system_instructions.unwrap();
+        assert!(additional.contains("- Locale: en-US"));
+        assert!(additional.contains("- Timezone: Europe/Berlin"));
+        assert!(additional.contains("Be brief"));
+    }
+
+    /// Web remote 工具默认注入(2026-11-25 抓包:订阅模型恒带 web_search +
+    /// search_images);与客户端同名工具去重;顺序在 local 工具之后。
+    #[test]
+    fn web_remote_tools_injected_by_default() {
+        let mut canonical = crate::core::request::CanonicalRequest::new(
+            crate::core::protocol::Protocol::ChatCompletions,
+            "m",
+        );
+        canonical.messages = vec![Message::text(Role::User, "hi")];
+        let request = build_chat_request(&canonical, "openai", "test", &test_region(), false);
+        assert_eq!(
+            serde_json::to_value(&request.tools).unwrap(),
+            serde_json::json!([
+                {"type": "remote_tool", "name": "web_search"},
+                {"type": "remote_tool", "name": "search_images"}
+            ])
+        );
+
+        // 客户端带了 web_search(任意形态) → 只补 search_images。
+        canonical.tools = vec![crate::core::tools::ToolDef::Local {
+            name: "web_search".into(),
+            description: None,
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+        }];
+        let request = build_chat_request(&canonical, "openai", "test", &test_region(), false);
+        assert_eq!(
+            serde_json::to_value(&request.tools).unwrap(),
+            serde_json::json!([
+                {"type": "local_tool", "function": {"name": "web_search", "description": serde_json::Value::Null, "parameters": {"type":"object","properties":{}}}},
+                {"type": "remote_tool", "name": "search_images"}
+            ])
         );
     }
 

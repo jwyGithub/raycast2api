@@ -29,6 +29,8 @@ pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
     pub settings: Arc<Settings>,
+    /// 出口地区解析器:请求体的 locale / `<user-preferences>` 来源。
+    pub regions: Arc<crate::geo::EgressResolver>,
     /// Redis 句柄(会话撤销使用);compact 缓存持有它的另一份克隆。
     pub redis: Option<RedisKv>,
     /// 账号调度 + 上游传输(`dispatcher.client` 是纯传输层)。
@@ -71,6 +73,8 @@ pub struct AppDeps {
     pub statistics: Arc<crate::statistics::store::StatisticsStore>,
     /// 与上面各 store 共用的 SQLite 连接,用于创建别名与 API Key store。
     pub db: crate::storage::db::Db,
+    /// 出口地区解析器(请求体 locale/user-preferences 的来源);main 构造。
+    pub regions: Arc<crate::geo::EgressResolver>,
 }
 
 impl AppState {
@@ -82,6 +86,7 @@ impl AppState {
             log,
             statistics,
             db,
+            regions,
         } = deps;
         let proxies = Arc::new(crate::proxies::store::ProxyStore::new(db.clone())?);
         let mut client = client;
@@ -91,8 +96,11 @@ impl AppState {
         Ok(Self {
             statistics,
             settings,
+            regions: regions.clone(),
             redis: None,
-            dispatcher: AccountDispatcher::new(accounts.clone(), client).with_log(log.clone()),
+            dispatcher: AccountDispatcher::new(accounts.clone(), client)
+                .with_log(log.clone())
+                .with_regions(regions),
             health: BackendHealth::default(),
             inference_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             accounts,
@@ -114,6 +122,12 @@ impl AppState {
         self.compact = std::mem::take(&mut self.compact).with_redis(redis.clone());
         self.redis = redis;
         self
+    }
+
+    /// 本机地理身份:locale / `<user-preferences>` 在选号前的占位来源。
+    /// dispatcher 选号后会按账号出口探测并幂等改写([`crate::raycast::builder::apply_region`])。
+    pub(crate) fn machine_identity(&self) -> crate::geo::Region {
+        self.regions.machine_identity()
     }
 
     fn models_redis_key(&self) -> Option<(&RedisKv, String)> {
@@ -248,6 +262,14 @@ impl AppState {
 }
 
 #[cfg(test)]
+pub fn test_regions() -> Arc<crate::geo::EgressResolver> {
+    Arc::new(crate::geo::EgressResolver::new(
+        reqwest::Client::new(),
+        crate::geo::machine_region(),
+    ))
+}
+
+#[cfg(test)]
 pub(crate) fn compact_test_state() -> SharedState {
     let db = crate::storage::db::Db::open(":memory:").unwrap();
     let accounts = Arc::new(AccountStore::new(db.clone()));
@@ -271,6 +293,7 @@ pub(crate) fn compact_test_state() -> SharedState {
         log,
         statistics,
         db,
+        regions: test_regions(),
     })
     .unwrap();
     state.models_cache = RwLock::new(Some(ModelsCache {

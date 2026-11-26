@@ -165,6 +165,7 @@ async fn costs_settle_before_terminal_delta_and_survive_response_peeking() {
         &CanonicalRequest::new(Protocol::Responses, "m"),
         "openai",
         "m",
+        &crate::geo::test_region(),
         false,
     );
     let events = state
@@ -203,6 +204,7 @@ async fn cancellation_records_unknown_usage_before_and_during_stream_polling() {
             &CanonicalRequest::new(Protocol::Responses, "m"),
             "openai",
             "m",
+            &crate::geo::test_region(),
             false,
         );
         let mut events = Box::pin(state.dispatcher.events(
@@ -245,6 +247,7 @@ async fn successful_finish_without_usage_remains_null_and_partial_usage_survives
             &CanonicalRequest::new(Protocol::Responses, "m"),
             "openai",
             "m",
+            &crate::geo::test_region(),
             false,
         );
         let mut events = Box::pin(state.dispatcher.events(
